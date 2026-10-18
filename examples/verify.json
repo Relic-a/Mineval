@@ -1,0 +1,10 @@
+{
+  "image": "your-preloaded-preparation-image",
+  "network": "bridge",
+  "workdir": "/workspace",
+  "limits": {"cpus": 2, "memory_mb": 1024, "pids": 256, "timeout_seconds": 600},
+  "commands": [
+    {"name": "setup", "kind": "setup", "argv": ["python", "-m", "venv", ".venv"], "timeout_seconds": 60},
+    {"name": "tests", "kind": "tests", "argv": [".venv/bin/python", "-m", "unittest", "discover"], "timeout_seconds": 120}
+  ]
+}
