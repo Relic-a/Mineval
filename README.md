@@ -23,6 +23,38 @@ Use a trusted image without embedded credentials. Container UID 0 maps to the
 unprivileged daemon owner, permitting access to the managed bind mounts.
 See Docker's [rootless resource requirements](https://docs.docker.com/engine/security/rootless/tips/#limiting-resources).
 
+## Local task registry and independent operations
+
+```sh
+mineval --data mineval-data task add candidate.json
+mineval --data mineval-data task list
+mineval --data mineval-data task show external-task-001
+mineval --data mineval-data task revision external-task-001 VERSION
+mineval --data mineval-data suite create suite.json
+mineval --data mineval-data suite show baseline-v1
+```
+
+`task add` uses the existing import path (`import` remains supported). Task IDs are
+caller-supplied and persistent; duplicates fail. Inspection returns readable JSON.
+Prepared revisions use the existing immutable `versions/<version>` artifacts created
+by `finalize`; revision inspection checks their integrity receipts. `prepare` still
+requires an explicit executable and does not select or call a model automatically.
+
+Use [suite.json](examples/suite.json) for an explicit ordered list of task/version
+pairs. Suite creation checks each prepared revision and pins its snapshot and artifact
+manifest hashes. There is no implicit latest version or live pool query. A suite ID
+cannot be overwritten; publish a new ID to change membership. Adding tasks or preparing
+new versions leaves existing suites unchanged. Suite inspection checks the definition's
+receipt; it does not revalidate the referenced task artifacts or current eligibility.
+
+`mineval bench run [TARGET]` and `mineval evaluate [RUN_ID]` are reserved independent
+operations and exit 2 with a clear not-implemented error, without creating records or
+contacting Docker. The existing `run` command is only a generic sandbox utility.
+Task-local `runs/` and `evaluations/` directories reserve record namespaces; no benchmark
+execution, evaluation, or adapter protocol is implemented in this phase. Existing data
+stores remain readable without a migration. See [decisions](docs/mineval-decisions.md)
+for the intended boundaries and deferred choices.
+
 ## Import an externally selected task
 
 Edit [candidate.json](examples/candidate.json), then:

@@ -31,6 +31,8 @@ DATA/
     source-hashes.json             imported private material hashes
     artifact-hashes.json           hashes of immutable registration records
     status.json                    mutable draft/frozen/rejected state
+    runs/                          reserved for later benchmark records (empty)
+    evaluations/                   reserved for later evaluation records (empty)
     diagnostics/<id>.json          diagnostic report, with separate hash receipt
     verify-latest.json             latest-report convenience copy
     rejections/<id>.json           explicit rejection reason, with hash receipt
@@ -52,7 +54,19 @@ DATA/
         extraction-manifest.json
         verification/<commit>/...
         artifact-hashes.json
+  suites/<suite-id>/
+    suite.json                     schema version, ordered pinned task/version identities and hashes
+    artifact-hashes.json           integrity receipt for the immutable definition
 ```
+
+Task IDs name persistent registrations; prepared revision IDs are the existing version
+IDs scoped to a task. A suite pins one explicit revision per task and preserves member
+order. Creating a suite validates the full prepared artifact inventory, then publishes
+the definition atomically under a suite lock. Files are read-only; IDs cannot be reused.
+New tasks, new versions, and later rejection do not rewrite a suite. Rejected tasks
+remain inspectable but cannot be added to new suites. Existing stores without the
+reserved record directories need no migration; future record writers can create them.
+Run/evaluation record formats and lifecycle transitions are deliberately not defined yet.
 
 Exact layout is an implementation detail after registration, not a requirement on
 an external producer. The host store is mode 0700. Cleanup receives only its draft,

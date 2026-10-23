@@ -103,6 +103,95 @@ class Store:
     def draft(self, task_id):
         return self.root / 'drafts' / identifier(task_id)
 
+    def list_tasks(self):
+        """The task pool grows independently of any published suite."""
+        pool = self.root / 'tasks'
+        if not pool.exists():
+            return []
+        result = []
+        for task in sorted(pool.iterdir()):
+            with lock(self.root / 'locks' / (identifier(task.name) + '.lock')):
+                metadata = read_json(task / 'metadata.json')
+                result.append({key: metadata[key] for key in ('task_id', 'repository', 'task_summary')} |
+                              {'state': read_json(task / 'status.json')})
+        return result
+
+    def inspect_task(self, task_id):
+        # Rejected tasks remain inspectable; operation() intentionally blocks mutation.
+        task = self.task(task_id)
+        with lock(self.root / 'locks' / (identifier(task_id) + '.lock')):
+            if not task.is_dir():
+                raise ValueError('Task is not registered')
+            return {'metadata': read_json(task / 'metadata.json'),
+                    'state': read_json(task / 'status.json'),
+                    'prepared_revisions': sorted(p.name for p in (task / 'versions').iterdir())
+                    if (task / 'versions').exists() else [],
+                    'runs': sorted(p.name for p in (task / 'runs').glob('*.json')),
+                    'evaluations': sorted(p.name for p in (task / 'evaluations').glob('*.json'))}
+
+    def inspect_revision(self, task_id, version):
+        with self.operation(task_id):
+            return self._inspect_revision(task_id, version)
+
+    def _inspect_revision(self, task_id, version):
+        frozen = self.task(task_id) / 'versions' / identifier(version)
+        if not frozen.is_dir():
+            raise ValueError('Prepared revision does not exist')
+        actual = inventory(frozen)
+        actual.pop('artifact-hashes.json', None)
+        if actual != read_json(frozen / 'artifact-hashes.json'):
+            raise ValueError('Prepared revision artifact hash mismatch')
+        sha = digest(frozen / 'snapshot.tar.gz')
+        if sha != (frozen / 'snapshot.sha256').read_text().strip():
+            raise ValueError('Snapshot hash mismatch')
+        return {'task_id': task_id, 'version': version, 'snapshot_sha256': sha,
+                'artifact_manifest_sha256': digest(frozen / 'artifact-hashes.json')}
+
+    def create_suite(self, definition):
+        """Publish an explicit, ordered membership; never resolve a mutable 'latest'."""
+        if not isinstance(definition, dict) or set(definition) - {'suite_id', 'description', 'members'}:
+            raise ValueError('Suite requires suite_id, members and optional description')
+        suite_id = identifier(definition['suite_id'])
+        members = definition.get('members')
+        if not isinstance(members, list) or not members:
+            raise ValueError('Suite members must be a nonempty list of task_id/version pairs')
+        if 'description' in definition and not isinstance(definition['description'], str):
+            raise ValueError('Suite description must be a string')
+        with lock(self.root / 'locks' / 'suites' / (suite_id + '.lock')):
+            target = self.root / 'suites' / suite_id
+            if target.exists():
+                raise ValueError('Suite already exists; publish a new suite ID')
+            pinned, seen = [], set()
+            for member in members:
+                if not isinstance(member, dict) or set(member) != {'task_id', 'version'}:
+                    raise ValueError('Each suite member requires exactly task_id and version')
+                task_id = identifier(member['task_id'])
+                if task_id in seen:
+                    raise ValueError('Duplicate task in suite')
+                seen.add(task_id)
+                pinned.append(self.inspect_revision(task_id, member['version']))
+            record = {'schema_version': 1, 'suite_id': suite_id,
+                      'description': definition.get('description', ''), 'members': pinned}
+            with tempfile.TemporaryDirectory(dir=self.root) as temp:
+                staged = Path(temp) / 'suite'
+                write_json(staged / 'suite.json', record)
+                write_json(staged / 'artifact-hashes.json', inventory(staged))
+                for path in staged.iterdir():
+                    path.chmod(0o444)
+                target.parent.mkdir(exist_ok=True)
+                os.rename(staged, target)
+            return record
+
+    def inspect_suite(self, suite_id):
+        target = self.root / 'suites' / identifier(suite_id)
+        if not target.is_dir():
+            raise ValueError('Suite does not exist')
+        actual = inventory(target)
+        actual.pop('artifact-hashes.json', None)
+        if actual != read_json(target / 'artifact-hashes.json'):
+            raise ValueError('Suite artifact hash mismatch')
+        return read_json(target / 'suite.json')
+
     @contextmanager
     def operation(self, task_id):
         with lock(self.root / 'locks' / (identifier(task_id) + '.lock')):
@@ -162,6 +251,8 @@ class Store:
                 write_json(task / 'source-hashes.json', source_inventory)
                 write_json(task / 'base-inventory.json', base_inventory)
                 write_json(task / 'status.json', {'status': 'draft'})
+                for directory in ('runs', 'evaluations'):
+                    (task / directory).mkdir()
                 copy_tree(private / 'base', draft / 'workspace')
                 (draft / 'control').mkdir()
                 write_json(draft / 'control' / 'task.json', {
@@ -256,7 +347,7 @@ class Store:
 
     def _materialize(self, task_id, version, destination):
         destination = Path(destination).resolve()
-        for reserved in ('tasks', 'drafts', 'locks'):
+        for reserved in ('tasks', 'drafts', 'locks', 'suites'):
             protected = (self.root / reserved).resolve()
             if destination == protected or protected in destination.parents:
                 raise ValueError('Workspace destination must be outside protected preparation artifacts')

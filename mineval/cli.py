@@ -28,6 +28,22 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("command", nargs=argparse.REMAINDER)
     intake = commands.add_parser("import", help="register an externally selected candidate JSON")
     intake.add_argument("candidate")
+    task = commands.add_parser("task", help="grow and inspect the local task pool")
+    tasks = task.add_subparsers(dest="task_action", required=True)
+    tasks.add_parser("add", help="register candidate JSON (alias of import)").add_argument("candidate")
+    tasks.add_parser("list", help="list registered tasks")
+    tasks.add_parser("show", help="inspect task metadata, state and record IDs").add_argument("task_id")
+    revision = tasks.add_parser("revision", help="check and inspect an immutable prepared version")
+    revision.add_argument("task_id")
+    revision.add_argument("version")
+    suite = commands.add_parser("suite", help="immutable suites of explicit prepared versions")
+    suites = suite.add_subparsers(dest="suite_action", required=True)
+    suites.add_parser("create", help="publish a suite definition JSON").add_argument("definition")
+    suites.add_parser("show", help="inspect a published suite").add_argument("suite_id")
+    bench = commands.add_parser("bench", help="benchmark operations (not implemented yet)")
+    benches = bench.add_subparsers(dest="bench_action", required=True)
+    benches.add_parser("run", help="reserved; not implemented yet").add_argument("target", nargs="?")
+    commands.add_parser("evaluate", help="reserved; not implemented yet").add_argument("run_id", nargs="?")
     verify = commands.add_parser("verify", help="fresh diagnostic via task-scoped host broker or host task ID")
     verify.add_argument("mode", nargs="?", choices=["report"])
     verify.add_argument("--task", help="host-only registered task ID; omit inside preparation sandbox")
@@ -49,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
     materialize.add_argument("version")
     materialize.add_argument("destination")
     args = parser.parse_args(argv)
+    if args.action in ("bench", "evaluate"):
+        operation = 'bench run' if args.action == 'bench' else 'evaluate'
+        print(f"mineval: {operation} is not implemented in this phase; no records were created", file=sys.stderr)
+        return 2
     sandbox = DockerSandbox(context=args.context)
     try:
         if args.action not in ("doctor", "run"):
@@ -62,11 +82,25 @@ def main(argv: list[str] | None = None) -> int:
                 store = Store(args.data)
                 if args.action == "import":
                     result = store.register(read_json(args.candidate))
+                elif args.action == "task":
+                    if args.task_action == "add":
+                        result = store.register(read_json(args.candidate))
+                    elif args.task_action == "list":
+                        result = store.list_tasks()
+                    elif args.task_action == "show":
+                        result = store.inspect_task(args.task_id)
+                    else:
+                        result = store.inspect_revision(args.task_id, args.version)
+                elif args.action == "suite":
+                    result = (store.create_suite(read_json(args.definition)) if args.suite_action == "create"
+                              else store.inspect_suite(args.suite_id))
                 elif args.action == "verify":
                     result = (read_json(store.task(args.task) / 'verify-latest.json') if args.mode == 'report'
                               else diagnose(store, args.task, sandbox=sandbox))
                 elif args.action in ("prepare", "extraction-session"):
                     command = args.command[1:] if args.command[:1] == ['--'] else args.command
+                    if not command:
+                        raise ValueError('Supply explicit executable argv after --; automatic agent preparation is not implemented')
                     result = asdict(session(store, args.task_id, command, context=args.context,
                                             stage='extraction' if args.action == 'extraction-session' else 'cleanup'))
                 elif args.action == "finalize":
@@ -77,10 +111,12 @@ def main(argv: list[str] | None = None) -> int:
                     result = store.extract(args.task_id, read_json(args.selection))
                 elif args.action == "workspace":
                     result = store.materialize(args.task_id, args.version, args.destination)
-            print(json.dumps(result))
+            print(json.dumps(result, indent=2 if args.action in ('task', 'suite') else None))
             # Diagnostic failures are reports, never automatic candidate rejection.
             if args.action == 'verify':
                 return 125 if result.get('error') or result.get('status') == 'environment_error' else 1 if result.get('status') == 'checks_failed' else 0
+            if args.action in ('task', 'suite'):
+                return 0
             return (124 if result.get('timed_out') else result.get('exit_code', 0)) or 0
         if args.action == "doctor":
             info = sandbox.check()

@@ -1,0 +1,10 @@
+{
+  "suite_id": "baseline-v1",
+  "description": "An explicit frozen comparison set",
+  "members": [
+    {
+      "task_id": "external-task-001",
+      "version": "REPLACE_WITH_FINALIZE_VERSION"
+    }
+  ]
+}
