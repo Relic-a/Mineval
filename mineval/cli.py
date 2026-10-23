@@ -36,10 +36,15 @@ def main(argv: list[str] | None = None) -> int:
     revision = tasks.add_parser("revision", help="check and inspect an immutable prepared version")
     revision.add_argument("task_id")
     revision.add_argument("version")
+    for name, field in (("run", "run_id"), ("evaluation", "evaluation_id")):
+        record = tasks.add_parser(name, help=f"inspect a reserved {name} identity")
+        record.add_argument("task_id")
+        record.add_argument(field)
     suite = commands.add_parser("suite", help="immutable suites of explicit prepared versions")
     suites = suite.add_subparsers(dest="suite_action", required=True)
     suites.add_parser("create", help="publish a suite definition JSON").add_argument("definition")
     suites.add_parser("show", help="inspect a published suite").add_argument("suite_id")
+    suites.add_parser("list", help="list published suites")
     bench = commands.add_parser("bench", help="benchmark operations (not implemented yet)")
     benches = bench.add_subparsers(dest="bench_action", required=True)
     benches.add_parser("run", help="reserved; not implemented yet").add_argument("target", nargs="?")
@@ -89,11 +94,19 @@ def main(argv: list[str] | None = None) -> int:
                         result = store.list_tasks()
                     elif args.task_action == "show":
                         result = store.inspect_task(args.task_id)
+                    elif args.task_action == "run":
+                        result = store.inspect_run(args.task_id, args.run_id)
+                    elif args.task_action == "evaluation":
+                        result = store.inspect_evaluation(args.task_id, args.evaluation_id)
                     else:
                         result = store.inspect_revision(args.task_id, args.version)
                 elif args.action == "suite":
-                    result = (store.create_suite(read_json(args.definition)) if args.suite_action == "create"
-                              else store.inspect_suite(args.suite_id))
+                    if args.suite_action == "create":
+                        result = store.create_suite(read_json(args.definition))
+                    elif args.suite_action == "list":
+                        result = store.list_suites()
+                    else:
+                        result = store.inspect_suite(args.suite_id)
                 elif args.action == "verify":
                     result = (read_json(store.task(args.task) / 'verify-latest.json') if args.mode == 'report'
                               else diagnose(store, args.task, sandbox=sandbox))

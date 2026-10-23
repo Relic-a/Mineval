@@ -130,8 +130,62 @@ class Store:
                     'evaluations': sorted(p.name for p in (task / 'evaluations').glob('*.json'))}
 
     def inspect_revision(self, task_id, version):
-        with self.operation(task_id):
+        with self.operation(task_id, allow_rejected=True):
             return self._inspect_revision(task_id, version)
+
+    def list_suites(self):
+        return [self.inspect_suite(p.name) for p in sorted((self.root / 'suites').glob('*'))]
+
+    def reserve_run(self, task_id, run_id, version, *, model, harness):
+        """Persist identity only. This neither invokes a harness nor claims a result."""
+        for label, identity in (('model', model), ('harness', harness)):
+            if (not isinstance(identity, dict) or set(identity) != {'name', 'version', 'configuration'}
+                    or not isinstance(identity['name'], str) or not identity['name'].strip()
+                    or not isinstance(identity['version'], str) or not identity['version'].strip()
+                    or not isinstance(identity['configuration'], dict)):
+                raise ValueError(f'{label} requires name, version and configuration')
+        with self.operation(task_id):
+            return self._reserve_record(task_id, 'runs', run_id, {
+                'schema_version': 1, 'task_id': task_id, 'run_id': identifier(run_id),
+                'prepared_revision': self._inspect_revision(task_id, version),
+                'model': model, 'harness': harness, 'status': 'reserved'})
+
+    def reserve_evaluation(self, task_id, evaluation_id, run_id):
+        """Pin an existing run identity; evaluation execution remains unimplemented."""
+        with self.operation(task_id):
+            self._inspect_record(task_id, 'runs', run_id)
+            return self._reserve_record(task_id, 'evaluations', evaluation_id, {
+                'schema_version': 1, 'task_id': task_id, 'evaluation_id': identifier(evaluation_id),
+                'run_id': identifier(run_id),
+                'run_sha256': digest(self.task(task_id) / 'runs' / (run_id + '.json')),
+                'status': 'reserved'})
+
+    def _reserve_record(self, task_id, namespace, record_id, record):
+        path = self.task(task_id) / namespace / (identifier(record_id) + '.json')
+        receipt = path.with_suffix('.sha256')
+        if path.exists() or receipt.exists():
+            raise ValueError('Record ID already exists; reserve a new ID')
+        write_json(path, record)
+        write_json(receipt, {'sha256': digest(path)})
+        path.chmod(0o444)
+        receipt.chmod(0o444)
+        return read_json(path)
+
+    def _inspect_record(self, task_id, namespace, record_id):
+        path = self.task(task_id) / namespace / (identifier(record_id) + '.json')
+        if not path.is_file():
+            raise ValueError('Record does not exist')
+        if digest(path) != read_json(path.with_suffix('.sha256'))['sha256']:
+            raise ValueError('Record artifact hash mismatch')
+        return read_json(path)
+
+    def inspect_run(self, task_id, run_id):
+        with self.operation(task_id, allow_rejected=True):
+            return self._inspect_record(task_id, 'runs', run_id)
+
+    def inspect_evaluation(self, task_id, evaluation_id):
+        with self.operation(task_id, allow_rejected=True):
+            return self._inspect_record(task_id, 'evaluations', evaluation_id)
 
     def _inspect_revision(self, task_id, version):
         frozen = self.task(task_id) / 'versions' / identifier(version)
@@ -169,7 +223,8 @@ class Store:
                 if task_id in seen:
                     raise ValueError('Duplicate task in suite')
                 seen.add(task_id)
-                pinned.append(self.inspect_revision(task_id, member['version']))
+                with self.operation(task_id):
+                    pinned.append(self._inspect_revision(task_id, member['version']))
             record = {'schema_version': 1, 'suite_id': suite_id,
                       'description': definition.get('description', ''), 'members': pinned}
             with tempfile.TemporaryDirectory(dir=self.root) as temp:
@@ -193,11 +248,11 @@ class Store:
         return read_json(target / 'suite.json')
 
     @contextmanager
-    def operation(self, task_id):
+    def operation(self, task_id, *, allow_rejected=False):
         with lock(self.root / 'locks' / (identifier(task_id) + '.lock')):
             if not self.task(task_id).is_dir():
                 raise ValueError('Task is not registered')
-            if read_json(self.task(task_id) / 'status.json')['status'] == 'rejected':
+            if not allow_rejected and read_json(self.task(task_id) / 'status.json')['status'] == 'rejected':
                 raise ValueError('Task has been rejected')
             yield
 
@@ -307,6 +362,9 @@ class Store:
             version = uuid4().hex
             staged = Path(temp) / version
             staged.mkdir()
+            write_json(staged / 'workspace-format.json', {
+                'schema_version': 1, 'tree': {'format': 'tar', 'path': 'snapshot.tar.gz'},
+                'git_history': {'format': 'none'}})
             pack(clean, staged / 'snapshot.tar.gz')
             sha = digest(staged / 'snapshot.tar.gz')
             (staged / 'snapshot.sha256').write_text(sha + '\n')
@@ -353,6 +411,14 @@ class Store:
                 raise ValueError('Workspace destination must be outside protected preparation artifacts')
         version = identifier(version)
         frozen = self.task(task_id) / 'versions' / version
+        self._inspect_revision(task_id, version)
+        # Legacy revisions have the same tree-only format without a descriptor.
+        # Future history formats must be explicitly supported, never silently dropped.
+        descriptor = frozen / 'workspace-format.json'
+        if descriptor.exists() and read_json(descriptor) != {
+                'schema_version': 1, 'tree': {'format': 'tar', 'path': 'snapshot.tar.gz'},
+                'git_history': {'format': 'none'}}:
+            raise ValueError('Unsupported workspace format; upgrade Mineval to materialize this revision')
         if digest(frozen / 'snapshot.tar.gz') != (frozen / 'snapshot.sha256').read_text().strip():
             raise ValueError('Snapshot hash mismatch')
         unpack(frozen / 'snapshot.tar.gz', destination)

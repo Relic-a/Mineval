@@ -91,7 +91,8 @@ class RegistryTests(HistoryFixture):
         write_json(definition, {'suite_id': 'cli-suite', 'members': [{'task_id': 'example', 'version': version}]})
         for command in (['task', 'add', str(candidate)], ['task', 'list'],
                         ['task', 'show', 'cli-task'], ['task', 'revision', 'example', version],
-                        ['suite', 'create', str(definition)], ['suite', 'show', 'cli-suite']):
+                        ['suite', 'create', str(definition)], ['suite', 'show', 'cli-suite'],
+                        ['suite', 'list']):
             result = subprocess.run([sys.executable, '-m', 'mineval', '--data', str(self.store.root), *command],
                                     capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -115,3 +116,78 @@ class RegistryTests(HistoryFixture):
             code = main(['--data', str(self.store.root), 'prepare', 'example'])
         self.assertEqual(code, 125)
         self.assertIn('explicit executable argv', err.getvalue())
+
+    def test_reserved_run_and_evaluation_identities_reload_without_execution(self):
+        version = self.store.finalize('example', self.review)['version']
+        identity = {'name': 'fixture', 'version': 'test-v1', 'configuration': {'mode': 'offline'}}
+        run = self.store.reserve_run('example', 'run-1', version, model=identity, harness=identity)
+        evaluation = self.store.reserve_evaluation('example', 'eval-1', 'run-1')
+        reopened = Store(self.store.root)
+        self.assertEqual(reopened.inspect_run('example', 'run-1'), run)
+        self.assertEqual(reopened.inspect_evaluation('example', 'eval-1'), evaluation)
+        self.assertEqual(run['status'], 'reserved')
+        self.assertEqual(run['prepared_revision'], reopened.inspect_revision('example', version))
+        self.assertEqual(evaluation['run_sha256'], digest(reopened.task('example') / 'runs/run-1.json'))
+        self.assertEqual(reopened.inspect_task('example')['runs'], ['run-1.json'])
+        self.assertEqual(reopened.inspect_task('example')['evaluations'], ['eval-1.json'])
+        self.store.finalize('example', self.review)
+        self.assertEqual(reopened.inspect_run('example', 'run-1'), run)
+        for action in (lambda: reopened.reserve_run('example', 'run-1', version, model=identity, harness=identity),
+                       lambda: reopened.reserve_evaluation('example', 'eval-1', 'run-1')):
+            with self.assertRaisesRegex(ValueError, 'already exists'):
+                action()
+        for command, record_id, expected in (('run', 'run-1', run), ('evaluation', 'eval-1', evaluation)):
+            result = subprocess.run([sys.executable, '-m', 'mineval', '--data', str(self.store.root),
+                                     'task', command, 'example', record_id], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), expected)
+        self.store.reject('example', 'Retired after inspection')
+        self.assertEqual(reopened.inspect_revision('example', version), run['prepared_revision'])
+        self.assertEqual(reopened.inspect_run('example', 'run-1'), run)
+        self.assertEqual(reopened.inspect_evaluation('example', 'eval-1'), evaluation)
+
+    def test_record_validation_and_tampering(self):
+        version = self.store.finalize('example', self.review)['version']
+        identity = {'name': 'fixture', 'version': 'v1', 'configuration': {}}
+        for bad in ({}, identity | {'name': ''}, identity | {'configuration': 'text'}):
+            with self.assertRaises(ValueError):
+                self.store.reserve_run('example', 'bad', version, model=bad, harness=identity)
+        self.assertFalse((self.store.task('example') / 'runs/bad.json').exists())
+        with self.assertRaisesRegex(ValueError, 'does not exist'):
+            self.store.reserve_evaluation('example', 'bad', 'missing')
+        self.assertFalse((self.store.task('example') / 'evaluations/bad.json').exists())
+        self.store.reserve_run('example', 'run-1', version, model=identity, harness=identity)
+        self.store.reserve_evaluation('example', 'eval-1', 'run-1')
+        for namespace, record_id, inspect in (('runs', 'run-1', self.store.inspect_run),
+                                              ('evaluations', 'eval-1', self.store.inspect_evaluation)):
+            path = self.store.task('example') / namespace / (record_id + '.json')
+            self.assertEqual(path.stat().st_mode & 0o222, 0)
+            path.chmod(0o644)
+            write_json(path, {'changed': True})
+            with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+                inspect('example', record_id)
+        with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+            self.store.reserve_evaluation('example', 'eval-2', 'run-1')
+
+    def test_legacy_revision_and_explicit_workspace_format(self):
+        version = self.store.finalize('example', self.review)['version']
+        frozen = self.store.task('example') / 'versions' / version
+        descriptor = frozen / 'workspace-format.json'
+        self.assertEqual(read_json(descriptor)['git_history']['format'], 'none')
+        # Simulate a pre-descriptor version, retaining its original receipt shape.
+        from mineval.artifacts import inventory
+        descriptor.unlink()
+        receipt = frozen / 'artifact-hashes.json'
+        receipt.chmod(0o644)
+        contents = inventory(frozen)
+        contents.pop('artifact-hashes.json')
+        write_json(receipt, contents)
+        self.store.materialize('example', version, self.root / 'legacy-workspace')
+        self.assertTrue((self.root / 'legacy-workspace/app.py').is_file())
+        write_json(descriptor, {'schema_version': 2, 'git_history': {'format': 'future-bundle'}})
+        contents = inventory(frozen)
+        contents.pop('artifact-hashes.json')
+        write_json(receipt, contents)
+        with self.assertRaisesRegex(ValueError, 'Unsupported workspace format'):
+            self.store.materialize('example', version, self.root / 'unsupported')
+        self.assertFalse((self.root / 'unsupported').exists())

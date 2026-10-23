@@ -32,6 +32,7 @@ mineval --data mineval-data task show external-task-001
 mineval --data mineval-data task revision external-task-001 VERSION
 mineval --data mineval-data suite create suite.json
 mineval --data mineval-data suite show baseline-v1
+mineval --data mineval-data suite list
 ```
 
 `task add` uses the existing import path (`import` remains supported). Task IDs are
@@ -50,8 +51,11 @@ receipt; it does not revalidate the referenced task artifacts or current eligibi
 `mineval bench run [TARGET]` and `mineval evaluate [RUN_ID]` are reserved independent
 operations and exit 2 with a clear not-implemented error, without creating records or
 contacting Docker. The existing `run` command is only a generic sandbox utility.
-Task-local `runs/` and `evaluations/` directories reserve record namespaces; no benchmark
-execution, evaluation, or adapter protocol is implemented in this phase. Existing data
+Task-local `runs/` and `evaluations/` hold optional immutable identity reservations through
+the Store API, with exact revision and model/harness pins; no benchmark execution,
+evaluation, or adapter protocol is implemented in this phase. Inspect them with
+`task run TASK_ID RUN_ID` and `task evaluation TASK_ID EVALUATION_ID`; `task show` lists
+their IDs. Existing data
 stores remain readable without a migration. See [decisions](docs/mineval-decisions.md)
 for the intended boundaries and deferred choices.
 
@@ -82,7 +86,7 @@ Two source modes are supported:
   `source_attestation` explaining how the producer obtained this historical material.
   Raw historical identity is **producer-attested**, not independently Git-verified.
 
-Archives may be tar or tar.gz. Sources must have no `.git`, links, special files,
+Archives may be tar or tar.gz. The current tree-only importer requires no `.git`, links, special files,
 or submodules; unsupported candidates fail explicitly. Each imported collection is
 limited to 512 MiB and 100,000 files, with at most 50 future commits. The original
 candidate and SHA-256 inventories are retained. Registration is atomic with respect
@@ -181,6 +185,10 @@ controls, provenance, future material, and extraction output remain outside it.
 Archive ownership/timestamps are normalized. Version files become read-only and are
 never overwritten through Mineval. Hash checks detect subsequent host tampering;
 this is application-level immutability, not protection from the owning OS user.
+New versions declare their tree/history format in `workspace-format.json`; legacy
+versions remain readable. Sanitized Git history through the base is deferred and must
+use new prepared versions rather than rewrite existing suites or run references. See
+the [storage format and migration boundary](docs/foundation.md).
 
 ## Extract future verification privately
 

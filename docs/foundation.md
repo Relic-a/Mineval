@@ -31,13 +31,16 @@ DATA/
     source-hashes.json             imported private material hashes
     artifact-hashes.json           hashes of immutable registration records
     status.json                    mutable draft/frozen/rejected state
-    runs/                          reserved for later benchmark records (empty)
-    evaluations/                   reserved for later evaluation records (empty)
+    runs/<run-id>.json             immutable reserved execution identity (API only)
+    runs/<run-id>.sha256            identity integrity receipt
+    evaluations/<evaluation-id>.json  immutable reserved evaluation identity (API only)
+    evaluations/<evaluation-id>.sha256  identity integrity receipt
     diagnostics/<id>.json          diagnostic report, with separate hash receipt
     verify-latest.json             latest-report convenience copy
     rejections/<id>.json           explicit rejection reason, with hash receipt
     versions/<version>/
       snapshot.tar.gz
+      workspace-format.json        explicit tree/history format (absent in legacy revisions)
       snapshot.sha256
       tree-hashes.json
       cleanup-changes.patch
@@ -66,7 +69,34 @@ the definition atomically under a suite lock. Files are read-only; IDs cannot be
 New tasks, new versions, and later rejection do not rewrite a suite. Rejected tasks
 remain inspectable but cannot be added to new suites. Existing stores without the
 reserved record directories need no migration; future record writers can create them.
-Run/evaluation record formats and lifecycle transitions are deliberately not defined yet.
+`Store.reserve_run(task_id, run_id, version, model=..., harness=...)` reserves a
+task-local ID with schema version 1, status `reserved`, an exact prepared-revision
+reference (including both hashes), and separate model/harness identities. Each identity
+requires `name`, `version` and a JSON-object `configuration`; this is the comparison
+identity, with no ranking policy. `Store.reserve_evaluation(task_id, evaluation_id,
+run_id)` reserves a task-local evaluation ID, pins the run ID and run JSON hash, and
+also reports `reserved`. Both records have read-only files and hash receipts; duplicate
+IDs fail. These minimal identity reservations extend the original namespace-only
+foundation. They do not claim execution, completion, failure, or a score. Later phases
+must attach execution/results without replacing identity records. No reservation CLI
+is provided: `bench run` and `evaluate` still fail without creating records.
+
+`task show` lists record filenames; `task run TASK RUN` and `task evaluation TASK EVAL`
+inspect their receipts and JSON. `suite list` lists validated suite definitions. Retired
+tasks, revisions and records remain inspectable; retirement still blocks new preparation,
+suite enrollment, reservations and workspace creation.
+
+New revisions declare `workspace-format.json` schema version 1 with
+`tree: {"format": "tar", "path": "snapshot.tar.gz"}` and
+`git_history: {"format": "none"}`. Missing descriptors mean the legacy tree-only format.
+Materialization validates the full artifact receipt and rejects unknown formats before
+creating a destination. The current `.git` prohibition is a constraint of this legacy
+tree codec, not the permanent workspace contract. The later history phase should publish
+new revisions with an explicit sanitized-history format (for example a separately hashed
+bundle), update its reader, and keep legacy readers for old revisions. Never mutate old
+archives, suite references or run pins to retrofit history; never mount the source repo.
+Safe retention through the base commit is required by the decision contract but is not
+implemented here.
 
 Exact layout is an implementation detail after registration, not a requirement on
 an external producer. The host store is mode 0700. Cleanup receives only its draft,
