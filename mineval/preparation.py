@@ -254,27 +254,30 @@ class Store:
                 raise ValueError('Task is not registered')
             if not allow_rejected and read_json(self.task(task_id) / 'status.json')['status'] == 'rejected':
                 raise ValueError('Task has been rejected')
+            if not allow_rejected and read_json(self.task(task_id) / 'status.json')['status'] == 'needs-review':
+                raise ValueError('Incomplete candidate needs review before preparation')
             yield
 
     def register(self, candidate):
+        from .intake import normalize
+        candidate, deferred = normalize(candidate)
         task_id = identifier(candidate['task_id'])
-        base = commit(candidate['base_commit'])
-        futures = list(dict.fromkeys(candidate.get('future_commits', []) + ([candidate['head_commit']] if candidate.get('head_commit') else [])))
-        if len(futures) > 50:
-            raise ValueError('At most 50 explicit future commits per candidate')
-        if not futures or not candidate.get('repository') or not candidate.get('task_summary'):
-            raise ValueError('repository, task_summary and future commit evidence are required')
-        for sha in futures:
-            commit(sha)
-            if sha == base:
-                raise ValueError('Future evidence must be after the base')
-        source = candidate['base_source']
+        base = candidate.get('base_commit')
+        futures = candidate['future_commits']
+        source = candidate.get('base_source')
         task, draft = self.task(task_id), self.draft(task_id)
         with lock(self.root / 'locks' / (task_id + '.lock')):
             if task.exists() or draft.exists():
                 raise ValueError('Task already registered')
             task.mkdir(parents=True, mode=0o700)
             try:
+                if deferred:
+                    state = 'rejected' if candidate.get('selection_status') == 'reject' else 'needs-review'
+                    write_json(task / 'metadata.json', candidate | {'grounding': 'not-imported'})
+                    write_json(task / 'status.json', {'status': state})
+                    write_json(task / 'artifact-hashes.json', {'metadata.json': {'sha256': digest(task / 'metadata.json')}})
+                    return {'task_id': task_id, 'status': state, 'intake': candidate['intake'],
+                            'grounding': 'not-imported'}
                 private = task / 'private'
                 private.mkdir(mode=0o700)
                 if source['type'] == 'git':
@@ -300,6 +303,9 @@ class Store:
                     grounding = 'producer-attested-raw-export'
                 else:
                     raise ValueError('Supported sources: git, tree, archive')
+                for evidence in candidate.get('future_evidence', []):
+                    if 'path' in evidence and not (private / 'future' / evidence['commit'] / evidence['path']).is_file():
+                        raise ValueError('Future evidence path does not exist at its source commit')
                 base_inventory = inventory(private / 'base')
                 source_inventory = inventory(private)
                 write_json(task / 'metadata.json', candidate | {'future_commits': futures, 'grounding': grounding})
@@ -321,7 +327,7 @@ class Store:
                 shutil.rmtree(task)
                 shutil.rmtree(draft, ignore_errors=True)
                 raise
-        return {'task_id': task_id, 'status': 'draft', 'grounding': grounding}
+        return {'task_id': task_id, 'status': 'draft', 'grounding': grounding, 'intake': candidate['intake']}
 
     @staticmethod
     def _import(source, target):

@@ -1,21 +1,9 @@
-# Phase N handoff — title
+# Phase N — implementation handoff
 
-## Scope and starting point
+- **Implemented:** What functionality exists, including paths/commands.
+- **Decisions made during this phase:** Only new low-level decisions; flag conflicts with `docs/mineval-decisions.md` instead of silently changing them.
+- **Checks performed:** Which targeted tests and real integrations were exercised; show actual outcomes. Explicitly mark Docker/Codex or other untested paths.
+- **Remaining limitations/blockers:** What does not work or needs a later phase.
+- **Inputs for next phase:** Stable artifacts, APIs/commands, storage paths and any key caveats.
 
-State the phase boundary, authoritative contract, and functionality already present.
-
-## Changes delivered
-
-List the missing work implemented, with source and command references.
-
-## Validation
-
-Give reproducible commands, results, skipped checks and any external execution.
-
-## Compatibility and limitations
-
-Describe persistent identities, migration behavior, and outstanding constraints.
-
-## Later phases
-
-Identify remaining work and integration boundaries without prescribing unsupported scope.
+Keep the handoff short, factual, and free of full agent transcripts or secrets.

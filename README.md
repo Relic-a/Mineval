@@ -36,7 +36,8 @@ mineval --data mineval-data suite list
 ```
 
 `task add` uses the existing import path (`import` remains supported). Task IDs are
-caller-supplied and persistent; duplicates fail. Inspection returns readable JSON.
+persistent: supply one or let intake assign one from repository identity and commit
+boundaries. Re-adding an ID fails. Inspection returns readable JSON.
 Prepared revisions use the existing immutable `versions/<version>` artifacts created
 by `finalize`; revision inspection checks their integrity receipts. `prepare` still
 requires an explicit executable and does not select or call a model automatically.
@@ -67,12 +68,44 @@ Edit [candidate.json](examples/candidate.json), then:
 mineval --data mineval-data import candidate.json
 ```
 
-Required fields: `task_id`, `repository` (identity), `task_summary`, full `base_commit`,
-and explicit `future_commits` and/or `head_commit`. PR references and candidate notes
-are retained when supplied; absent notes remain unknown. PR URLs alone cannot supply
-historical objects: ask the external producer for the corresponding commit SHAs.
-No crawler, selector, ranking agent, queue, or producer output directory is required.
-[MINEVAL_MOMENT_SELECTOR.md](MINEVAL_MOMENT_SELECTOR.md) is standalone external guidance.
+Ask a selection agent to read the portable
+[Moment Selector skill](skills/mineval-moment-selector/SKILL.md) in any Git project,
+for example: “Use Mineval and create ideal benchmark tasks from this project.” Copy
+the skill folder to another project or skill directory as needed. It preserves the
+detailed fixup-chain, root-cause, feasibility and evidence heuristics from the original
+[selector entry point](MINEVAL_MOMENT_SELECTOR.md). Discovery is external to Mineval.
+
+The agent writes ordinary candidate JSON, then runs `mineval --data /private/store
+task add /path/to/candidate.json`. It never arranges internal store directories.
+Required record fields are nonempty `repository` (local identity or URL) and an
+outcome-only `task_summary`. Accepted imports also need a local `base_source`, full
+`base_commit`, and `head_commit` (legacy `future_commits` is supported). Source paths
+are relative to the candidate JSON file, not the shell's working directory.
+
+Record `related_commits`, `related_prs`, `why_high_signal`, `future_evidence`,
+`execution` (runtime, likely commands, external requirements, cleanup risks),
+`verification_feasibility`, and `uncertainty`. Each evidence entry has a full `commit`,
+`path` and `proves`; use concrete `reproduction` instructions instead of `path` when
+no file exists. Intake captures related/evidence commits as well as head, checks base
+ancestry and evidence file existence, and preserves notes privately. It does not
+execute code or establish whether those tests are sufficient. Evidence may follow head.
+
+Use `selection_status: "defer"` and list unknowns rather than inventing missing facts.
+Deferred or missing-boundary records have `needs-review` state with no draft/source
+export; `selection_status: "reject"` creates a rejected record. Both remain inspectable.
+Malformed supplied fields and invalid accepted imports fail atomically. Correct a
+deferred record by adding a new explicitly identified candidate and noting the prior
+ID; no in-place resume is implemented. Legacy records missing detailed evidence notes
+still import as drafts, with `intake.status: "incomplete"` and explicit missing fields.
+Draft intake is never preparation approval. IDs do not deduplicate repository aliases.
+PR URLs alone cannot supply historical objects: provide local commits. No GitHub API,
+network, crawler or live model is needed.
+
+The deterministic [discovery fixture](tests/test_discovery.py) builds a single-request
+API, a batch feature, an empty-batch fix, and later regression tests. It proves the
+check fails before the fix and passes afterward, imports base/head/later evidence via
+`task add`, and checks that only base files enter the draft. Future trees and diffs
+remain private and survive removal of the source repository.
 
 Two source modes are supported:
 

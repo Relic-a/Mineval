@@ -7,6 +7,14 @@ cleanup process over a task-scoped Unix socket. `sandbox` owns rootless Docker
 lifecycle and does not know which agent or benchmark harness invokes commands.
 `artifacts` owns hashes, safe exports, archive handling, and filesystem locks.
 
+`intake` normalizes portable selector records, assigns missing task IDs and resolves
+CLI source paths relative to the handoff JSON. Metadata includes an explicit intake
+completeness report; legacy notes are not invented. Deferred/missing-boundary records
+store only metadata, state and a metadata receipt, with `needs-review` state and no
+draft. Rejected selector records likewise create no draft. Operational entry points
+block those records, while task list/show remain available. See the
+[portable skill](../skills/mineval-moment-selector/SKILL.md) for the producer contract.
+
 ```text
 external candidate -> import -> draft/workspace -> review + freeze -> version/snapshot.tar.gz
                        |              |                                     |

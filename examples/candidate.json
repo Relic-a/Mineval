@@ -1,9 +1,33 @@
 {
-  "task_id": "external-task-001",
   "repository": "https://github.com/owner/repo",
   "base_commit": "REPLACE_WITH_FULL_BASE_SHA",
   "head_commit": "REPLACE_WITH_FULL_FUTURE_SHA",
   "task_summary": "Describe the intended outcome without disclosing the solution.",
-  "base_source": {"type": "git", "path": "/absolute/path/to/local/repository"},
-  "related_prs": ["https://github.com/owner/repo/pull/123"]
+  "base_source": {
+    "type": "git",
+    "path": "/absolute/path/to/local/repository"
+  },
+  "related_prs": [
+    "https://github.com/owner/repo/pull/123"
+  ],
+  "related_commits": [],
+  "why_high_signal": "Explain the non-obvious engineering challenge and obligations from follow-up fixes.",
+  "future_evidence": [
+    {
+      "commit": "REPLACE_WITH_FULL_EVIDENCE_SHA",
+      "path": "tests/test_regression.py",
+      "proves": "Describe observable behavior this evidence establishes."
+    }
+  ],
+  "execution": {
+    "runtime": "Record the historical toolchain.",
+    "likely_commands": [
+      "Record the likely test command."
+    ],
+    "external_requirements": [],
+    "cleanup_risks": []
+  },
+  "verification_feasibility": "Explain why meaningful real or lightly mocked checks can assess independent solutions.",
+  "uncertainty": [],
+  "selection_status": "accept"
 }

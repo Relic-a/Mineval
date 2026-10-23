@@ -78,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action not in ("doctor", "run"):
             from .artifacts import read_json
+            from .intake import load_candidate
             from .preparation import Store
             from .service import request, session
             from .verification import diagnose
@@ -86,10 +87,10 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 store = Store(args.data)
                 if args.action == "import":
-                    result = store.register(read_json(args.candidate))
+                    result = store.register(load_candidate(args.candidate))
                 elif args.action == "task":
                     if args.task_action == "add":
-                        result = store.register(read_json(args.candidate))
+                        result = store.register(load_candidate(args.candidate))
                     elif args.task_action == "list":
                         result = store.list_tasks()
                     elif args.task_action == "show":
