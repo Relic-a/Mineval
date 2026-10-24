@@ -39,8 +39,13 @@ DATA/
     source-hashes.json             imported private material hashes
     artifact-hashes.json           hashes of immutable registration records
     status.json                    mutable draft/frozen/rejected state
-    runs/<run-id>.json             immutable reserved execution identity (API only)
+    runs/<run-id>.json             immutable launch identity (legacy reservations readable)
     runs/<run-id>.sha256            identity integrity receipt
+    run-outputs/<run-id>/          separately sealed benchmark result
+      terminal.json               status + identity hash; no task verdict
+      agent/result.json           small structured completion and operational receipt
+      agent/workspace.tar.gz      final tree, no agent Git or transcripts
+      artifact-hashes.json        covers all result bytes
     evaluations/<evaluation-id>.json  immutable reserved evaluation identity (API only)
     evaluations/<evaluation-id>.sha256  identity integrity receipt
     diagnostics/<id>.json          diagnostic report, with separate hash receipt
@@ -59,6 +64,7 @@ DATA/
       workspace-format.json        explicit tree/history format (absent in legacy revisions)
       snapshot.sha256
       tree-hashes.json
+      task-instructions.json      frozen outcome statement (new revisions)
       cleanup-changes.patch
       cleanup-report.json
       cleanup-attempt.json         matching ready-for-review cleanup attempt
@@ -94,14 +100,33 @@ reserved record directories need no migration; future record writers can create 
 `Store.reserve_run(task_id, run_id, version, model=..., harness=...)` reserves a
 task-local ID with schema version 1, status `reserved`, an exact prepared-revision
 reference (including both hashes), and separate model/harness identities. Each identity
-requires `name`, `version` and a JSON-object `configuration`; this is the comparison
-identity, with no ranking policy. `Store.reserve_evaluation(task_id, evaluation_id,
+requires `name`, `version` and a JSON-object `configuration`; this is legacy reservation metadata,
+not a harness-configuration ranking policy. `Store.reserve_evaluation(task_id, evaluation_id,
 run_id)` reserves a task-local evaluation ID, pins the run ID and run JSON hash, and
 also reports `reserved`. Both records have read-only files and hash receipts; duplicate
 IDs fail. These minimal identity reservations extend the original namespace-only
 foundation. They do not claim execution, completion, failure, or a score. Later phases
 must attach execution/results without replacing identity records. No reservation CLI
-is provided: `bench run` and `evaluate` still fail without creating records.
+is provided. `bench run` now writes schema-2 launch identities and appends sealed
+`run-outputs` without replacing those identities. `evaluate` remains unimplemented.
+`Store.inspect_run` validates identity/output receipts and joins them for inspection;
+`reserve_evaluation` still reserves a legacy reference only, with no grading claim.
+
+Phase 6 orchestration lives in `benchmark.py`: `run`, `run_suite`, `list_runs`,
+`export`, `compare` and `recover`. New attempts copy the selected statement, full
+instruction hash, exact revision, optional suite hash, model + harness name and
+operational environment. Frozen diagnostic image digests are used when available;
+resolved image ID is retained. Models/harnesses are comparison identities; timeout
+and other operational settings are recorded without creating ranking dimensions.
+The task lock spans launch and result collection. Each agent receives only a second
+disposable copy of materialized history, inputs and completion control. Publication
+renames a staged, hashed output directory atomically; terminal records never change.
+An interrupted host may leave an immutable `running` identity; explicit `recover`
+seals an infrastructure error under the same lock. Normal Ctrl-C/SIGTERM collects
+safe partial output after container removal. SIGKILL cannot guarantee cleanup or
+workspace retention. No raw exceptions/subprocess logs/transcripts are retained.
+Comparison takes explicit attempt selections, reports exact common revisions and
+coverage, and provides no evaluation scores. See README for CLI/exit-code details.
 
 `task show` lists record filenames; `task run TASK RUN` and `task evaluation TASK EVAL`
 inspect their receipts and JSON. `suite list` lists validated suite definitions. Retired

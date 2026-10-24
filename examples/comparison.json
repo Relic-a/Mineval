@@ -1,0 +1,4 @@
+{
+  "left": [{"task_id": "external-task-001", "run_id": "attempt-001"}],
+  "right": [{"task_id": "external-task-001", "run_id": "attempt-002"}]
+}

@@ -55,7 +55,7 @@ class HistoryFixture(unittest.TestCase):
         from mineval.sandbox import RunResult
         from review_helpers import ReportAgent, plan, report
         task = self.store.task(task_id)
-        if task_id == 'example':
+        if task_id != 'cleanup':
             with self.store.operation(task_id), tempfile.TemporaryDirectory(dir=self.store.root) as temp:
                 from mineval.artifacts import copy_tree
                 temp = Path(temp)

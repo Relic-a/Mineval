@@ -50,17 +50,74 @@ cannot be overwritten; publish a new ID to change membership. Adding tasks or pr
 new versions leaves existing suites unchanged. Suite inspection checks the definition's
 receipt; it does not revalidate the referenced task artifacts or current eligibility.
 
-`mineval bench run [TARGET]` and `mineval evaluate [RUN_ID]` are reserved independent
-operations and exit 2 with a clear not-implemented error, without creating records or
-contacting Docker. The existing `run` command is only a generic sandbox utility.
-Task-local `runs/` and `evaluations/` hold optional immutable identity reservations through
-the Store API, with exact revision and model/harness pins; no benchmark execution,
-or evaluation is implemented yet. Phase 3 provides a separate isolated adapter
-primitive without benchmark records. Inspect reservations with
-`task run TASK_ID RUN_ID` and `task evaluation TASK_ID EVALUATION_ID`; `task show` lists
-their IDs. Existing data
-stores remain readable without a migration. See [decisions](docs/mineval-decisions.md)
-for the intended boundaries and deferred choices.
+`mineval bench run` now executes frozen revisions or fixed suites with the dedicated
+fake/Codex adapters. `evaluate` remains reserved for phase 7 and exits 2 without
+creating records. The existing `run` command is a generic sandbox utility and
+`agent-run` is the lower-level adapter primitive. Existing schema-1 identity
+reservations remain readable; benchmark execution creates schema-2 identities and
+separate immutable outputs. Inspect them with `bench show` or `task run TASK RUN`.
+
+## Run a frozen benchmark
+
+```sh
+mineval --context mineval-rootless --data mineval-data bench run \
+  --task external-task-001 --version VERSION --run-id attempt-001 --adapter fake
+mineval --context mineval-rootless --data mineval-data bench run \
+  --suite baseline-v1 --run-id baseline-attempt --adapter fake
+mineval --data mineval-data bench list --task external-task-001
+mineval --data mineval-data bench show external-task-001 attempt-001
+mineval --data mineval-data bench export external-task-001 attempt-001 ./saved-result
+mineval --data mineval-data bench compare examples/comparison.json
+```
+
+A task requires an exact `--version`; a suite uses its already pinned revisions.
+Each suite member runs sequentially with its own ID (`PREFIX-001`, etc.); cancellation
+stops the remaining sequence. Omit `--run-id` to allocate a new UUID. Duplicate IDs
+fail; there are no automatic retries or reruns as the pool grows. The default fake
+adapter produces a marker file to exercise the lifecycle; it does not solve tasks.
+
+For an explicitly requested real run, choose `--adapter codex --model MODEL` and,
+when needed, `--auth-file /path/to/model-only/auth.json`. This uses the same isolated
+[adapter setup](#phase-3-isolated-agent-primitive) as `agent-run`; the frozen environment
+must contain the harness. No host binary/config/home is mounted. The benchmark uses
+the frozen diagnostic's image digest when available, otherwise the frozen configured
+reference for older receipts, and records the actual image ID in the result. Images
+must already be loaded. Frozen resource limits apply; `--timeout SECONDS` optionally
+overrides the operational deadline. No token/cost budget or configuration ranking.
+
+The agent receives a disposable materialized cleaned tree, sanitized pre-base Git,
+and the outcome-oriented task statement plus solution-lookup policy. Private evidence,
+future files, source URLs and reviewer artifacts are never mounted. Web research is
+allowed; future solution lookup is prohibited by instruction. The small completion
+report includes a **self-reported** `historical_solution_seen` answer, not anti-cheating
+proof. New frozen revisions bind their task statement in `task-instructions.json`;
+older revisions use the registered statement, copied and hashed into each run identity.
+Tree-only legacy revisions cannot run benchmarks until reimported/frozen with history.
+
+`completed` means the harness exited successfully with a valid completion report;
+it does not mean the task passed. `crashed`, `timeout`, `cancelled` and `error` describe
+execution outcomes. Infrastructure/output collection failures are errors with no task
+verdict. Ctrl-C and CLI SIGTERM remove the container and retain a safe partial tree
+when possible. CLI exit codes are 0 for completed, 124 for timeout, 130 for cancellation,
+and 125 for run errors/crashes. After SIGKILL or host failure an identity can remain
+`running`; explicitly seal it with `bench recover TASK RUN` after checking the runner
+has exited. Recovery takes the task lock, records `unclean_host_exit`, and never reruns
+an agent or claims a task failure. Forced host termination can leave an orphan container
+or disposable staging directory; inspect managed Docker resources before recovery.
+
+Only the final tree archive, small completion/status report and minimal operational
+provenance survive normal execution. No transcripts or raw session histories. Export
+creates a new tree-only directory outside the store; it includes added/deleted/modified
+files as the saved final state, without agent-controlled Git. Safe outputs from crashes,
+timeouts and cancellation are retained too. Outputs can contain secrets copied by an
+agent: inspect code before sharing. Unsupported links/special files fail collection.
+
+Comparisons take explicit left/right lists of saved task/run IDs, one attempt per task
+and one model + harness per side. They report the exact **common revisions**, coverage,
+and left/right-only revisions, including zero overlap. Different revisions of the same
+task do not overlap. Execution failures stay visible in coverage; no task grading or
+aggregate scores are produced in this phase. Task/suite/run identities remain immutable.
+See [decisions](docs/mineval-decisions.md) for the boundaries and deferred choices.
 
 ## Import an externally selected task
 
@@ -434,8 +491,8 @@ Only `result.json` and a bounded link-free `workspace.tar.gz` are retained. Agen
 metadata is discarded without executing it on the host. File changes from failed or
 timed-out work are retained too. Review outputs for secrets before sharing; an agent
 can copy any visible credentials into code. Bind workspace disk usage has no hard
-quota; exported artifacts use the existing byte/file limits. This primitive does not
-implement Phase 6 benchmark records or change suite/run identities.
+quota; exported artifacts use the existing byte/file limits. The `agent-run` primitive does not create benchmark records; use `bench run`
+for durable attempts tied to frozen revisions and suites.
 
 Deterministic checks use temporary synthetic Git repositories and simulated Docker:
 `python -m unittest discover -s tests -p test_agents.py -v`.

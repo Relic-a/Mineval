@@ -54,9 +54,26 @@ def main(argv: list[str] | None = None) -> int:
     suites.add_parser("create", help="publish a suite definition JSON").add_argument("definition")
     suites.add_parser("show", help="inspect a published suite").add_argument("suite_id")
     suites.add_parser("list", help="list published suites")
-    bench = commands.add_parser("bench", help="benchmark operations (not implemented yet)")
+    bench = commands.add_parser("bench", help="isolated benchmarks and immutable attempt outputs")
     benches = bench.add_subparsers(dest="bench_action", required=True)
-    benches.add_parser("run", help="reserved; not implemented yet").add_argument("target", nargs="?")
+    benchmark = benches.add_parser('run', help='run one frozen task revision or an immutable suite')
+    selection = benchmark.add_mutually_exclusive_group(required=True)
+    selection.add_argument('--task')
+    selection.add_argument('--suite')
+    benchmark.add_argument('--version', help='exact frozen revision, required with --task')
+    benchmark.add_argument('--run-id', help='new attempt ID (prefix for suite attempts)')
+    benchmark.add_argument('--adapter', choices=('fake', 'codex'), default='fake')
+    benchmark.add_argument('--model', help='explicit model; default fake or gpt-6-luna by adapter')
+    benchmark.add_argument('--auth-file')
+    benchmark.add_argument('--timeout', type=float, help='override frozen environment timeout')
+    benches.add_parser('list', help='list durable attempts').add_argument('--task')
+    for name in ('show', 'recover', 'export'):
+        attempt = benches.add_parser(name)
+        attempt.add_argument('task_id')
+        attempt.add_argument('run_id')
+        if name == 'export':
+            attempt.add_argument('destination', help='new directory outside the store; tree only')
+    benches.add_parser('compare', help='report exact common revisions and coverage').add_argument('definition')
     commands.add_parser("evaluate", help="reserved; not implemented yet").add_argument("run_id", nargs="?")
     verify = commands.add_parser("verify", help="fresh diagnostic via task-scoped host broker or host task ID")
     verify.add_argument("mode", nargs="?", choices=["report"])
@@ -98,9 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     materialize.add_argument("version")
     materialize.add_argument("destination")
     args = parser.parse_args(argv)
-    if args.action in ("bench", "evaluate"):
-        operation = 'bench run' if args.action == 'bench' else 'evaluate'
-        print(f"mineval: {operation} is not implemented in this phase; no records were created", file=sys.stderr)
+    if args.action == "evaluate":
+        print("mineval: evaluate is not implemented in this phase; no records were created", file=sys.stderr)
         return 2
     sandbox = DockerSandbox(context=args.context)
     try:
@@ -125,7 +141,30 @@ def main(argv: list[str] | None = None) -> int:
                 result = request(args.mode or "verify")
             else:
                 store = Store(args.data)
-                if args.action == "import":
+                if args.action == 'bench':
+                    from . import benchmark
+                    if args.bench_action == 'run':
+                        from .agents import CodexAdapter, FakeAdapter
+                        if bool(args.task) != bool(args.version):
+                            raise ValueError('Use --task with --version, or --suite without --version')
+                        adapter = (CodexAdapter(args.model or 'gpt-6-luna') if args.adapter == 'codex'
+                                   else FakeAdapter(model=args.model or 'fake'))
+                        options = dict(run_id=args.run_id, adapter=adapter, context=args.context,
+                                       auth_file=args.auth_file, timeout=args.timeout)
+                        with benchmark.termination_handler():
+                            result = (benchmark.run_suite(store, args.suite, **options) if args.suite else
+                                      benchmark.run(store, args.task, args.version, **options))
+                    elif args.bench_action == 'list':
+                        result = benchmark.list_runs(store, args.task)
+                    elif args.bench_action == 'show':
+                        result = store.inspect_run(args.task_id, args.run_id)
+                    elif args.bench_action == 'export':
+                        result = benchmark.export(store, args.task_id, args.run_id, args.destination)
+                    elif args.bench_action == 'recover':
+                        result = benchmark.recover(store, args.task_id, args.run_id)
+                    else:
+                        result = benchmark.compare(store, read_json(args.definition))
+                elif args.action == "import":
                     result = store.register(load_candidate(args.candidate))
                 elif args.action == "task":
                     if args.task_action == "add":
@@ -184,6 +223,13 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.action == "workspace":
                     result = store.materialize(args.task_id, args.version, args.destination)
             print(json.dumps(result, indent=2 if args.action in ('task', 'suite') else None))
+            if args.action == 'bench':
+                if args.bench_action != 'run':
+                    return 0
+                records = result if isinstance(result, list) else [result]
+                return (130 if any(r['status'] == 'cancelled' for r in records) else
+                        124 if any(r['status'] == 'timeout' for r in records) else
+                        125 if any(r['status'] != 'completed' for r in records) else 0)
             # Diagnostic failures are reports, never automatic candidate rejection.
             if args.action == 'verification-check':
                 return 125 if result['interpretation'] == 'environment_failure' else 1 if result['interpretation'] == 'behavior_failure' else 0

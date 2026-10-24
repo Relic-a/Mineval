@@ -185,7 +185,8 @@ class Store:
 
     def inspect_run(self, task_id, run_id):
         with self.operation(task_id, allow_rejected=True):
-            return self._inspect_record(task_id, 'runs', run_id)
+            from .benchmark import inspect_attempt
+            return inspect_attempt(self, task_id, run_id)
 
     def inspect_evaluation(self, task_id, evaluation_id):
         with self.operation(task_id, allow_rejected=True):
@@ -404,6 +405,8 @@ class Store:
                     raise ValueError('Cannot record cleanup patch: ' + result.stderr.decode(errors='replace'))
             write_json(staged / 'cleanup-report.json', review | {'changed_paths': changed, 'snapshot_sha256': sha})
             write_json(staged / 'tree-hashes.json', current)
+            write_json(staged / 'task-instructions.json', {
+                'task_summary': read_json(task / 'metadata.json')['task_summary']})
             # Config validation is shared with diagnostics.
             from .verification import load_config
             config = load_config(draft / 'control' / 'verify.json')

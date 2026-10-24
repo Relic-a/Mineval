@@ -114,7 +114,7 @@ def completion(path):
 
 
 def run_agent(workspace, instructions, destination, *, image, adapter=None,
-              context=None, limits=None, auth_file=None, sandbox=None):
+              context=None, limits=None, auth_file=None, sandbox=None, capture_interrupt=False):
     """Input is read-only to the host runner. Only disposable copies are mounted.
 
     Input must be a materialized historical workspace, never a modern clone.
@@ -162,21 +162,29 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
         spec = SandboxSpec(image, command, limits, workspace=project, inputs=inputs,
                            control=control, network='bridge', retain_logs=False)
         started = time.monotonic()
-        with runner.container(spec) as container:
-            container.start()
-            timed_out = container.wait(limits.timeout_seconds)
-            state = container.inspect()
-            status = ('timeout' if timed_out else 'oom' if state.get('OOMKilled') else
-                      'completed' if state['ExitCode'] == 0 else 'error')
-            report = None
-            if status == 'completed':
-                try:
-                    report = completion(control / 'final.json')
-                except (ValueError, OSError, TypeError):
-                    status = 'error'
-            # Container must be stopped before inspecting any agent-writable path.
-            if state['Running']:
-                raise ValueError('Agent container still running')
+        try:
+            with runner.container(spec) as container:
+                container.start()
+                timed_out = container.wait(limits.timeout_seconds)
+                state = container.inspect()
+                status = ('timeout' if timed_out else 'oom' if state.get('OOMKilled') else
+                          'completed' if state['ExitCode'] == 0 else 'error')
+                report = None
+                if status == 'completed':
+                    try:
+                        report = completion(control / 'final.json')
+                    except (ValueError, OSError, TypeError):
+                        status = 'error'
+                # Container must be stopped before inspecting any agent-writable path.
+                if state['Running']:
+                    raise ValueError('Agent container still running')
+        except KeyboardInterrupt as exc:
+            # The context manager removes the container before we read its tree.
+            # Cleanup failure means writers might remain: never export in that case.
+            if not capture_interrupt or getattr(exc, '__notes__', ()):
+                raise
+            state = {'ExitCode': None, 'OOMKilled': False}
+            status, timed_out, report = 'cancelled', False, None
         # Never run host Git on agent-controlled output. Discard its Git metadata.
         if metadata.is_symlink() or metadata.is_file():
             metadata.unlink()
@@ -188,7 +196,8 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
             pack(project, destination / 'workspace.tar.gz')
             result = {'harness': adapter.name, 'model': adapter.model, 'status': status,
                       'exit_code': state['ExitCode'], 'timed_out': timed_out,
-                      'oom_killed': state.get('OOMKilled', False), 'image_id': container.image_id,
+                      'oom_killed': state.get('OOMKilled', False),
+                      'image_id': container.image_id if 'container' in locals() else None,
                       'duration_seconds': time.monotonic() - started,
                       'instructions_sha256': digest(inputs / 'prompt.txt'),
                       'workspace_sha256': digest(destination / 'workspace.tar.gz'),
