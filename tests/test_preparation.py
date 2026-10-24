@@ -48,6 +48,44 @@ class HistoryFixture(unittest.TestCase):
         diagnose(self.store, 'example', sandbox=FakeRunner([step()]))
         self.review = {'objective_preserved': True, 'snapshot_reviewed': True, 'reviewer': 'test reviewer', 'changes': []}
 
+    def prepare_review(self, task_id, review):
+        # Existing artifact tests now pass through separate fake producing/review sessions.
+        from mineval.cleanup import save_attempt
+        from mineval.review import session
+        from mineval.sandbox import RunResult
+        from review_helpers import ReportAgent, plan, report
+        task = self.store.task(task_id)
+        if task_id == 'example':
+            with self.store.operation(task_id), tempfile.TemporaryDirectory(dir=self.store.root) as temp:
+                from mineval.artifacts import copy_tree
+                temp = Path(temp)
+                copy_tree(self.store.draft(task_id) / 'workspace', temp / 'clean')
+                control = temp / 'control'; control.mkdir()
+                write_json(control / 'verify.json', read_json(self.store.draft(task_id) / 'control/verify.json'))
+                write_json(control / 'cleanup-report.json', {
+                    'disposition': 'ready-for-review', 'summary': 'Fixture cleanup',
+                    'objective_preserved': review['objective_preserved'], 'changes': review['changes'],
+                    'environment': {'runtime': 'fixture', 'dependencies': [], 'services': [], 'limitations': []}})
+                if not (task / 'verify-latest.json').exists():
+                    raise ValueError('Missing verify-latest diagnostic')
+                diagnostic = read_json(task / 'verify-latest.json')
+                save_attempt(self.store, task_id, temp / 'clean', control,
+                    RunResult('fixture', 'image', 0, False, False, '', '', False, 0),
+                    image_id='image', diagnostic_ids=[diagnostic['diagnostic_id']],
+                    producer={'harness': 'fixture'}, input_hashes=inventory(temp / 'clean'),
+                    instructions_sha256='fixture')
+        metadata = read_json(task / 'metadata.json')
+        sha = metadata['head_commit']
+        path = 'check.py' if task_id == 'cleanup' else 'tests/test_answer.py'
+        extraction = session(self.store, task_id, stage='extraction', command=['fixture-extractor'],
+            sandbox=ReportAgent('selection.json', plan(sha, path)))
+        approval = session(self.store, task_id, stage='review', command=['fixture-reviewer'],
+            extraction_id=extraction['extraction_id'], sandbox=ReportAgent('review.json', report(review)))
+        return approval['review_id']
+
+    def freeze(self, task_id, review):
+        return self.store.finalize(task_id, review_id=self.prepare_review(task_id, review))
+
     def git(self, *args):
         return subprocess.check_output(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.org',
                                         '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null',
@@ -63,7 +101,7 @@ class ArtifactAcceptanceTests(HistoryFixture):
         self.assertEqual(read_json(self.store.task('example') / 'metadata.json')['grounding'], 'git-objects-and-ancestry-checked')
 
     def test_freeze_materialize_independence_extraction_and_new_version(self):
-        result = self.store.finalize('example', self.review)
+        result = self.freeze('example', self.review)
         frozen = self.store.task('example') / 'versions' / result['version'] / 'snapshot.tar.gz'
         initial = digest(frozen)
         for name in ('one', 'two'):
@@ -80,19 +118,19 @@ class ArtifactAcceptanceTests(HistoryFixture):
         (self.workspace / 'environment.txt').write_text('setup adaptation')
         review = self.review | {'changes': [{'path': 'environment.txt', 'reason': 'Document offline setup'}]}
         diagnose(self.store, 'example', sandbox=FakeRunner([step(1)]))
-        second = self.store.finalize('example', review)
+        second = self.freeze('example', review)
         self.assertNotEqual(result['version'], second['version'])
         self.assertEqual(digest(frozen), initial)
 
     def test_changes_require_explicit_review_and_rejection_blocks_publish(self):
         (self.workspace / 'app.py').write_text('changed')
-        with self.assertRaisesRegex(ValueError, 'every changed'):
-            self.store.finalize('example', self.review)
-        with self.assertRaisesRegex(ValueError, 'attestations'):
-            self.store.finalize('example', self.review | {'objective_preserved': False})
+        with self.assertRaisesRegex(ValueError, 'ready-for-review|every changed'):
+            self.freeze('example', self.review)
+        with self.assertRaisesRegex(ValueError, 'ready-for-review|integrity'):
+            self.freeze('example', self.review | {'objective_preserved': False})
         self.store.reject('example', 'Cleanup would remove the target behavior')
         with self.assertRaisesRegex(ValueError, 'rejected'):
-            self.store.finalize('example', self.review)
+            self.freeze('example', self.review)
         self.assertFalse((self.store.task('example') / 'versions').exists())
 
     def test_hash_tamper_unknown_commit_and_production_attestation(self):
@@ -101,10 +139,12 @@ class ArtifactAcceptanceTests(HistoryFixture):
             with self.assertRaises(ValueError):
                 self.store.extract('example', [bad])
         source = self.store.task('example') / 'private/future' / self.head / 'tests/test_answer.py'
+        original_source = source.read_bytes()
         source.write_text('tampered')
         with self.assertRaisesRegex(ValueError, 'modified'):
             self.store.extract('example', [selection])
-        result = self.store.finalize('example', self.review)
+        source.write_bytes(original_source)
+        result = self.freeze('example', self.review)
         frozen = self.store.task('example') / 'versions' / result['version'] / 'snapshot.tar.gz'
         frozen.chmod(0o644)
         frozen.write_bytes(b'tampered')
@@ -141,12 +181,12 @@ class ArtifactAcceptanceTests(HistoryFixture):
             self.assertFalse((self.root / 'output').exists())
         (self.workspace / 'link').symlink_to('/etc/passwd')
         with self.assertRaisesRegex(ValueError, 'Links'):
-            self.store.finalize('example', self.review)
+            self.freeze('example', self.review)
 
     def test_busy_task_prevents_parallel_finalize(self):
         with self.store.operation('example'):
             with self.assertRaisesRegex(ValueError, 'busy'):
-                self.store.finalize('example', self.review)
+                self.freeze('example', self.review)
 
 
 class FakeRunner:
@@ -231,21 +271,21 @@ class PublicationGuardTests(HistoryFixture):
     def test_stale_environment_only_and_missing_reports_cannot_publish(self):
         (self.workspace / 'setup.txt').write_text('change')
         review = self.review | {'changes': [{'path': 'setup.txt', 'reason': 'Environment setup note'}]}
-        with self.assertRaisesRegex(ValueError, 'current diagnostic'):
-            self.store.finalize('example', review)
+        with self.assertRaisesRegex(ValueError, 'ready-for-review'):
+            self.freeze('example', review)
         runner = Mock()
         runner.container.side_effect = SandboxError('cannot start')
         diagnose(self.store, 'example', sandbox=runner)
-        with self.assertRaisesRegex(ValueError, 'current diagnostic'):
-            self.store.finalize('example', review)
+        with self.assertRaisesRegex(ValueError, 'ready-for-review'):
+            self.freeze('example', review)
         (self.store.task('example') / 'verify-latest.json').unlink()
-        with self.assertRaisesRegex(ValueError, 'fresh diagnostic'):
-            self.store.finalize('example', review)
+        with self.assertRaisesRegex(ValueError, 'verify-latest'):
+            self.freeze('example', review)
         self.assertFalse((self.store.task('example') / 'versions').exists())
 
     def test_deterministic_archives_and_reserved_destination_rejected(self):
-        first = self.store.finalize('example', self.review)
-        second = self.store.finalize('example', self.review)
+        first = self.freeze('example', self.review)
+        second = self.freeze('example', self.review)
         self.assertEqual(first['snapshot_sha256'], second['snapshot_sha256'])
         with self.assertRaisesRegex(ValueError, 'protected'):
             self.store.materialize('example', first['version'], self.store.task('example') / 'bad')

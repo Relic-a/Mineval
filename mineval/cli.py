@@ -70,9 +70,23 @@ def main(argv: list[str] | None = None) -> int:
     cleanup.add_argument('--adapter', choices=('fake', 'codex'), default='fake')
     cleanup.add_argument('--model', default='gpt-6-luna')
     cleanup.add_argument('--auth-file')
+    for name in ('verification-extract', 'review'):
+        private = commands.add_parser(name, help='separate isolated private preparation agent')
+        private.add_argument('task_id')
+        if name == 'review':
+            private.add_argument('--extraction-id', required=True)
+        private.add_argument('--adapter', choices=('codex',))
+        private.add_argument('--model', default='gpt-6-luna')
+        private.add_argument('--auth-file')
+        private.add_argument('--command', nargs=argparse.REMAINDER)
+    validation = commands.add_parser('verification-check', help='privately diagnose extracted checks')
+    validation.add_argument('task_id')
+    validation.add_argument('--extraction-id', required=True)
+    validation.add_argument('--config', required=True)
+    validation.add_argument('--future-commit')
     freeze = commands.add_parser("finalize")
     freeze.add_argument("task_id")
-    freeze.add_argument("--review", required=True, help="JSON review accounting for all cleanup changes")
+    freeze.add_argument("--review-id", required=True, help="approved independent review session ID")
     reject = commands.add_parser("reject")
     reject.add_argument("task_id")
     reject.add_argument("--reason", required=True)
@@ -150,8 +164,19 @@ def main(argv: list[str] | None = None) -> int:
                                             stage='extraction' if args.action == 'extraction-session' else 'cleanup'))
                     if args.action == 'prepare':
                         result['cleanup'] = read_json(store.task(args.task_id) / 'cleanup-latest.json')
+                elif args.action == 'verification-check':
+                    from .review import validate
+                    result = validate(store, args.task_id, args.extraction_id, args.config,
+                                      future_commit=args.future_commit, sandbox=sandbox)
+                elif args.action in ('verification-extract', 'review'):
+                    from .review import session as private_session
+                    from .agents import CodexAdapter
+                    result = private_session(store, args.task_id,
+                        stage='review' if args.action == 'review' else 'extraction',
+                        command=args.command, adapter=CodexAdapter(args.model) if args.adapter else None,
+                        auth_file=args.auth_file, context=args.context, extraction_id=getattr(args, 'extraction_id', None))
                 elif args.action == "finalize":
-                    result = store.finalize(args.task_id, read_json(args.review))
+                    result = store.finalize(args.task_id, review_id=args.review_id)
                 elif args.action == "reject":
                     result = store.reject(args.task_id, args.reason)
                 elif args.action == "extract":
@@ -160,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
                     result = store.materialize(args.task_id, args.version, args.destination)
             print(json.dumps(result, indent=2 if args.action in ('task', 'suite') else None))
             # Diagnostic failures are reports, never automatic candidate rejection.
+            if args.action == 'verification-check':
+                return 125 if result['interpretation'] == 'environment_failure' else 1 if result['interpretation'] == 'behavior_failure' else 0
             if args.action == 'verify':
                 return 125 if result.get('error') or result.get('status') == 'environment_error' else 1 if result.get('status') == 'checks_failed' else 0
             if args.action in ('task', 'suite'):

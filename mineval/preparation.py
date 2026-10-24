@@ -125,6 +125,9 @@ class Store:
             return {'metadata': read_json(task / 'metadata.json'),
                     'state': read_json(task / 'status.json'),
                     'cleanup': read_json(task / 'cleanup-latest.json') if (task / 'cleanup-latest.json').exists() else None,
+                    'private_extractions': sorted(p.name for p in (task / 'private/extractions').glob('*')),
+                    'private_reviews': sorted(p.name for p in (task / 'private/reviews').glob('*')),
+                    'extraction_attempts': sorted(p.name for p in (task / 'private/extraction-attempts').glob('*')),
                     'prepared_revisions': sorted(p.name for p in (task / 'versions').iterdir())
                     if (task / 'versions').exists() else [],
                     'runs': sorted(p.name for p in (task / 'runs').glob('*.json')),
@@ -353,9 +356,14 @@ class Store:
             write_json(task / 'status.json', result)
             return result
 
-    def finalize(self, task_id, review):
+    def finalize(self, task_id, review=None, *, review_id=None):
         with self.operation(task_id), tempfile.TemporaryDirectory(dir=self.root) as temp:
             task, draft = self.task(task_id), self.draft(task_id)
+            from .review import approved
+            if not review_id:
+                raise ValueError('Require an approved independent review session ID; inline attestations cannot freeze new revisions')
+            approval, review_directory = approved(self, task_id, review_id)
+            review = approval['report'] | {'reviewer': approval['producer']['session_id']}
             if review.get('objective_preserved') is not True or review.get('snapshot_reviewed') is not True or not review.get('reviewer'):
                 raise ValueError('Require reviewer and explicit objective/snapshot review attestations')
             # Only host-owned operations hold this lock; active sessions also hold it.
@@ -422,6 +430,13 @@ class Store:
                     or not any(x.get('status') in ('passed', 'failed') for x in diagnostic.get('commands', []))):
                 raise ValueError('Require a current diagnostic with a runnable command; task-related test failures are allowed')
             shutil.copyfile(task / 'verify-latest.json', staged / 'last-diagnostic.json')
+            copy_tree(review_directory, staged / 'private/review')
+            copy_tree(task / 'private/extractions' / approval['inputs']['extraction_id'],
+                      staged / 'private/verification')
+            validations = task / 'private/validations' / approval['inputs']['extraction_id']
+            if validations.exists():
+                copy_tree(validations, staged / 'private/validations')
+            write_json(staged / 'approval.json', approval)
             write_json(staged / 'artifact-hashes.json', inventory(staged))
             versions = task / 'versions'
             versions.mkdir(exist_ok=True)
@@ -476,7 +491,11 @@ class Store:
 
     def extract(self, task_id, selections):
         """Save explicitly selected evidence. Never apply it to a starting tree."""
-        with self.operation(task_id), tempfile.TemporaryDirectory(dir=self.root) as temp:
+        with self.operation(task_id):
+            return self._extract(task_id, selections)
+
+    def _extract(self, task_id, selections, *, plan=None, producer_session=None):
+        with tempfile.TemporaryDirectory(dir=self.root) as temp:
             task = self.task(task_id)
             metadata = read_json(task / 'metadata.json')
             original = read_json(task / 'source-hashes.json')
@@ -500,10 +519,14 @@ class Store:
                 records.append(item | {'sha256': digest(destination), 'stored_path': destination.relative_to(staging).as_posix()})
             if not records:
                 raise ValueError('Select at least one verification artifact')
-            write_json(staging / 'extraction-manifest.json', {'artifacts': records, 'applied': False})
+            write_json(staging / 'extraction-manifest.json', {'artifacts': records, 'applied': False,
+                'plan': plan, 'producer_session': producer_session})
             write_json(staging / 'artifact-hashes.json', inventory(staging))
             extraction_id = uuid4().hex
             target = task / 'private' / 'extractions' / extraction_id
             target.parent.mkdir(exist_ok=True)
             os.rename(staging, target)
+            for path in target.rglob('*'):
+                if path.is_file():
+                    path.chmod(0o444)
             return {'extraction_id': extraction_id, 'artifacts': records}

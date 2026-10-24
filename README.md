@@ -233,31 +233,63 @@ the target work, reject the candidate:
 mineval --data mineval-data reject external-task-001 --reason 'Cleanup would change the objective'
 ```
 
-To publish a version, create a review like [review.json](examples/review.json). Give
-exactly one nonempty reason for each changed, added, or deleted path (`changes: []`
-for an unchanged tree). `objective_preserved: true` attests the target behavior and
-interfaces remain intact. `snapshot_reviewed: true` attests inspection for future
-solution/tests, benchmark-private material, and credentials. These are substantive
-review obligations: Mineval cannot prove semantic non-leakage or recognize every secret.
+After a completed cleanup, run a separate extraction agent and a third review
+session. These are independent operations, with fresh disposable containers. Explicit
+executables receive instructions at `/mineval-input/prompt.txt` and write structured
+reports under `/mineval-control`. They never mount the store or change the draft.
 
 ```sh
-mineval --data mineval-data finalize external-task-001 --review review.json
+mineval --context rootless --data mineval-data verification-extract external-task-001 --command /path/in/image/to/extractor
+# Use the returned extraction_id; config uses the same schema as verify.json.
+mineval --context rootless --data mineval-data verification-check external-task-001 --extraction-id EXTRACTION --config private-checks.json
+mineval --context rootless --data mineval-data verification-check external-task-001 --extraction-id EXTRACTION --config private-checks.json --future-commit FULL_SHA
+mineval --context rootless --data mineval-data review external-task-001 --extraction-id EXTRACTION --command /path/in/image/to/reviewer
+mineval --data mineval-data finalize external-task-001 --review-id REVIEW
 ```
 
-Finalization requires a diagnostic of the exact current tree/configuration in which
-at least one command ran. Failing historical tests are allowed. Infrastructure-only
-failures and stale diagnostics cannot publish a version. If cleanup attempts exist,
-finalization also requires the latest attempt to be
-`ready-for-review` and match the current tree/config; its report is preserved in the
-version. Phase 5 still must enforce a distinct independent reviewer and private
-extraction approval; the existing `finalize --review` remains an attestation boundary.
-Active sessions hold a task lock, preventing concurrent finalization or another host
-preparation operation.
-Stop external editors before host checks/finalization; inconsistent copies are rejected.
+For either producing/review session, replace `--command ...` with
+`--adapter codex --model gpt-6-luna --auth-file /explicit/auth.json` for an explicitly
+authorized model run. The existing Codex adapter uses a fresh ephemeral session and
+copied model authentication; no transcript logs are retained. Local fake executables
+can follow the same report contract without a model. No automatic pipeline or human
+sign-off is required.
+
+The extraction report follows [verification-plan.json](examples/verification-plan.json):
+choose focused meaningful checks or a fuller package, explain the requirements,
+record dependencies, running instructions and limitations, and select original files
+with commit/path provenance and `test_only: true`. `unavailable` plus an empty artifact
+list records a needs-review extraction attempt when credible checks cannot be recovered.
+This cannot become approved verification. The host copies checked original bytes;
+agent edits to its private source copies are discarded.
+
+`verification-check` overlays selected original files at their original paths in a
+disposable cleaned base or known future tree and runs commands in a fresh sandbox.
+It preserves command outcomes, input/config/image identity and setup versus behavioral
+failures privately, without replacing the public cleanup diagnostic. A base behavior
+failure can be legitimate; a future pass supports the checks without declaring the
+historical patch the only correct implementation. Future checks use the original
+future tree without cleanup adaptations; reviewers must assess any resulting setup
+limitations. Validation is optional where infeasible, and limitations require review.
+
+The reviewer writes [review.json](examples/review.json), returning approve, revise or
+reject with reasons. It assesses every cleanup edit, leakage, test relevance, arbitrary
+assumptions and reproducibility. Approval requires objective/snapshot attestations
+and one reason for exactly each changed path. These remain semantic judgments;
+Mineval cannot mechanically prove meaningful tests or detect all leaked secrets.
+A revise/reject report blocks freezing with that review ID but preserves the task
+for further preparation; use `reject` to reject the task itself.
+
+Finalization requires an approved independent session ID and a current runnable
+cleanup diagnostic. Inline `finalize --review` attestations no longer freeze new
+versions. A matching ready-for-review cleanup and session-produced extraction are
+mandatory. Review receipts bind the exact cleanup, extraction, diagnostic, metadata
+and private validation reports. Changed inputs require another review. Failing
+historical tests remain allowed; infrastructure-only diagnostics cannot publish.
+Active sessions hold the task lock. Stop external editors during host operations.
 
 Every finalization creates a new version containing `snapshot.tar.gz`, its SHA-256,
 the exact tree inventory, a binary-capable cleanup diff, review, configuration, last
-diagnostic, and hashes. The archive contains only the reviewed workspace. Git history,
+diagnostic, private verification/validation, independent review, provenance, and hashes. The archive contains only the reviewed workspace. Git history,
 controls, provenance, future material, and extraction output remain outside it.
 Archive ownership/timestamps are normalized. Version files become read-only and are
 never overwritten through Mineval. Hash checks detect subsequent host tampering;
@@ -271,7 +303,7 @@ the [storage format and migration boundary](docs/foundation.md).
 
 ## Extract future verification privately
 
-A separate generic extraction session can inspect the base, explicit future trees,
+The legacy generic extraction session can inspect the base, explicit future trees,
 diffs (Git imports), and task context:
 
 ```sh
@@ -280,6 +312,7 @@ mineval --context rootless --data mineval-data extraction-session external-task-
 
 Its private review workspace is disposable. It can write `selection.json` at the
 workspace root; Mineval retains that suggestion in `private/extraction-selection.json`.
+This legacy path cannot supply the session-produced verification required for new freezing.
 No selection is automatically applied or executed. Alternatively inspect supplied
 future evidence with your own external process and provide a selection directly.
 
@@ -295,7 +328,8 @@ The host validates paths and source hashes, copies original bytes into a new pri
 extraction, and records provenance/hashes. `test_only` requires reviewer judgment;
 file extensions cannot reliably distinguish tests from production. Never select
 future production implementations as test support. A future production API referenced
-by a test remains work for the evaluated agent. Extracting verification leaves every
+by a test remains work for the evaluated agent. These manually selected artifacts remain inspectable but cannot replace an independent
+extraction session for new freezing. Extracting verification leaves every
 frozen version unchanged and never runs checks against a candidate solution.
 
 ## Workspaces and future harness boundary

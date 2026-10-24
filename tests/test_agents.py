@@ -55,7 +55,7 @@ class SimulatedDocker:
 
 class PhaseThreeTests(HistoryFixture):
     def materialized(self):
-        version = self.store.finalize('example', self.review)['version']
+        version = self.freeze('example', self.review)['version']
         target = self.root / 'historical'
         self.store.materialize('example', version, target)
         return target
@@ -201,7 +201,7 @@ class PhaseThreeTests(HistoryFixture):
                      'set MINEVAL_AGENT_TEST_IMAGE for live rootless fake adapter check')
 class LiveAgentTests(HistoryFixture):
     def test_live_fake_copy_and_cleanup(self):
-        version = self.store.finalize('example', self.review)['version']
+        version = self.freeze('example', self.review)['version']
         source = self.root / 'historical'
         self.store.materialize('example', version, source)
         before = inventory(source, allow_git=True)

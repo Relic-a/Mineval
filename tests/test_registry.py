@@ -31,14 +31,14 @@ class RegistryTests(HistoryFixture):
         self.assertEqual(reopened.inspect_task('example')['evaluations'], [])
 
     def test_suite_is_pinned_across_new_revisions_and_tasks(self):
-        first = self.store.finalize('example', self.review)['version']
+        first = self.freeze('example', self.review)['version']
         definition = {'suite_id': 'baseline-v1', 'description': 'Fixed comparison',
                       'members': [{'task_id': 'example', 'version': first}]}
         record = self.store.create_suite(definition)
         path = self.store.root / 'suites/baseline-v1/suite.json'
         initial = digest(path)
         self.store.register(self.candidate | {'task_id': 'new-task'})
-        second = self.store.finalize('example', self.review)['version']
+        second = self.freeze('example', self.review)['version']
         self.assertNotEqual(first, second)
         self.assertEqual(Store(self.store.root).inspect_suite('baseline-v1'), record)
         self.assertEqual(digest(path), initial)
@@ -53,7 +53,7 @@ class RegistryTests(HistoryFixture):
         self.assertEqual(digest(path), initial)
 
     def test_invalid_members_cannot_publish_partial_suites(self):
-        version = self.store.finalize('example', self.review)['version']
+        version = self.freeze('example', self.review)['version']
         member = {'task_id': 'example', 'version': version}
         for members in ([], [member, member], [{'task_id': 'example'}],
                         [member | {'version': 'latest'}], [member | {'task_id': 'missing'}],
@@ -66,7 +66,7 @@ class RegistryTests(HistoryFixture):
             self.store.create_suite({'suite_id': 'invalid', 'members': [member]})
 
     def test_revision_and_suite_tampering_is_detected(self):
-        version = self.store.finalize('example', self.review)['version']
+        version = self.freeze('example', self.review)['version']
         definition = {'suite_id': 'baseline', 'members': [{'task_id': 'example', 'version': version}]}
         self.store.create_suite(definition)
         frozen = self.store.task('example') / 'versions' / version
@@ -86,7 +86,7 @@ class RegistryTests(HistoryFixture):
     def test_cli_roundtrip_across_independent_processes(self):
         candidate = self.root / 'candidate.json'
         write_json(candidate, self.candidate | {'task_id': 'cli-task'})
-        version = self.store.finalize('example', self.review)['version']
+        version = self.freeze('example', self.review)['version']
         definition = self.root / 'suite.json'
         write_json(definition, {'suite_id': 'cli-suite', 'members': [{'task_id': 'example', 'version': version}]})
         for command in (['task', 'add', str(candidate)], ['task', 'list'],
@@ -118,7 +118,7 @@ class RegistryTests(HistoryFixture):
         self.assertIn('explicit executable argv', err.getvalue())
 
     def test_reserved_run_and_evaluation_identities_reload_without_execution(self):
-        version = self.store.finalize('example', self.review)['version']
+        version = self.freeze('example', self.review)['version']
         identity = {'name': 'fixture', 'version': 'test-v1', 'configuration': {'mode': 'offline'}}
         run = self.store.reserve_run('example', 'run-1', version, model=identity, harness=identity)
         evaluation = self.store.reserve_evaluation('example', 'eval-1', 'run-1')
@@ -130,7 +130,7 @@ class RegistryTests(HistoryFixture):
         self.assertEqual(evaluation['run_sha256'], digest(reopened.task('example') / 'runs/run-1.json'))
         self.assertEqual(reopened.inspect_task('example')['runs'], ['run-1.json'])
         self.assertEqual(reopened.inspect_task('example')['evaluations'], ['eval-1.json'])
-        self.store.finalize('example', self.review)
+        self.freeze('example', self.review)
         self.assertEqual(reopened.inspect_run('example', 'run-1'), run)
         for action in (lambda: reopened.reserve_run('example', 'run-1', version, model=identity, harness=identity),
                        lambda: reopened.reserve_evaluation('example', 'eval-1', 'run-1')):
@@ -147,7 +147,7 @@ class RegistryTests(HistoryFixture):
         self.assertEqual(reopened.inspect_evaluation('example', 'eval-1'), evaluation)
 
     def test_record_validation_and_tampering(self):
-        version = self.store.finalize('example', self.review)['version']
+        version = self.freeze('example', self.review)['version']
         identity = {'name': 'fixture', 'version': 'v1', 'configuration': {}}
         for bad in ({}, identity | {'name': ''}, identity | {'configuration': 'text'}):
             with self.assertRaises(ValueError):
@@ -170,7 +170,7 @@ class RegistryTests(HistoryFixture):
             self.store.reserve_evaluation('example', 'eval-2', 'run-1')
 
     def test_legacy_revision_and_explicit_workspace_format(self):
-        version = self.store.finalize('example', self.review)['version']
+        version = self.freeze('example', self.review)['version']
         frozen = self.store.task('example') / 'versions' / version
         descriptor = frozen / 'workspace-format.json'
         self.assertEqual(read_json(descriptor)['git_history']['format'], 'base-pack-v1')

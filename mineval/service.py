@@ -88,7 +88,7 @@ def session(store, task_id, command=None, *, context=None, stage='cleanup', adap
                 write_json(workspace / 'task.json', {key: metadata[key] for key in
                            ('task_id', 'repository', 'base_commit', 'task_summary', 'future_commits')})
                 spec = SandboxSpec(config['image'], tuple(command), limits, workspace=workspace,
-                                   network=config.get('network', 'bridge'))
+                                   network=config.get('network', 'bridge'), retain_logs=False)
                 result = runner.run(spec)
                 # Preserve suggestions; host extract still validates selected source bytes.
                 selection = workspace / 'selection.json'

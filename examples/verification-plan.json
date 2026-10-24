@@ -1,0 +1,10 @@
+{
+  "strategy": "focused",
+  "rationale": "The regression establishes the required observable behavior without prescribing the historical implementation.",
+  "dependencies": ["Use the project's pinned test runtime and dependencies"],
+  "instructions": "PYTHONPATH=. python3 tests/test_regression.py",
+  "limitations": ["Review fixture and dependency requirements for the selected project"],
+  "artifacts": [
+    {"commit": "REPLACE_WITH_FULL_FUTURE_SHA", "path": "tests/test_regression.py", "purpose": "Establishes the task-specific regression behavior", "test_only": true}
+  ]
+}

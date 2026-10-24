@@ -91,7 +91,7 @@ class CleanupTests(HistoryFixture):
         self.assertTrue((attempt / 'workspace.tar.gz').is_file())
         self.assertIn('runtime.txt', (attempt / 'cleanup-changes.patch').read_text())
         review = self.review | {'changes': producer_report()['changes']}
-        frozen = self.store.finalize('cleanup', review)
+        frozen = self.freeze('cleanup', review)
         self.assertTrue((self.store.task('cleanup') / 'versions' / frozen['version'] / 'cleanup-attempt.json').exists())
         restored = self.root / 'cleaned-historical-workspace'
         self.store.materialize('cleanup', frozen['version'], restored)
@@ -101,16 +101,16 @@ class CleanupTests(HistoryFixture):
         self.assertNotEqual(subprocess.run(['git', '-C', str(restored), 'cat-file', '-e', self.cleanup_head],
                                            stderr=subprocess.DEVNULL).returncode, 0)
         (self.workspace / 'runtime.txt').write_text('stale')
-        with self.assertRaisesRegex(ValueError, 'stale'):
-            self.store.finalize('cleanup', review)
+        with self.assertRaisesRegex(ValueError, 'ready-for-review'):
+            self.freeze('cleanup', review)
 
     def test_missing_reason_and_process_failure_require_review(self):
         report, _ = self.run_producer(producer_report() | {'changes': []}, code=7)
         self.assertEqual(report['disposition'], 'needs-review')
         self.assertTrue(any('every changed path' in issue for issue in report['issues']))
         self.assertTrue(any('successfully' in issue for issue in report['issues']))
-        with self.assertRaisesRegex(ValueError, 'requires revision/review'):
-            self.store.finalize('cleanup', self.review | {'changes': producer_report()['changes']})
+        with self.assertRaisesRegex(ValueError, 'ready-for-review'):
+            self.freeze('cleanup', self.review | {'changes': producer_report()['changes']})
 
     def test_task_altering_or_unavailable_setup_cannot_be_ready(self):
         from mineval.cleanup import validate_report
@@ -121,8 +121,8 @@ class CleanupTests(HistoryFixture):
             'summary': 'Essential service would require unsafe production access'})
         self.assertEqual(rejected['disposition'], 'reject')
         self.assertEqual(self.store.inspect_task('cleanup')['cleanup']['disposition'], 'reject')
-        with self.assertRaisesRegex(ValueError, 'requires revision/review'):
-            self.store.finalize('cleanup', self.review | {'changes': producer_report()['changes']})
+        with self.assertRaisesRegex(ValueError, 'ready-for-review'):
+            self.freeze('cleanup', self.review | {'changes': producer_report()['changes']})
 
     def test_setup_failure_skips_tests_but_expected_bug_does_not(self):
         broken = diagnose(self.store, 'cleanup', sandbox=FakeRunner([step(1)]))

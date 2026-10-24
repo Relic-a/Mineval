@@ -38,7 +38,7 @@ def load_config(path):
 
 
 def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False,
-             workspace=None, config_path=None):
+             workspace=None, config_path=None, persist=True):
     """Pause the owning prep container only long enough to copy its current draft."""
     runner = sandbox or DockerSandbox()
     task, draft = store.task(task_id), store.draft(task_id)
@@ -98,6 +98,8 @@ def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False,
             report['status'] = 'environment_error'
             report['error'] = str(exc)
             report['cleanup_notes'] = getattr(exc, '__notes__', [])
+        if not persist:
+            return report
         reports = task / 'diagnostics'
         write_json(reports / (report['diagnostic_id'] + '.json'), report)
         from .artifacts import digest

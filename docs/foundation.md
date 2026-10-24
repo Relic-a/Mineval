@@ -22,7 +22,7 @@ external candidate -> import -> draft/workspace -> review + freeze -> version/sn
                  private evidence   fresh diagnostic sandbox        new per-run working copies
                        |
                        v
-                 private extraction (no application or execution)
+                 private extraction -> optional isolated validation -> independent review
 ```
 
 ## Stored artifacts
@@ -61,15 +61,20 @@ DATA/
       tree-hashes.json
       cleanup-changes.patch
       cleanup-report.json
-      cleanup-attempt.json         latest matching cleanup attempt (when present)
+      cleanup-attempt.json         matching ready-for-review cleanup attempt
       verify-config.json
       last-diagnostic.json
+      approval.json                exact independent review receipt
+      private/{verification,review,validations}/  never exported to benchmark workspaces
       artifact-hashes.json
     private/
       base/                        original base for review/diff, never agent-mounted
       future/<commit>/             imported future source/evidence
       diffs/<commit>.patch          Git imports only
       extraction-selection.json    optional extraction-session suggestion
+      extraction-attempts/<session>/  unavailable verification reports
+      reviews/<session>/           verdict/reasons, exact input hashes and producer
+      validations/<extraction>/<id>/  private fresh-container diagnostics
       extractions/<extraction>/
         extraction-manifest.json
         verification/<commit>/...
@@ -209,8 +214,39 @@ a completed/checks-failed diagnostic can be ready for review. A malformed report
 process failure is needs-review; producer reject/needs-review choices remain visible
 without deleting the task or preventing a subsequent cleanup attempt. Unsupported
 filesystem output is not imported. Frozen revisions copy a matching ready-for-review
-attempt report, but distinct independent review/extraction enforcement is Phase 5.
+attempt report and require a separate extraction session plus independent approval.
 
 The Phase 3 dedicated adapters now also serve cleanup. There is no task discovery,
 PR resolution/mining, scheduler, evaluated run coordinator, adaptive verifier or
-scorer. Private extraction/review orchestration and grading remain later phases.
+scorer. Benchmark execution and grading remain later phases.
+
+
+Phase 5 `review.session` runs extraction and independent review in new containers,
+using explicit executables or the dedicated ephemeral Codex adapter. Private copies
+contain base, cleaned tree, future evidence, diffs and context; reviewer copies also
+contain cleanup, diagnostics, extraction and optional validation evidence. Only
+structured reports survive. Agent edits cannot change the preserved source bytes.
+Session IDs are host assigned; each role runs in a separate container with no reused
+agent state. This enforces session separation, not different underlying model weights
+or a guarantee that an external executable is intellectually independent.
+
+Extraction manifests record focused/fuller plans, behavioral rationale, dependencies,
+run instructions, limitations, source hashes and producer identity. Unavailable plans
+are saved under private/extraction-attempts and cannot freeze. Legacy manual extractions
+remain readable but lack the session identity required for new approval.
+
+`review.validate` overlays original extracted files in disposable base/future copies
+and calls diagnostics without updating the cleanup's latest report. Append-only
+private/validations/<extraction>/<id> receipts retain inputs, configuration, image and
+command outcomes. Environment failures are distinct from behavioral failures; neither
+base failure nor future success is automatic approval. Validation is optional where
+infeasible. Future checks use original future trees without cleanup adaptations.
+
+Private review reports bind exact cleanup/extraction manifests, current diagnostic,
+metadata and validation receipts. Approve/revise/reject and reasons are mandatory.
+New `finalize --review-id` requires approval and copies private verification, review
+and validations into the immutable revision. `snapshot.tar.gz` and materialized
+workspaces contain only the cleaned tree plus separately reconstructed pre-base Git;
+private revision subdirectories must never be mounted for benchmark agents. Existing
+frozen versions remain readable, while inline legacy review attestations cannot create
+new revisions. The owning OS user remains outside this application integrity boundary.
