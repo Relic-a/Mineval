@@ -8,8 +8,8 @@ import socketserver
 import tempfile
 import threading
 
-from .artifacts import copy_tree, read_json, write_json
-from .sandbox import DockerSandbox, Limits, SandboxSpec
+from .artifacts import copy_tree, copy_worktree, digest, read_json, write_json
+from .sandbox import DockerSandbox, Limits, RunResult, SandboxSpec
 from .verification import diagnose, load_config
 
 
@@ -29,7 +29,7 @@ def request(action='verify', socket_path=None):
 
 
 @contextmanager
-def broker(store, task_id, runner, agent):
+def broker(store, task_id, runner, agent, *, workspace=None, config_path=None, diagnostic_ids=None):
     # /tmp keeps the Unix path under Linux's 108-byte sockaddr limit.
     with tempfile.TemporaryDirectory(prefix='mineval-broker-') as temp:
         path = Path(temp) / 'verify.sock'
@@ -39,7 +39,10 @@ def broker(store, task_id, runner, agent):
                 try:
                     payload = json.loads(self.rfile.readline(1024))
                     if payload == {'action': 'verify'}:
-                        response = diagnose(store, task_id, sandbox=runner, agent=agent, already_locked=True)
+                        response = diagnose(store, task_id, sandbox=runner, agent=agent, already_locked=True,
+                                            workspace=workspace, config_path=config_path)
+                        if diagnostic_ids is not None:
+                            diagnostic_ids.append(response['diagnostic_id'])
                     elif payload == {'action': 'report'}:
                         response = read_json(store.task(task_id) / 'verify-latest.json')
                     else:
@@ -61,8 +64,10 @@ def broker(store, task_id, runner, agent):
                 thread.join()
 
 
-def session(store, task_id, command, *, context=None, stage='cleanup'):
-    """Run an explicitly supplied executable; no assumptions about agent protocol."""
+def session(store, task_id, command=None, *, context=None, stage='cleanup', adapter=None, auth_file=None):
+    """Run isolated cleanup or the legacy explicit private-extraction command."""
+    if stage not in ('cleanup', 'extraction'):
+        raise ValueError('Unknown preparation stage')
     runner = DockerSandbox(context=context)
     with store.operation(task_id):
         draft = store.draft(task_id)
@@ -90,6 +95,39 @@ def session(store, task_id, command, *, context=None, stage='cleanup'):
                 if selection.exists():
                     write_json(store.task(task_id) / 'private' / 'extraction-selection.json', read_json(selection))
                 return result
+        return cleanup_session(store, task_id, command, runner=runner, adapter=adapter, auth_file=auth_file)
+
+
+def cleanup_session(store, task_id, command, *, runner, adapter=None, auth_file=None):
+    """Caller owns the task lock. Mount only disposable historical tree/control copies."""
+    from .cleanup import INSTRUCTIONS, restore_history, save_attempt
+    from .agents import CodexAdapter, FakeAdapter, POLICY, provision_auth
+    import time
+    draft = store.draft(task_id)
+    # Keep publication renames on the store filesystem; only the disposable child
+    # workspace/control directories are mounted, never the store itself.
+    with tempfile.TemporaryDirectory(prefix='.cleanup-', dir=store.root) as temp:
+        temp = Path(temp)
+        workspace, control, inputs = temp / 'workspace', temp / 'control', temp / 'inputs'
+        input_hashes = copy_tree(draft / 'workspace', workspace)
+        restore_history(store, task_id, workspace)
+        control.mkdir(); inputs.mkdir()
+        config = load_config(draft / 'control/verify.json')
+        write_json(control / 'verify.json', config)
+        summary = read_json(store.task(task_id) / 'metadata.json')['task_summary']
+        (inputs / 'prompt.txt').write_text(POLICY + '\n' + INSTRUCTIONS + '\nTask to preserve:\n' + summary)
+        write_json(control / 'task.json', {'task_summary': summary})
+        if adapter:
+            if command or not isinstance(adapter, (CodexAdapter, FakeAdapter)):
+                raise ValueError('Use explicit argv or a dedicated adapter')
+            command = adapter.stage(inputs)
+        if not command:
+            raise ValueError('Supply a cleanup command or adapter')
+        if auth_file:
+            if not isinstance(adapter, CodexAdapter):
+                raise ValueError('Only Codex may receive authentication')
+            provision_auth(auth_file, inputs / 'auth.json')
+        limits = Limits(**config.get('limits', {}))
         # The broker is attached after creating the container but before starting it.
         # Use a handle proxy so the broker can pause the current prep container.
         class Agent:
@@ -99,14 +137,28 @@ def session(store, task_id, command, *, context=None, stage='cleanup'):
             def unpause(self):
                 self.container.unpause()
         agent = Agent()
-        with broker(store, task_id, runner, agent) as directory:
+        diagnostic_ids = []
+        with broker(store, task_id, runner, agent, workspace=workspace,
+                    config_path=control / 'verify.json', diagnostic_ids=diagnostic_ids) as directory:
             spec = SandboxSpec(config['image'], tuple(command), limits,
-                               workspace=draft / 'workspace', control=draft / 'control', broker=directory,
-                               network=config.get('network', 'bridge'), workdir=config.get('workdir', '/workspace'))
+                               workspace=workspace, control=control, broker=directory, inputs=inputs,
+                               network='bridge', workdir='/workspace', retain_logs=False)
             with runner.container(spec) as container:
                 agent.container = container
                 container.start()
-                import time
                 start = time.monotonic()
                 timed_out = container.wait(limits.timeout_seconds)
-                return container.result(timed_out=timed_out, duration_seconds=time.monotonic() - start)
+                state = container.inspect()
+                if state['Running']:
+                    raise ValueError('Cleanup container still running')
+                result = RunResult(container.id, container.image_id, state['ExitCode'], timed_out,
+                                   state.get('OOMKilled', False), '', '', False, time.monotonic() - start)
+        # Discard untrusted Git without invoking host Git on agent-writable metadata.
+        clean = temp / 'clean'
+        copy_worktree(workspace, clean)
+        save_attempt(store, task_id, clean, control, result,
+                     image_id=container.image_id, diagnostic_ids=diagnostic_ids,
+                     producer={'harness': adapter.name, 'model': adapter.model} if adapter else
+                     {'harness': 'explicit-command', 'model': 'unspecified'},
+                     input_hashes=input_hashes, instructions_sha256=digest(inputs / 'prompt.txt'))
+        return result

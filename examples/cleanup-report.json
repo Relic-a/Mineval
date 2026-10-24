@@ -1,0 +1,14 @@
+{
+  "disposition": "ready-for-review",
+  "summary": "Restore the historical environment while leaving the task unsolved",
+  "objective_preserved": true,
+  "changes": [
+    {"path": "runtime.txt", "reason": "Select the runtime available in the pinned preparation image"}
+  ],
+  "environment": {
+    "runtime": "Record the actual runtime version; host records resolved image IDs",
+    "dependencies": ["Record exact dependency versions and lockfiles, or explain gaps"],
+    "services": [],
+    "limitations": []
+  }
+}

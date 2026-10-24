@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from uuid import uuid4
 
-from .artifacts import copy_tree, read_json, write_json
+from .artifacts import copy_tree, copy_worktree, read_json, write_json
 from .sandbox import DockerSandbox, Limits, SandboxError, SandboxSpec
 
 
@@ -21,8 +21,11 @@ def load_config(path):
         raise ValueError('Declare between 1 and 50 diagnostic commands')
     names = set()
     for step in commands:
-        if set(step) - {'name', 'kind', 'argv', 'timeout_seconds'} or step.get('kind') not in ('setup', 'build', 'tests', 'smoke'):
+        if set(step) - {'name', 'kind', 'argv', 'timeout_seconds', 'expected_failure'} or step.get('kind') not in ('setup', 'build', 'tests', 'smoke'):
             raise ValueError('Invalid command fields or kind')
+        if 'expected_failure' in step and (step['kind'] != 'tests' or
+                not isinstance(step['expected_failure'], str) or not step['expected_failure'].strip()):
+            raise ValueError('Expected failures require a tests command and a reason')
         name = step.get('name')
         if not isinstance(name, str) or not name or name in names:
             raise ValueError('Command names must be nonempty and unique')
@@ -34,7 +37,8 @@ def load_config(path):
     return config
 
 
-def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False):
+def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False,
+             workspace=None, config_path=None):
     """Pause the owning prep container only long enough to copy its current draft."""
     runner = sandbox or DockerSandbox()
     task, draft = store.task(task_id), store.draft(task_id)
@@ -45,13 +49,15 @@ def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False):
             if agent:
                 agent.pause()
             try:
-                config = load_config(draft / 'control' / 'verify.json')
-                copied = copy_tree(draft / 'workspace', Path(temp) / 'workspace')
+                config = load_config(config_path or draft / 'control' / 'verify.json')
+                copied = copy_worktree(workspace, Path(temp) / 'workspace') if workspace else copy_tree(draft / 'workspace', Path(temp) / 'workspace')
             finally:
                 if agent:
                     agent.unpause()
             report['input_hashes'] = copied
             report['configuration'] = config
+            from .cleanup import restore_history
+            restore_history(store, task_id, Path(temp) / 'workspace')
             limits = Limits(**config.get('limits', {}))
             spec = SandboxSpec(config['image'], ('/bin/sh', '-c', 'while :; do sleep 1; done'), limits,
                                workspace=Path(temp) / 'workspace', network=config.get('network', 'bridge'),
@@ -75,12 +81,19 @@ def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False):
                     code = result['exit_code']
                     status = ('timeout' if result['timed_out'] else 'oom' if result['oom_killed'] else
                               'environment_error' if code == 125 else 'command_error' if code in (126, 127) else 'passed' if code == 0 else 'failed')
-                    report['commands'].append({'name': command['name'], 'kind': command['kind'], 'status': status, **result})
+                    interpretation = ('environment_failure' if status in ('timeout', 'oom', 'environment_error', 'command_error')
+                                      or (status == 'failed' and command['kind'] in ('setup', 'build')) else
+                                      'expected_task_failure' if status == 'failed' and command.get('expected_failure') else
+                                      'behavior_failure' if status == 'failed' else 'passed')
+                    report['commands'].append({'name': command['name'], 'kind': command['kind'], 'status': status,
+                                               'interpretation': interpretation,
+                                               'expected_failure': command.get('expected_failure'), **result})
                     if result['logs_truncated']:
                         report['warnings'].append(f"Output truncated for command {command['name']}")
-                    stopped = code == 125 or result['timed_out'] or result['oom_killed'] or not container.inspect()['Running']
+                    stopped = interpretation == 'environment_failure' or not container.inspect()['Running']
                 if any(x['status'] != 'passed' for x in report['commands']):
-                    report['status'] = ('environment_error' if any(x['status'] == 'environment_error' for x in report['commands']) else 'checks_failed')
+                    report['status'] = ('environment_error' if any(x.get('interpretation') == 'environment_failure'
+                                                                  or x['status'] == 'skipped' for x in report['commands']) else 'checks_failed')
         except (SandboxError, ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
             report['status'] = 'environment_error'
             report['error'] = str(exc)

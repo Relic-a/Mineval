@@ -56,13 +56,14 @@ class FakeAdapter:
     outcome: str = 'success'
     model: str = 'fake'
     name: str = 'fake'
+    cleanup: bool = False
 
     def stage(self, inputs):
         if self.outcome not in ('success', 'error', 'timeout'):
             raise ValueError('Unknown fake outcome')
-        write_json(inputs / 'fake.json', {'outcome': self.outcome})
+        write_json(inputs / 'fake.json', {'outcome': self.outcome, 'cleanup': self.cleanup})
         return ('python3', '-c', '''
-import json, pathlib, time
+import json, pathlib, time, subprocess
 cfg = json.loads(pathlib.Path('/mineval-input/fake.json').read_text())
 if cfg['outcome'] == 'timeout':
     time.sleep(86400)
@@ -70,7 +71,15 @@ if cfg['outcome'] == 'error':
     raise SystemExit(7)
 assert pathlib.Path('/workspace/.git').is_dir()
 assert pathlib.Path('/mineval-input/prompt.txt').read_text()
-pathlib.Path('/workspace/mineval-fake-result.txt').write_text('fake adapter completed\\n')
+if cfg['cleanup']:
+    subprocess.run(['python3', '-m', 'mineval', 'verify'], check=False, stdout=subprocess.DEVNULL)
+    pathlib.Path('/mineval-control/cleanup-report.json').write_text(json.dumps({
+        'disposition': 'ready-for-review', 'summary': 'Fake cleanup; no edits',
+        'objective_preserved': True, 'changes': [], 'environment': {
+            'runtime': 'Trusted fixture image', 'dependencies': [], 'services': [],
+            'limitations': ['Fake adapter does not assess task integrity']}}))
+else:
+    pathlib.Path('/workspace/mineval-fake-result.txt').write_text('fake adapter completed\\n')
 pathlib.Path('/mineval-control/final.json').write_text(json.dumps({
     'summary': 'Fake adapter completed', 'historical_solution_seen': 'no'}))
 ''')

@@ -45,6 +45,14 @@ DATA/
     evaluations/<evaluation-id>.sha256  identity integrity receipt
     diagnostics/<id>.json          diagnostic report, with separate hash receipt
     verify-latest.json             latest-report convenience copy
+    cleanup-latest.json            latest cleanup producer result, never approval
+    cleanups/<cleanup-id>/         append-only attempt artifacts
+      workspace.tar.gz             tree only, no agent-controlled Git
+      tree-hashes.json
+      cleanup-changes.patch         all differences from original base
+      verify-config.json
+      cleanup-report.json          reasons, prerequisites, producer, diagnostic IDs
+      artifact-hashes.json
     rejections/<id>.json           explicit rejection reason, with hash receipt
     versions/<version>/
       snapshot.tar.gz
@@ -53,6 +61,7 @@ DATA/
       tree-hashes.json
       cleanup-changes.patch
       cleanup-report.json
+      cleanup-attempt.json         latest matching cleanup attempt (when present)
       verify-config.json
       last-diagnostic.json
       artifact-hashes.json
@@ -111,8 +120,9 @@ history copies use bounded link-free Git-aware inventories. Never mount the sour
 repo. See README for Phase 3 adapter usage and limitations.
 
 Exact layout is an implementation detail after registration, not a requirement on
-an external producer. The host store is mode 0700. Cleanup receives only its draft,
-controls, and a short-lived broker directory. Extraction receives a separate private
+an external producer. The host store is mode 0700. Cleanup receives disposable copies
+of its draft and controls, reconstructed trusted historical Git, read-only instructions
+and a short-lived broker directory. Extraction receives a separate private
 review copy, not the cleanup draft or frozen versions. A future evaluated process
 receives only a newly materialized workspace. Do not hand it the task directory.
 
@@ -179,8 +189,28 @@ The prep container is paused during copying using Docker's freezer, then resumed
 Other host writers must be stopped; inventories reject detected concurrent changes.
 Task-level file locks exclude competing host operations and active sessions.
 
-There is no model provider, prompt protocol, credential broker, task discovery,
-PR resolution/mining, scheduler, evaluated run coordinator, adaptive verifier, or
-scorer. The future execution adapter should materialize a separate workspace, own
-a container context, deliver its chosen harness command, collect/export results,
-and destroy it. Private grading remains a separate future stage.
+Phase 4 `service.cleanup_session` runs under that lock, with dedicated adapter or
+explicit argv, bridge networking and disabled agent logs. `cleanup.INSTRUCTIONS`
+defines task-preserving edits and the separate producer report; it is mounted at
+`/mineval-input/prompt.txt` and delivered as Codex stdin. `cleanup.save_attempt`
+compares every output path to the original base, validates per-path reasons and
+environment prerequisites, stores an immutable-by-API attempt and publishes the
+tree/config back to the mutable draft. Each attempt has an independent ID, input
+hashes, prompt hash and producer identity. No agent Git is read by host Git: tree
+copying ignores its top-level `.git`, and diagnostics/materialization rebuild history
+from the protected hashed pack. Legacy raw exports cannot provide historical Git.
+
+The broker is bound to the active disposable workspace/config, never caller-supplied
+paths. Fresh checks save command-level interpretations: environment failures stop
+later checks, whereas behavioral test failures do not invalidate a historical base.
+An optional tests-only `expected_failure` reason is a producer assertion for review.
+Each attempt references its diagnostic IDs; only an exact current tree/config with
+a completed/checks-failed diagnostic can be ready for review. A malformed report or
+process failure is needs-review; producer reject/needs-review choices remain visible
+without deleting the task or preventing a subsequent cleanup attempt. Unsupported
+filesystem output is not imported. Frozen revisions copy a matching ready-for-review
+attempt report, but distinct independent review/extraction enforcement is Phase 5.
+
+The Phase 3 dedicated adapters now also serve cleanup. There is no task discovery,
+PR resolution/mining, scheduler, evaluated run coordinator, adaptive verifier or
+scorer. Private extraction/review orchestration and grading remain later phases.

@@ -186,7 +186,7 @@ class DiagnosticsAcceptanceTests(HistoryFixture):
         runner = FakeRunner([step(), step(1), step(127)])
         reports = [diagnose(self.store, 'example', sandbox=runner) for _ in range(2)]
         for report in reports:
-            self.assertEqual(report['status'], 'checks_failed')
+            self.assertEqual(report['status'], 'environment_error')
             self.assertEqual([x['status'] for x in report['commands']], ['passed', 'failed', 'command_error'])
             self.assertEqual(report['commands'][1]['stderr'], 'stderr')
         self.assertNotEqual(reports[0]['container_id'], reports[1]['container_id'])
@@ -210,7 +210,7 @@ class DiagnosticsAcceptanceTests(HistoryFixture):
         runner, agent = FakeRunner([step(), step(1), step(127)]), Mock()
         with self.store.operation('example'), broker(self.store, 'example', runner, agent) as directory:
             report = request(socket_path=str(directory / 'verify.sock'))
-            self.assertEqual(report['status'], 'checks_failed')
+            self.assertEqual(report['status'], 'environment_error')
             self.assertEqual(request('report', str(directory / 'verify.sock')), report)
             self.assertIn('error', request('mount-host', str(directory / 'verify.sock')))
         agent.pause.assert_called_once()
@@ -260,16 +260,20 @@ class PublicationGuardTests(HistoryFixture):
         runner = runner_class.return_value
         container = Mock()
         container.wait.return_value = False
+        container.inspect.return_value = {'Running': False, 'ExitCode': 0}
+        container.image_id = 'sha256:image'
         container.result.return_value = RunResult('id', 'image', 0, False, False, '', '', False, 0)
         runner.container.return_value.__enter__.return_value = container
         session(self.store, 'example', ['generic-executable', 'arg'])
         spec = runner.container.call_args.args[0]
-        self.assertEqual(spec.workspace, self.workspace.resolve())
-        self.assertEqual(spec.control, self.config_path.parent.resolve())
+        self.assertNotEqual(spec.workspace, self.workspace.resolve())
+        self.assertNotEqual(spec.control, self.config_path.parent.resolve())
         self.assertEqual(spec.command, ('generic-executable', 'arg'))
         self.assertIsNotNone(spec.broker)
         self.assertNotIn('private', str(spec.workspace))
         self.assertFalse(spec.broker.exists())
+        self.assertFalse(spec.retain_logs)
+        self.assertEqual(read_json(self.store.task('example') / 'cleanup-latest.json')['disposition'], 'needs-review')
 
     @patch('mineval.service.DockerSandbox')
     def test_extraction_session_separate_private_copy_only_saves_suggestions(self, runner_class):

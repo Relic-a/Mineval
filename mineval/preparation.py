@@ -124,6 +124,7 @@ class Store:
                 raise ValueError('Task is not registered')
             return {'metadata': read_json(task / 'metadata.json'),
                     'state': read_json(task / 'status.json'),
+                    'cleanup': read_json(task / 'cleanup-latest.json') if (task / 'cleanup-latest.json').exists() else None,
                     'prepared_revisions': sorted(p.name for p in (task / 'versions').iterdir())
                     if (task / 'versions').exists() else [],
                     'runs': sorted(p.name for p in (task / 'runs').glob('*.json')),
@@ -399,6 +400,20 @@ class Store:
             from .verification import load_config
             config = load_config(draft / 'control' / 'verify.json')
             write_json(staged / 'verify-config.json', config)
+            cleanup = task / 'cleanup-latest.json'
+            if cleanup.exists():
+                record = read_json(cleanup)
+                attempt = task / 'cleanups' / identifier(record['cleanup_id'])
+                actual = inventory(attempt)
+                actual.pop('artifact-hashes.json', None)
+                if actual != read_json(attempt / 'artifact-hashes.json'):
+                    raise ValueError('Cleanup artifact hash mismatch')
+                if (record != read_json(attempt / 'cleanup-report.json') or
+                        record['disposition'] != 'ready-for-review' or
+                        current != read_json(attempt / 'tree-hashes.json') or
+                        config != read_json(attempt / 'verify-config.json')):
+                    raise ValueError('Cleanup requires revision/review or is stale; rerun cleanup before finalization')
+                shutil.copyfile(attempt / 'cleanup-report.json', staged / 'cleanup-attempt.json')
             if not (task / 'verify-latest.json').exists():
                 raise ValueError('Run a fresh diagnostic before finalization')
             diagnostic = read_json(task / 'verify-latest.json')

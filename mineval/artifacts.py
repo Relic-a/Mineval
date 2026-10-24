@@ -52,13 +52,16 @@ def relative(value):
     return p
 
 
-def inventory(root, *, allow_git=False):
+def inventory(root, *, allow_git=False, skip_root_git=False):
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise ValueError('Artifact root must be a directory, not a link')
     result = {}
     total = count = 0
     for current, dirs, files in os.walk(root, followlinks=False):
+        if skip_root_git and Path(current) == root:
+            dirs[:] = [name for name in dirs if name != '.git']
+            files[:] = [name for name in files if name != '.git']
         dirs.sort()
         files.sort()
         for name in dirs + files:
@@ -84,6 +87,17 @@ def copy_tree(source, target, *, allow_git=False):
     before = inventory(source, allow_git=allow_git)
     shutil.copytree(source, target)
     if inventory(source, allow_git=allow_git) != before or inventory(target, allow_git=allow_git) != before:
+        raise ValueError('Source changed during copy; stop external writers and retry')
+    return before
+
+
+def copy_worktree(source, target):
+    """Copy an agent tree without reading or trusting its top-level Git metadata."""
+    source = Path(source)
+    before = inventory(source, skip_root_git=True)
+    shutil.copytree(source, target, ignore=lambda directory, names:
+                    {'.git'} if Path(directory) == source else set())
+    if inventory(source, skip_root_git=True) != before or inventory(target) != before:
         raise ValueError('Source changed during copy; stop external writers and retry')
     return before
 

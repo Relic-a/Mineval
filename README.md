@@ -18,7 +18,7 @@ mineval --context rootless doctor
 Mineval checks these capabilities and fails closed. It never installs Docker,
 changes contexts, pulls images, forwards host credentials, or mounts a Docker socket.
 Images must be preloaded and contain `/bin/sh` and `sleep`; a cleanup image must also
-contain the `mineval` client (see [example Dockerfile](examples/Dockerfile.preparation)).
+contain Git and the `mineval` client (see [example Dockerfile](examples/Dockerfile.preparation)).
 Use a trusted image without embedded credentials. Container UID 0 maps to the
 unprivileged daemon owner, permitting access to the managed bind mounts.
 See Docker's [rootless resource requirements](https://docs.docker.com/engine/security/rootless/tips/#limiting-resources).
@@ -40,7 +40,8 @@ persistent: supply one or let intake assign one from repository identity and com
 boundaries. Re-adding an ID fails. Inspection returns readable JSON.
 Prepared revisions use the existing immutable `versions/<version>` artifacts created
 by `finalize`; revision inspection checks their integrity receipts. `prepare` still
-requires an explicit executable and does not select or call a model automatically.
+requires an explicit executable. `cleanup` selects a dedicated fake or Codex adapter
+for the same preparation workflow; it defaults to fake.
 
 Use [suite.json](examples/suite.json) for an explicit ordered list of task/version
 pairs. Suite creation checks each prepared revision and pins its snapshot and artifact
@@ -141,12 +142,41 @@ Launch any explicit preparation executable from the host:
 mineval --context rootless --data mineval-data prepare external-task-001 -- /path/in/image/to/executable arg
 ```
 
-This is a generic command boundary, not a model integration. The executable receives
-only the draft workspace, `/mineval-control` (configuration and task summary), and
-`/mineval-broker` (a dedicated Unix socket). No future material, host repository,
-private store, arbitrary host paths, or Docker socket is mounted. Agent-specific
-prompt delivery belongs to the caller. stdout/stderr are returned after the session;
-this CLI does not implement an interactive agent terminal.
+The executable receives a disposable copy of the current draft at `/workspace`,
+freshly reconstructed pre-base Git history, disposable `/mineval-control`, read-only
+`/mineval-input/prompt.txt` with task-preservation instructions, and `/mineval-broker`
+(a dedicated Unix socket). No future material, host repository, private store or
+Docker socket is mounted. The cleaner must follow those instructions and write
+`/mineval-control/cleanup-report.json`, following [cleanup-report.json](examples/cleanup-report.json).
+Agent process logging is disabled; no transcript is retained.
+
+Alternatively use the Phase 3 adapters (image comes from `verify.json`):
+
+```sh
+mineval --context rootless --data mineval-data cleanup external-task-001 --adapter fake
+# Explicit opt-in to a real model, with only copied model authentication:
+mineval --context rootless --data mineval-data cleanup external-task-001 --adapter codex --model gpt-6-luna --auth-file /path/to/auth.json
+```
+
+The fake cleaner makes no edits and invokes a fresh diagnostic. Codex needs an image
+with its CLI, Bash, Git, project runtime and the Mineval client. Explicit commands
+work with legacy raw exports; those have no Git history. The fake adapter requires
+a Git import. Ordinary outbound access is enabled for cleanup; future-solution lookup
+is prohibited by instructions, as in Phase 3.
+
+After termination the host discards agent Git metadata and publishes the validated
+tree and diagnostic configuration back to the draft. Each attempt saves a separate
+`tasks/<task>/cleanups/<id>/` archive, tree hashes, binary patch, environment/config,
+producer identity and report with hashes. Changes are compared to the original base,
+including changes from earlier attempts; every path needs a reason. Runtime,
+dependency versions, supporting services and limitations must be recorded.
+`task show` exposes the latest cleanup result. `ready-for-review` is a producer claim,
+pending independent review. Missing/invalid reports, stale diagnostics, environment
+failures or process failures produce `needs-review`; a producer may explicitly choose
+`needs-review` or `reject` when setup would alter the task or need unsafe infrastructure.
+These dispositions stay on the preparation attempt; use `reject` to reject the task.
+Safe partial edits are retained for subsequent cleanup attempts. Unsupported output
+links/special files fail collection and leave the prior draft intact.
 
 While that session remains running, the agent can edit the workspace and controls,
 and invoke repeatedly:
@@ -157,7 +187,7 @@ mineval verify report
 ```
 
 The socket serves **only this task's** verify/latest-report requests. The host pauses
-the preparation container briefly, copies the draft and configuration, then resumes
+the preparation container briefly, copies its current workspace and configuration, then resumes
 it before checking the copy in a new sandbox. Setup/build/tests share this fresh
 sandbox so setup effects persist within a diagnostic, then all changes are discarded.
 The original draft and preparation process remain available. Direct host checks are
@@ -175,10 +205,18 @@ command errors (reserved exit codes 126/127; 125 denotes a Docker control error)
 timeouts, and skipped commands. These reserved codes follow Docker's command-status
 convention; do not use them as ordinary test-failure codes. A timeout kills the entire
 verification container and skips later steps. Other test failures remain diagnostic.
+Setup/build failures and missing commands also skip later checks and yield
+`environment_error`. Each command has an `interpretation`: `passed`,
+`environment_failure`, `behavior_failure`, or `expected_task_failure`. To annotate
+a known historical failure, add `"expected_failure": "reason the base should fail"`
+to a `tests` command. This records a claim for review; unexplained failures remain
+behavior failures, and an expected-failure annotation never excuses infrastructure
+errors. Diagnostics reconstruct trusted pre-base Git afresh and cannot change the draft.
 The CLI returns 0 for completed checks, 1 for failed checks, 125 for environment errors.
 It never interprets log text or rejects a task because tests fail.
 
-`network` is configurable as `bridge` (preparation default) or `none`; host networking
+Diagnostic `network` is configurable as `bridge` (default) or `none`; cleanup agents
+use `bridge`. Host networking
 is rejected. Network access does not provision external services or credentials.
 The root filesystem is read-only; install project dependencies into the workspace
 or choose a suitable preloaded image. Do not add secrets to controls or code.
@@ -208,8 +246,13 @@ mineval --data mineval-data finalize external-task-001 --review review.json
 
 Finalization requires a diagnostic of the exact current tree/configuration in which
 at least one command ran. Failing historical tests are allowed. Infrastructure-only
-failures and stale diagnostics cannot publish a version. Active sessions hold a task
-lock, preventing concurrent finalization or another host preparation operation.
+failures and stale diagnostics cannot publish a version. If cleanup attempts exist,
+finalization also requires the latest attempt to be
+`ready-for-review` and match the current tree/config; its report is preserved in the
+version. Phase 5 still must enforce a distinct independent reviewer and private
+extraction approval; the existing `finalize --review` remains an attestation boundary.
+Active sessions hold a task lock, preventing concurrent finalization or another host
+preparation operation.
 Stop external editors before host checks/finalization; inconsistent copies are rejected.
 
 Every finalization creates a new version containing `snapshot.tar.gz`, its SHA-256,
@@ -283,8 +326,10 @@ MINEVAL_TEST_CONTEXT=rootless MINEVAL_TEST_IMAGE=YOUR_PRELOADED_SHELL_IMAGE pyth
 The normal suite uses real temporary Git history and simulated Docker lifecycle results.
 It covers intake, leakage boundaries, archives, reviews, hashes, extraction, rejection,
 independent workspaces, broker requests, diagnostics, deadlines, isolation arguments,
-and cleanup failures. Three live rootless checks are opt-in and require `/bin/sh` and
-`sleep` in the selected image; they never pull an image or modify daemon setup.
+and cleanup failures. Live rootless checks are opt-in. The preparation/cleanup checks
+need `/bin/sh`, `sleep`, Python 3, Git and this checkout's Mineval package in the image;
+they never pull an image or modify daemon setup. Set `MINEVAL_AGENT_TEST_IMAGE` to
+enable the separate live fake-adapter check as well.
 
 ## Phase 3: isolated agent primitive
 

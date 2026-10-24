@@ -65,6 +65,11 @@ def main(argv: list[str] | None = None) -> int:
         session_parser = commands.add_parser(action, help="launch explicit argv in an isolated preparation sandbox")
         session_parser.add_argument("task_id")
         session_parser.add_argument("command", nargs=argparse.REMAINDER)
+    cleanup = commands.add_parser('cleanup', help='minimally prepare a draft with an isolated dedicated adapter')
+    cleanup.add_argument('task_id')
+    cleanup.add_argument('--adapter', choices=('fake', 'codex'), default='fake')
+    cleanup.add_argument('--model', default='gpt-6-luna')
+    cleanup.add_argument('--auth-file')
     freeze = commands.add_parser("finalize")
     freeze.add_argument("task_id")
     freeze.add_argument("--review", required=True, help="JSON review accounting for all cleanup changes")
@@ -131,12 +136,20 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.action == "verify":
                     result = (read_json(store.task(args.task) / 'verify-latest.json') if args.mode == 'report'
                               else diagnose(store, args.task, sandbox=sandbox))
+                elif args.action == 'cleanup':
+                    from .agents import CodexAdapter, FakeAdapter
+                    result = asdict(session(store, args.task_id, context=args.context,
+                                            adapter=CodexAdapter(args.model) if args.adapter == 'codex'
+                                            else FakeAdapter(cleanup=True), auth_file=args.auth_file))
+                    result['cleanup'] = read_json(store.task(args.task_id) / 'cleanup-latest.json')
                 elif args.action in ("prepare", "extraction-session"):
                     command = args.command[1:] if args.command[:1] == ['--'] else args.command
                     if not command:
                         raise ValueError('Supply explicit executable argv after --; automatic agent preparation is not implemented')
                     result = asdict(session(store, args.task_id, command, context=args.context,
                                             stage='extraction' if args.action == 'extraction-session' else 'cleanup'))
+                    if args.action == 'prepare':
+                        result['cleanup'] = read_json(store.task(args.task_id) / 'cleanup-latest.json')
                 elif args.action == "finalize":
                     result = store.finalize(args.task_id, read_json(args.review))
                 elif args.action == "reject":

@@ -1,6 +1,8 @@
 # Example only: choose/pin an appropriate runtime and preload it in rootless Docker.
 # This packages the diagnostic client, without selecting any coding-agent harness.
 FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/mineval
 COPY pyproject.toml ./
 COPY mineval ./mineval
