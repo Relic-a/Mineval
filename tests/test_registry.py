@@ -173,10 +173,11 @@ class RegistryTests(HistoryFixture):
         version = self.store.finalize('example', self.review)['version']
         frozen = self.store.task('example') / 'versions' / version
         descriptor = frozen / 'workspace-format.json'
-        self.assertEqual(read_json(descriptor)['git_history']['format'], 'none')
+        self.assertEqual(read_json(descriptor)['git_history']['format'], 'base-pack-v1')
         # Simulate a pre-descriptor version, retaining its original receipt shape.
         from mineval.artifacts import inventory
         descriptor.unlink()
+        (frozen / 'history.pack').unlink()
         receipt = frozen / 'artifact-hashes.json'
         receipt.chmod(0o644)
         contents = inventory(frozen)
@@ -184,6 +185,7 @@ class RegistryTests(HistoryFixture):
         write_json(receipt, contents)
         self.store.materialize('example', version, self.root / 'legacy-workspace')
         self.assertTrue((self.root / 'legacy-workspace/app.py').is_file())
+        self.assertFalse((self.root / 'legacy-workspace/.git').exists())
         write_json(descriptor, {'schema_version': 2, 'git_history': {'format': 'future-bundle'}})
         contents = inventory(frozen)
         contents.pop('artifact-hashes.json')

@@ -95,16 +95,20 @@ tasks, revisions and records remain inspectable; retirement still blocks new pre
 suite enrollment, reservations and workspace creation.
 
 New revisions declare `workspace-format.json` schema version 1 with
-`tree: {"format": "tar", "path": "snapshot.tar.gz"}` and
-`git_history: {"format": "none"}`. Missing descriptors mean the legacy tree-only format.
-Materialization validates the full artifact receipt and rejects unknown formats before
-creating a destination. The current `.git` prohibition is a constraint of this legacy
-tree codec, not the permanent workspace contract. The later history phase should publish
-new revisions with an explicit sanitized-history format (for example a separately hashed
-bundle), update its reader, and keep legacy readers for old revisions. Never mutate old
-archives, suite references or run pins to retrofit history; never mount the source repo.
-Safe retention through the base commit is required by the decision contract but is not
-implemented here.
+`tree: {"format": "tar", "path": "snapshot.tar.gz"}`. Phase 3 Git imports save a
+hashed `private/history.pack` containing precisely the base-reachable object closure.
+New revisions publish `git_history: {"format": "base-pack-v1", "path": "history.pack",
+"base_commit": "<full SHA>"}`. Materialization verifies the receipt, exports the
+reviewed tree and reconstructs .git with only historical-base at the base commit.
+Preparation edits remain uncommitted; source Git configuration is never copied.
+
+Missing descriptors or `git_history: {"format": "none"}` retain legacy tree-only
+behavior. Raw exports cannot manufacture history; existing revisions are never
+rewritten. Reimport complete Git sources and publish new revisions to gain history.
+The dedicated agent runner refuses tree-only inputs. Unknown formats fail before
+creating destinations. Ordinary tree artifacts still prohibit .git; explicit trusted
+history copies use bounded link-free Git-aware inventories. Never mount the source
+repo. See README for Phase 3 adapter usage and limitations.
 
 Exact layout is an implementation detail after registration, not a requirement on
 an external producer. The host store is mode 0700. Cleanup receives only its draft,

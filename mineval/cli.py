@@ -26,6 +26,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--tmp-mb", type=int, default=64)
     run.add_argument("--timeout", type=float, default=300)
     run.add_argument("command", nargs=argparse.REMAINDER)
+    agent = commands.add_parser("agent-run", help="isolated Phase 3 adapter primitive; no benchmark records")
+    agent.add_argument("workspace", help="sanitized materialized historical workspace")
+    agent.add_argument("--instructions", required=True, help="task text file")
+    agent.add_argument("--output", required=True, help="new output directory")
+    agent.add_argument("--image", required=True, help="trusted preloaded image with git/runtime and adapter")
+    agent.add_argument("--adapter", choices=("fake", "codex"), default="fake")
+    agent.add_argument("--model", default="gpt-6-luna")
+    agent.add_argument("--auth-file", help="explicit Codex auth.json only; never a home directory")
+    agent.add_argument("--timeout", type=float, default=300)
     intake = commands.add_parser("import", help="register an externally selected candidate JSON")
     intake.add_argument("candidate")
     task = commands.add_parser("task", help="grow and inspect the local task pool")
@@ -76,6 +85,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     sandbox = DockerSandbox(context=args.context)
     try:
+        if args.action == "agent-run":
+            from pathlib import Path
+            from .agents import CodexAdapter, FakeAdapter, run_agent
+            result = run_agent(
+                args.workspace, Path(args.instructions).read_text(), args.output,
+                image=args.image,
+                adapter=CodexAdapter(args.model) if args.adapter == "codex" else FakeAdapter(),
+                context=args.context, limits=Limits(timeout_seconds=args.timeout),
+                auth_file=args.auth_file)
+            print(json.dumps(result))
+            return 0 if result['status'] == 'completed' else 124 if result['timed_out'] else 125
         if args.action not in ("doctor", "run"):
             from .artifacts import read_json
             from .intake import load_candidate

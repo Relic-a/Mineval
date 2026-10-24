@@ -54,7 +54,8 @@ operations and exit 2 with a clear not-implemented error, without creating recor
 contacting Docker. The existing `run` command is only a generic sandbox utility.
 Task-local `runs/` and `evaluations/` hold optional immutable identity reservations through
 the Store API, with exact revision and model/harness pins; no benchmark execution,
-evaluation, or adapter protocol is implemented in this phase. Inspect them with
+or evaluation is implemented yet. Phase 3 provides a separate isolated adapter
+primitive without benchmark records. Inspect reservations with
 `task run TASK_ID RUN_ID` and `task evaluation TASK_ID EVALUATION_ID`; `task show` lists
 their IDs. Existing data
 stores remain readable without a migration. See [decisions](docs/mineval-decisions.md)
@@ -219,8 +220,10 @@ Archive ownership/timestamps are normalized. Version files become read-only and 
 never overwritten through Mineval. Hash checks detect subsequent host tampering;
 this is application-level immutability, not protection from the owning OS user.
 New versions declare their tree/history format in `workspace-format.json`; legacy
-versions remain readable. Sanitized Git history through the base is deferred and must
-use new prepared versions rather than rewrite existing suites or run references. See
+versions remain readable. New Git imports save a sanitized base-history pack; new
+revisions include it and materialization reconstructs historical .git. Existing
+revisions and raw exports remain tree-only. Reimport complete Git sources and publish
+new revisions to use the isolated agent runner. See
 the [storage format and migration boundary](docs/foundation.md).
 
 ## Extract future verification privately
@@ -282,3 +285,99 @@ It covers intake, leakage boundaries, archives, reviews, hashes, extraction, rej
 independent workspaces, broker requests, diagnostics, deadlines, isolation arguments,
 and cleanup failures. Three live rootless checks are opt-in and require `/bin/sh` and
 `sleep` in the selected image; they never pull an image or modify daemon setup.
+
+## Phase 3: isolated agent primitive
+
+Run from the Mineval repository root. The input is a **materialized historical
+workspace**, not your live checkout. `agent-run` reads it and mounts only a temporary
+copy at `/workspace`. The agent process runs entirely inside rootless Docker;
+there is no host execution fallback.
+
+New Git intake retains exactly the objects reachable from the task base, including
+merge parents. A fresh Git repository is reconstructed and every stored object is
+checked against that closure. Future refs/tags, dangling objects, reflogs, remotes,
+hooks, configuration and alternates are not copied. Shallow sources fail closed.
+Pre-base content/messages remain visible unchanged. Preparation drafts and tree-only
+archives retain the existing codec; materialization attaches history separately,
+leaving preparation edits as working-tree changes.
+
+Use a trusted preloaded image with the project's runtime/dependencies.
+[Dockerfile.agent](examples/Dockerfile.agent) is an explicit recipe with Git, Python
+and Codex 0.163.0. That npm-based recipe remains unverified because Debian mirror
+downloads stalled. The alternate [native image recipe](examples/Dockerfile.agent-native)
+uses Python/Alpine plus Git, Bash and copies of the standalone Codex executable
+and its code-mode companion. Codex 0.164.0 was verified inside the alternate image.
+The host CLI is a launcher; neither it nor host installation/home/configuration is
+mounted. Compatibility is specific to the tested static Linux x86_64 binaries; never copy
+a host launcher and assume it is portable.
+
+```sh
+# Explicit build under an already configured rootless context.
+docker --context YOUR_ROOTLESS_CONTEXT build -f examples/Dockerfile.agent -t mineval-agent:local .
+
+# Substitute the exact task/revision from import/preparation.
+python -m mineval --data mineval-data workspace TASK VERSION /tmp/mineval-historical
+# Write the outcome-only task statement to /tmp/mineval-task.txt.
+python -m mineval --context YOUR_ROOTLESS_CONTEXT agent-run /tmp/mineval-historical \
+  --instructions /tmp/mineval-task.txt --output /tmp/mineval-fake-result \
+  --image mineval-agent:local --adapter fake
+
+# Paid execution: only when deliberately authorized; this user's allowed model is Luna.
+python -m mineval --context YOUR_ROOTLESS_CONTEXT agent-run /tmp/mineval-historical \
+  --instructions /tmp/mineval-task.txt --output /tmp/mineval-luna-result \
+  --image mineval-agent:local --adapter codex --model gpt-6-luna \
+  --auth-file /explicit/path/to/dedicated-auth.json --timeout 60
+```
+
+Output paths must be new. The fake adapter writes a predictable marker and never
+contacts a model; its Python API also supports error/timeout fixtures. Bridge outbound
+networking is enabled. Instructions forbid looking up the source project's future
+solution; this is a trust policy, not a technical guarantee.
+
+Codex receives task text on stdin, uses ephemeral state without user config/rules,
+and writes a short schema-constrained report. Container logging is disabled for this
+runner; stdout/stderr are discarded and temporary Codex state is destroyed. Results
+contain status/exit/timeout/OOM fields, a summary, and a **self-reported** solution-lookup
+declaration. Missing/malformed completion reports become errors. Interruption removes
+the container and temporary files; cleanup failures remain visible.
+
+Authentication is explicit: `--auth-file` copies only allowlisted Codex auth JSON
+into a temporary read-only input mount, then into tmpfs. Credentials are never read
+or inherited automatically. Use dedicated model-only credentials; never include
+GitHub/push credentials, unrelated secrets or user configuration in the image/input.
+The agent can read and potentially exfiltrate this model credential. Subscription
+inference and GPT 6 Luna access were verified on this machine; token refresh
+remains unverified. If setup cannot work safely, fix it;
+do not mount your home or run on the host. See
+[official authentication guidance](https://developers.openai.com/codex/auth).
+
+Only `result.json` and a bounded link-free `workspace.tar.gz` are retained. Agent Git
+metadata is discarded without executing it on the host. File changes from failed or
+timed-out work are retained too. Review outputs for secrets before sharing; an agent
+can copy any visible credentials into code. Bind workspace disk usage has no hard
+quota; exported artifacts use the existing byte/file limits. This primitive does not
+implement Phase 6 benchmark records or change suite/run identities.
+
+Deterministic checks use temporary synthetic Git repositories and simulated Docker:
+`python -m unittest discover -s tests -p test_agents.py -v`.
+Set `MINEVAL_AGENT_TEST_IMAGE` to a trusted preloaded Git/Python image and optionally
+`MINEVAL_TEST_CONTEXT` for an explicit live **fake-only** check. This never invokes
+Codex. See the [Phase 3 handoff](docs/phase-handoffs/phase-3.md) for actual live
+Docker and Luna smoke-test results.
+
+To build the native alternative, use a temporary context containing only the recipe
+and the two compatible standalone executables (no user configuration or credentials):
+
+```sh
+TASK_IMAGE_CONTEXT=$(mktemp -d /tmp/mineval-image-XXXXXX)
+cp examples/Dockerfile.agent-native "$TASK_IMAGE_CONTEXT/Dockerfile"
+# Replace this directory with the installation you have inspected.
+cp /home/relic/.local/share/mise/installs/codex/0.164.0/bin/codex "$TASK_IMAGE_CONTEXT/"
+cp /home/relic/.local/share/mise/installs/codex/0.164.0/bin/codex-code-mode-host "$TASK_IMAGE_CONTEXT/"
+docker --context mineval-rootless build -t mineval-agent:phase3-ready "$TASK_IMAGE_CONTEXT"
+rm -rf -- "$TASK_IMAGE_CONTEXT"
+```
+
+The context above includes binaries only. Authentication is provisioned at run time,
+never during image building. The native recipe checks Bash, Git, Python and Codex at
+build time; project-specific runtimes still need to be added explicitly.

@@ -51,6 +51,7 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(create[-5:], ("--entrypoint", "sh", IMAGE_ID, "-c", "echo '$HOME; $(id)'"))
         self.assertNotIn("--volume", create)
         self.assertNotIn("--privileged", create)
+        self.assertIn("--log-opt=compress=false", create)
         self.assertEqual(create[create.index("--memory") + 1], "1024m")
         self.assertEqual(create[create.index("--memory-swap") + 1], "1024m")
         self.assertEqual(create[create.index("--cpus") + 1], "2")

@@ -1,0 +1,9 @@
+# Explicit alternative when package mirrors are slow. Supply ONLY the standalone
+# native Codex executables as ./codex and ./codex-code-mode-host in a temporary build context; never host home,
+# configuration, authentication, sessions, or project source. A launcher is not enough.
+# Verified on this machine with the static Linux x86_64 Codex 0.164.0 executable.
+FROM python:3.11-alpine@sha256:5fb4bc53dd0180955e31e5245b648bbb24a4ac4ab03a1de81513642325220bcd
+RUN apk add --no-cache git bash ca-certificates
+COPY codex codex-code-mode-host /usr/local/bin/
+RUN /bin/bash -c "codex --version && git --version && python3 --version"
+WORKDIR /workspace

@@ -47,13 +47,15 @@ class SandboxSpec:
     workdir: str = "/workspace"
     control: Path | None = None
     broker: Path | None = None
+    inputs: Path | None = None
+    retain_logs: bool = True
 
     def __post_init__(self) -> None:
         if self.network not in ("none", "bridge"):
             raise ValueError("network must be none or bridge")
         if not self.workdir.startswith("/workspace") or ".." in self.workdir.split("/") or (self.workdir != "/workspace" and not self.workdir.startswith("/workspace/")):
             raise ValueError("workdir must be inside /workspace")
-        for name in ("workspace", "control", "broker"):
+        for name in ("workspace", "control", "broker", "inputs"):
             value = getattr(self, name)
             if value is not None:
                 path = Path(value).resolve(strict=True)
@@ -282,15 +284,19 @@ class DockerSandbox:
                 "--tmpfs", f"/tmp:rw,nosuid,nodev,size={limits.tmp_mb}m,mode=1777",
                 f"--workdir={spec.workdir}", "--env=HOME=/tmp",
                 "--log-driver=local", "--log-opt=max-size=1m", "--log-opt=max-file=1",
+                "--log-opt=compress=false",
                 "--entrypoint", spec.command[0], image_id, *spec.command[1:]]
+        if not spec.retain_logs:
+            position = args.index("--log-driver=local")
+            args[position:position + 4] = ["--log-driver=none"]
         mounts = []
         if spec.workspace is None:
             mounts += ["--tmpfs", f"/workspace:rw,nosuid,nodev,size={limits.workspace_mb}m,mode=1777"]
         else:
             mounts += ["--mount", f"type=bind,src={spec.workspace},dst=/workspace,bind-propagation=rprivate"]
-        for path, destination in ((spec.control, "/mineval-control"), (spec.broker, "/mineval-broker")):
+        for path, destination in ((spec.control, "/mineval-control"), (spec.broker, "/mineval-broker"), (spec.inputs, "/mineval-input")):
             if path is not None:
-                mounts += ["--mount", f"type=bind,src={path},dst={destination},bind-propagation=rprivate" + (",readonly" if destination == "/mineval-broker" else "")]
+                mounts += ["--mount", f"type=bind,src={path},dst={destination},bind-propagation=rprivate" + (",readonly" if destination in ("/mineval-broker", "/mineval-input") else "")]
         # Insert mounts before the entrypoint/image, never interpret them as argv.
         position = args.index("--entrypoint")
         args[position:position] = mounts

@@ -283,6 +283,8 @@ class Store:
                 if source['type'] == 'git':
                     repo = Path(source['path']).resolve(strict=True)
                     export_git(repo, base, private / 'base')
+                    from .history import create_pack
+                    create_pack(repo, base, private / 'history.pack')
                     for sha in futures:
                         git(repo, 'merge-base', '--is-ancestor', base, sha)
                         export_git(repo, sha, private / 'future' / sha)
@@ -368,9 +370,19 @@ class Store:
             version = uuid4().hex
             staged = Path(temp) / version
             staged.mkdir()
+            history = task / 'private' / 'history.pack'
+            history_format = {'format': 'none'}
+            if history.exists():
+                expected = read_json(task / 'source-hashes.json')['history.pack']['sha256']
+                if digest(history) != expected:
+                    raise ValueError('Stored historical Git pack was modified')
+                shutil.copyfile(history, staged / 'history.pack')
+                metadata = read_json(task / 'metadata.json')
+                history_format = {'format': 'base-pack-v1', 'path': 'history.pack',
+                                  'base_commit': metadata['base_commit']}
             write_json(staged / 'workspace-format.json', {
                 'schema_version': 1, 'tree': {'format': 'tar', 'path': 'snapshot.tar.gz'},
-                'git_history': {'format': 'none'}})
+                'git_history': history_format})
             pack(clean, staged / 'snapshot.tar.gz')
             sha = digest(staged / 'snapshot.tar.gz')
             (staged / 'snapshot.sha256').write_text(sha + '\n')
@@ -421,9 +433,16 @@ class Store:
         # Legacy revisions have the same tree-only format without a descriptor.
         # Future history formats must be explicitly supported, never silently dropped.
         descriptor = frozen / 'workspace-format.json'
-        if descriptor.exists() and read_json(descriptor) != {
-                'schema_version': 1, 'tree': {'format': 'tar', 'path': 'snapshot.tar.gz'},
-                'git_history': {'format': 'none'}}:
+        fmt = read_json(descriptor) if descriptor.exists() else {
+            'schema_version': 1, 'tree': {'format': 'tar', 'path': 'snapshot.tar.gz'},
+            'git_history': {'format': 'none'}}
+        history_format = fmt.get('git_history', {})
+        allowed = {'format': 'none'}
+        if history_format.get('format') == 'base-pack-v1':
+            allowed = {'format': 'base-pack-v1', 'path': 'history.pack',
+                       'base_commit': commit(history_format.get('base_commit'))}
+        if fmt != {'schema_version': 1,
+                   'tree': {'format': 'tar', 'path': 'snapshot.tar.gz'}, 'git_history': allowed}:
             raise ValueError('Unsupported workspace format; upgrade Mineval to materialize this revision')
         if digest(frozen / 'snapshot.tar.gz') != (frozen / 'snapshot.sha256').read_text().strip():
             raise ValueError('Snapshot hash mismatch')
@@ -431,6 +450,13 @@ class Store:
         if inventory(destination) != read_json(frozen / 'tree-hashes.json'):
             shutil.rmtree(destination)
             raise ValueError('Extracted tree hash mismatch')
+        if history_format.get('format') == 'base-pack-v1':
+            from .history import restore
+            try:
+                restore(frozen / 'history.pack', history_format['base_commit'], destination)
+            except BaseException:
+                shutil.rmtree(destination)
+                raise
         return {'workspace': str(Path(destination).absolute()), 'version': version}
 
     def extract(self, task_id, selections):

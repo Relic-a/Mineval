@@ -52,7 +52,7 @@ def relative(value):
     return p
 
 
-def inventory(root):
+def inventory(root, *, allow_git=False):
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise ValueError('Artifact root must be a directory, not a link')
@@ -67,7 +67,7 @@ def inventory(root):
                 raise ValueError('Workspace exceeds artifact entry budget')
             path = Path(current) / name
             mode = path.lstat().st_mode
-            if name == '.git':
+            if name == '.git' and not allow_git:
                 raise ValueError('.git is forbidden in exported trees')
             if not stat.S_ISDIR(mode) and not stat.S_ISREG(mode):
                 raise ValueError(f'Links and special files are unsupported: {path}')
@@ -79,11 +79,11 @@ def inventory(root):
     return result
 
 
-def copy_tree(source, target):
+def copy_tree(source, target, *, allow_git=False):
     # The owner must quiesce writers. Detect accidental external changes as well.
-    before = inventory(source)
+    before = inventory(source, allow_git=allow_git)
     shutil.copytree(source, target)
-    if inventory(source) != before or inventory(target) != before:
+    if inventory(source, allow_git=allow_git) != before or inventory(target, allow_git=allow_git) != before:
         raise ValueError('Source changed during copy; stop external writers and retry')
     return before
 
