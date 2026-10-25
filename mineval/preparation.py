@@ -155,7 +155,7 @@ class Store:
                 'model': model, 'harness': harness, 'status': 'reserved'})
 
     def reserve_evaluation(self, task_id, evaluation_id, run_id):
-        """Pin an existing run identity; evaluation execution remains unimplemented."""
+        """Legacy reservation primitive; new assessments pin sealed outputs too."""
         with self.operation(task_id):
             self._inspect_record(task_id, 'runs', run_id)
             return self._reserve_record(task_id, 'evaluations', evaluation_id, {
@@ -190,7 +190,8 @@ class Store:
 
     def inspect_evaluation(self, task_id, evaluation_id):
         with self.operation(task_id, allow_rejected=True):
-            return self._inspect_record(task_id, 'evaluations', evaluation_id)
+            from .evaluation import inspect
+            return inspect(self, task_id, evaluation_id)
 
     def _inspect_revision(self, task_id, version):
         frozen = self.task(task_id) / 'versions' / identifier(version)
@@ -261,6 +262,8 @@ class Store:
                 raise ValueError('Task has been rejected')
             if not allow_rejected and read_json(self.task(task_id) / 'status.json')['status'] == 'needs-review':
                 raise ValueError('Incomplete candidate needs review before preparation')
+            if not allow_rejected and read_json(self.task(task_id) / 'status.json')['status'] == 'retired':
+                raise ValueError('Task is retired; historical records remain inspectable')
             yield
 
     def register(self, candidate):
@@ -352,6 +355,24 @@ class Store:
             result = {'status': 'rejected', 'reason': reason}
             task = self.task(task_id)
             record = task / 'rejections' / (uuid4().hex + '.json')
+            write_json(record, result)
+            write_json(record.with_suffix('.sha256.json'), {'sha256': digest(record)})
+            write_json(task / 'status.json', result)
+            return result
+
+    def retire(self, task_id, reason):
+        """Exclude future work without modifying frozen artifacts or prior results."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('Retirement requires a reason')
+        with self.operation(task_id, allow_rejected=True):
+            task = self.task(task_id)
+            previous = read_json(task / 'status.json')
+            if previous['status'] == 'retired':
+                raise ValueError('Task is already retired')
+            from .benchmark import now
+            result = {'status': 'retired', 'reason': reason.strip(), 'retired_at': now(),
+                      'previous_state': previous}
+            record = task / 'retirements' / (uuid4().hex + '.json')
             write_json(record, result)
             write_json(record.with_suffix('.sha256.json'), {'sha256': digest(record)})
             write_json(task / 'status.json', result)

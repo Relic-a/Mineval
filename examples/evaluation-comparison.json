@@ -1,0 +1,14 @@
+{
+  "left": [
+    {
+      "task_id": "external-task-001",
+      "evaluation_id": "assessment-left-001"
+    }
+  ],
+  "right": [
+    {
+      "task_id": "external-task-001",
+      "evaluation_id": "assessment-right-001"
+    }
+  ]
+}

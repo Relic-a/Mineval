@@ -46,8 +46,14 @@ DATA/
       agent/result.json           small structured completion and operational receipt
       agent/workspace.tar.gz      final tree, no agent Git or transcripts
       artifact-hashes.json        covers all result bytes
-    evaluations/<evaluation-id>.json  immutable reserved evaluation identity (API only)
-    evaluations/<evaluation-id>.sha256  identity integrity receipt
+    evaluations/<evaluation-id>.json  immutable assessment (legacy reservations readable)
+    evaluations/<evaluation-id>.sha256  assessment integrity receipt
+    evaluation-evidence/<id>/      sealed config, original checks, outcomes, adaptations
+      baseline/                   selected-check hashes + original execution
+      adapted/                    optional adapted execution from fresh saved tree
+      assessment.json             optional evaluator proposal; no session logs
+      report.json                 verdict, explanation, limitations
+      artifact-hashes.json        all evaluation evidence hashes
     diagnostics/<id>.json          diagnostic report, with separate hash receipt
     verify-latest.json             latest-report convenience copy
     cleanup-latest.json            latest cleanup producer result, never approval
@@ -108,7 +114,8 @@ IDs fail. These minimal identity reservations extend the original namespace-only
 foundation. They do not claim execution, completion, failure, or a score. Later phases
 must attach execution/results without replacing identity records. No reservation CLI
 is provided. `bench run` now writes schema-2 launch identities and appends sealed
-`run-outputs` without replacing those identities. `evaluate` remains unimplemented.
+`run-outputs` without replacing those identities. Phase 7 `evaluate` writes separate
+schema-2 assessments tied to the sealed outputs.
 `Store.inspect_run` validates identity/output receipts and joins them for inspection;
 `reserve_evaluation` still reserves a legacy reference only, with no grading claim.
 
@@ -241,9 +248,8 @@ without deleting the task or preventing a subsequent cleanup attempt. Unsupporte
 filesystem output is not imported. Frozen revisions copy a matching ready-for-review
 attempt report and require a separate extraction session plus independent approval.
 
-The Phase 3 dedicated adapters now also serve cleanup. There is no task discovery,
-PR resolution/mining, scheduler, evaluated run coordinator, adaptive verifier or
-scorer. Benchmark execution and grading remain later phases.
+The Phase 3 dedicated adapters also serve cleanup, private review, benchmarks and
+evaluators. There is no task discovery pipeline, PR mining or scheduler.
 
 
 Phase 5 `review.session` runs extraction and independent review in new containers,
@@ -275,3 +281,75 @@ workspaces contain only the cleaned tree plus separately reconstructed pre-base 
 private revision subdirectories must never be mounted for benchmark agents. Existing
 frozen versions remain readable, while inline legacy review attestations cannot create
 new revisions. The owning OS user remains outside this application integrity boundary.
+
+
+Phase 7 orchestration lives in `evaluation.py`: `evaluate`, `inspect`, `compare`.
+The task lock covers input validation, baseline execution, optional separate evaluator
+and one adapted-check execution, plus append-only evidence/record publication. Every
+execution receives a fresh saved-tree copy. Original frozen checks replace candidate
+checks and mount as individual read-only nested binds through
+`SandboxSpec.readonly_paths`. Only declared private paths may be adapted, with full
+replacement content, source commit/path references and justification. Evaluator
+production edits are discarded. Its inputs include the frozen task statement,
+extraction plan and original bytes, config and baseline command results. A fresh
+ephemeral Codex adapter or explicit isolated argv writes the structured assessment;
+no evaluator logs/sessions/transcripts persist. Provenance and report shape are
+validated, while semantic equivalence remains a judgment requiring inspection.
+
+Evaluation configurations extend diagnostics with tests-only `failure_exit_codes`
+(default [1]) and `inconclusive_exit_codes` (default [2]); 0 passes, all undeclared
+nonzero exits and failed setup/build/smoke commands are errors. Test wrappers must
+separate failed assertions from dependency/collection/execution errors; Mineval
+cannot infer an arbitrary command's semantics. An evaluator may flag insufficient
+or flaky evidence as inconclusive and identify execution errors explicitly. Missing
+saved workspaces are inconclusive. Infrastructure failures cannot become pass/fail.
+
+Assessments pin launch identity, sealed output manifest, exact frozen revision and
+verification manifest, configuration, policy and evidence hash; they get unique IDs
+and incrementing per-run evaluation versions. Completed records and evidence are
+immutable by API/file modes and rechecked on inspection. Legacy identity-only
+reservations remain readable but cannot enter scores. Evidence seals before record
+publication; host loss can leave an orphan evidence ID, never an overwritten verdict.
+No in-progress evaluator session is retained or resumed; retry with a new ID.
+
+Explicit comparison selects one assessment per task per side and one model + harness
+on each side, reusing benchmark exact common-revision coverage. Common entries need
+the same config, policy, verification and (when resolved on both sides) runtime image.
+Only that common set contributes rates; pass/fail/inconclusive/error counts and decided
+coverage remain visible. No latest/best assessment is chosen implicitly. Zero common
+coverage has null rates. Re-evaluation is allowed for retired/rejected tasks because
+it consumes existing saved results, without launching another benchmark.
+
+
+## Phase 8 observation and retirement
+
+`mineval observe [--port PORT]` serves `observation.py` using the Python standard
+library. It binds only IPv4 loopback and prints a random per-launch URL prefix.
+Host checks, no-store responses, a restrictive CSP, escaped artifact content,
+no external assets and read-only GET routes keep the human view local. Do not
+forward it to agents: private extraction, review and future evidence are visible.
+There are no execution, retirement, session, terminal or transcript endpoints.
+
+Task/revision/suite/run/evaluation pages use existing receipt-checked inspection
+APIs. Artifact browsing is limited to named, validated preparation/result namespaces;
+archives stay binary and text previews/diffs cap at 256 KiB. Diffs safely unpack
+saved trees in disposable host directories and never execute candidate code or Git.
+Diagnostics verify their receipts; comparison forms delegate explicit selections
+to the existing exact-common-revision comparison functions. Busy tasks and corrupt
+records produce an inspection error; refresh after independent CLI operations.
+
+`task retire TASK --reason REASON` appends a retirement record and SHA receipt under
+`tasks/TASK/retirements/`, then updates mutable status with the prior state. It
+blocks new work through the same operation eligibility gate as rejected/deferred
+tasks. Suite runs preflight every member's eligibility before any launches. Existing
+suites/results are never rewritten; inspection, recovery, export and re-evaluation
+continue to allow retired tasks. There is no restore/delete UI or automatic rerun.
+
+`python -m examples.phase8_demo --directory NEW_DIRECTORY --context CONTEXT --image IMAGE`
+provides a persistent real-Git/rootless/fake-agent walkthrough and summary. Private
+extraction and reviewer sessions use separate scripted fixture executables, not
+language models. The deliberately unsolved fake run must evaluate as fail. This
+checks integration rather than the semantic quality of independent agent judgments.
+The agreed pre-base Git policy in `docs/mineval-decisions.md` remains authoritative;
+legacy tree-only import/archive descriptions do not prohibit sanitized Git attached
+to materialized historical workspaces.

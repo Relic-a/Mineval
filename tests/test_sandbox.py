@@ -61,6 +61,21 @@ class SandboxTests(unittest.TestCase):
         name = create[create.index("--name") + 1]
         self.cli.call.assert_called_with("rm", "--force", "--volumes", name)
 
+    def test_protected_checks_keep_container_cleanup_identity(self):
+        from pathlib import Path
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / 'check.py').write_text('assert True')
+            spec = SandboxSpec('example:tag', ('sh',), workspace=workspace, readonly_paths=('check.py',))
+            with self.sandbox.container(spec):
+                pass
+        create = self.cli.call.call_args_list[0].args
+        container_name = create[create.index('--name') + 1]
+        self.assertTrue(container_name.startswith('mineval-'))
+        self.assertIn(f'type=bind,src={workspace}/check.py,dst=/workspace/check.py,readonly,bind-propagation=rprivate', create)
+        self.cli.call.assert_called_with('rm', '--force', '--volumes', container_name)
+
     def test_nonzero_workload_is_result_and_removed(self):
         def call(*args, **kwargs):
             return ("output", "error", True) if args[0] == "logs" else (CONTAINER_ID, "", False)

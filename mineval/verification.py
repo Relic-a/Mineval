@@ -10,7 +10,7 @@ from .artifacts import copy_tree, copy_worktree, read_json, write_json
 from .sandbox import DockerSandbox, Limits, SandboxError, SandboxSpec
 
 
-def load_config(path):
+def load_config(path, *, evaluation=False):
     config = read_json(path)
     if set(config) - {'image', 'network', 'workdir', 'limits', 'commands'}:
         raise ValueError('Unknown verification configuration fields')
@@ -21,11 +21,24 @@ def load_config(path):
         raise ValueError('Declare between 1 and 50 diagnostic commands')
     names = set()
     for step in commands:
-        if set(step) - {'name', 'kind', 'argv', 'timeout_seconds', 'expected_failure'} or step.get('kind') not in ('setup', 'build', 'tests', 'smoke'):
+        allowed = {'name', 'kind', 'argv', 'timeout_seconds', 'expected_failure'}
+        if evaluation:
+            allowed |= {'failure_exit_codes', 'inconclusive_exit_codes'}
+        if set(step) - allowed or step.get('kind') not in ('setup', 'build', 'tests', 'smoke'):
             raise ValueError('Invalid command fields or kind')
         if 'expected_failure' in step and (step['kind'] != 'tests' or
                 not isinstance(step['expected_failure'], str) or not step['expected_failure'].strip()):
             raise ValueError('Expected failures require a tests command and a reason')
+        if evaluation:
+            failure = step.get('failure_exit_codes', [1])
+            uncertain = step.get('inconclusive_exit_codes', [2])
+            for field in ('failure_exit_codes', 'inconclusive_exit_codes'):
+                if field in step and (step['kind'] != 'tests' or not isinstance(step[field], list)
+                        or any(type(code) is not int or not 1 <= code < 125 for code in step[field])
+                        or len(set(step[field])) != len(step[field])):
+                    raise ValueError('Test outcome exit codes must be distinct integers between 1 and 124')
+            if set(failure) & set(uncertain):
+                raise ValueError('Failure and inconclusive exit codes must not overlap')
         name = step.get('name')
         if not isinstance(name, str) or not name or name in names:
             raise ValueError('Command names must be nonempty and unique')

@@ -100,13 +100,14 @@ class RegistryTests(HistoryFixture):
         self.assertEqual(read_json(self.store.task('cli-task') / 'metadata.json')['task_id'], 'cli-task')
 
     @patch('mineval.cli.DockerSandbox')
-    def test_evaluation_remains_unimplemented_without_store_or_docker(self, sandbox):
+    def test_evaluation_requires_explicit_task_and_config_without_side_effects(self, sandbox):
         absent = self.root / 'absent'
         for command in (['evaluate', 'run-001'],):
             with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
-                code = main(['--data', str(absent), *command])
-            self.assertEqual(code, 2)
-            self.assertIn('not implemented', err.getvalue())
+                with self.assertRaises(SystemExit) as exit:
+                    main(['--data', str(absent), *command])
+            self.assertEqual(exit.exception.code, 2)
+            self.assertIn('--task, --config', err.getvalue())
             self.assertEqual(out.getvalue(), '')
             self.assertFalse(absent.exists())
         sandbox.assert_not_called()

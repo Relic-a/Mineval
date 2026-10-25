@@ -9,3 +9,4 @@ dist/
 .env
 
 mineval-data/
+/mineval-revised-phases/

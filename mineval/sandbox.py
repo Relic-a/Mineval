@@ -49,6 +49,7 @@ class SandboxSpec:
     broker: Path | None = None
     inputs: Path | None = None
     retain_logs: bool = True
+    readonly_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.network not in ("none", "bridge"):
@@ -62,6 +63,18 @@ class SandboxSpec:
                 if not path.is_dir() or "," in str(path):
                     raise ValueError("Mount must be an existing directory without commas")
                 object.__setattr__(self, name, path)
+        from .artifacts import relative
+        for name in self.readonly_paths:
+            path = relative(name)
+            if self.workspace is None or not (self.workspace / path).is_file():
+                raise ValueError("Protected checks require regular workspace files")
+            current = self.workspace
+            for part in path.parts:
+                current = current / part
+                if current.is_symlink():
+                    raise ValueError("Protected checks cannot traverse links")
+            if ',' in name:
+                raise ValueError("Protected check paths cannot contain commas")
         if not isinstance(self.image, str) or not self.image or self.image.startswith("-") or any(c.isspace() or c == "\0" for c in self.image):
             raise ValueError("image must be a nonempty Docker image reference")
         if isinstance(self.command, str):
@@ -297,6 +310,8 @@ class DockerSandbox:
         for path, destination in ((spec.control, "/mineval-control"), (spec.broker, "/mineval-broker"), (spec.inputs, "/mineval-input")):
             if path is not None:
                 mounts += ["--mount", f"type=bind,src={path},dst={destination},bind-propagation=rprivate" + (",readonly" if destination in ("/mineval-broker", "/mineval-input") else "")]
+        for protected_path in spec.readonly_paths:
+            mounts += ["--mount", f"type=bind,src={spec.workspace / protected_path},dst=/workspace/{protected_path},readonly,bind-propagation=rprivate"]
         # Insert mounts before the entrypoint/image, never interpret them as argv.
         position = args.index("--entrypoint")
         args[position:position] = mounts

@@ -16,6 +16,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data", default=os.environ.get("MINEVAL_DATA", "mineval-data"))
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("doctor", help="verify rootless Docker and resource controller support")
+    observe = commands.add_parser('observe', help='serve a private, read-only local observation UI')
+    observe.add_argument('--port', type=int, default=0, help='loopback port (default: choose a free port)')
     run = commands.add_parser("run", help="run an explicit command in an ephemeral sandbox")
     run.add_argument("--image", required=True, help="preloaded image reference; never pulled automatically")
     run.add_argument("--network", choices=("none", "bridge"), default="none")
@@ -42,6 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     tasks.add_parser("add", help="register candidate JSON (alias of import)").add_argument("candidate")
     tasks.add_parser("list", help="list registered tasks")
     tasks.add_parser("show", help="inspect task metadata, state and record IDs").add_argument("task_id")
+    retire = tasks.add_parser('retire', help='exclude future benchmarks, preserving historical records')
+    retire.add_argument('task_id')
+    retire.add_argument('--reason', required=True)
     revision = tasks.add_parser("revision", help="check and inspect an immutable prepared version")
     revision.add_argument("task_id")
     revision.add_argument("version")
@@ -74,7 +79,21 @@ def main(argv: list[str] | None = None) -> int:
         if name == 'export':
             attempt.add_argument('destination', help='new directory outside the store; tree only')
     benches.add_parser('compare', help='report exact common revisions and coverage').add_argument('definition')
-    commands.add_parser("evaluate", help="reserved; not implemented yet").add_argument("run_id", nargs="?")
+    evaluate = commands.add_parser('evaluate', help='independently assess a saved benchmark tree')
+    evaluate.add_argument('run_id')
+    evaluate.add_argument('--task', required=True)
+    evaluate.add_argument('--config', required=True, help='trusted private verification commands JSON')
+    evaluate.add_argument('--evaluation-id', help='new immutable assessment ID')
+    evaluate.add_argument('--adapter', choices=('codex',))
+    evaluate.add_argument('--model', default='gpt-6-luna')
+    evaluate.add_argument('--auth-file')
+    evaluate.add_argument('--command', nargs=argparse.REMAINDER, help='isolated evaluator argv')
+    evaluations = commands.add_parser('evaluation', help='inspect and compare immutable assessments')
+    assessments = evaluations.add_subparsers(dest='evaluation_action', required=True)
+    show = assessments.add_parser('show')
+    show.add_argument('task_id')
+    show.add_argument('evaluation_id')
+    assessments.add_parser('compare').add_argument('definition')
     verify = commands.add_parser("verify", help="fresh diagnostic via task-scoped host broker or host task ID")
     verify.add_argument("mode", nargs="?", choices=["report"])
     verify.add_argument("--task", help="host-only registered task ID; omit inside preparation sandbox")
@@ -115,11 +134,13 @@ def main(argv: list[str] | None = None) -> int:
     materialize.add_argument("version")
     materialize.add_argument("destination")
     args = parser.parse_args(argv)
-    if args.action == "evaluate":
-        print("mineval: evaluate is not implemented in this phase; no records were created", file=sys.stderr)
-        return 2
     sandbox = DockerSandbox(context=args.context)
     try:
+        if args.action == 'observe':
+            from .observation import serve
+            from .preparation import Store
+            serve(Store(args.data), port=args.port)
+            return 0
         if args.action == "agent-run":
             from pathlib import Path
             from .agents import CodexAdapter, FakeAdapter, run_agent
@@ -141,7 +162,20 @@ def main(argv: list[str] | None = None) -> int:
                 result = request(args.mode or "verify")
             else:
                 store = Store(args.data)
-                if args.action == 'bench':
+                if args.action == 'evaluate':
+                    from .evaluation import evaluate
+                    from .agents import CodexAdapter
+                    from .benchmark import termination_handler
+                    with termination_handler():
+                        result = evaluate(store, args.task, args.run_id, args.config,
+                            evaluation_id=args.evaluation_id, sandbox=sandbox,
+                            command=args.command, adapter=CodexAdapter(args.model) if args.adapter else None,
+                            auth_file=args.auth_file)
+                elif args.action == 'evaluation':
+                    from .evaluation import compare
+                    result = (store.inspect_evaluation(args.task_id, args.evaluation_id)
+                              if args.evaluation_action == 'show' else compare(store, read_json(args.definition)))
+                elif args.action == 'bench':
                     from . import benchmark
                     if args.bench_action == 'run':
                         from .agents import CodexAdapter, FakeAdapter
@@ -173,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
                         result = store.list_tasks()
                     elif args.task_action == "show":
                         result = store.inspect_task(args.task_id)
+                    elif args.task_action == 'retire':
+                        result = store.retire(args.task_id, args.reason)
                     elif args.task_action == "run":
                         result = store.inspect_run(args.task_id, args.run_id)
                     elif args.task_action == "evaluation":
@@ -223,6 +259,8 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.action == "workspace":
                     result = store.materialize(args.task_id, args.version, args.destination)
             print(json.dumps(result, indent=2 if args.action in ('task', 'suite') else None))
+            if args.action == 'evaluate':
+                return {'pass': 0, 'fail': 1, 'inconclusive': 2, 'error': 125}[result['verdict']]
             if args.action == 'bench':
                 if args.bench_action != 'run':
                     return 0

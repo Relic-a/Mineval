@@ -3,8 +3,8 @@
 Prepare historical software tasks supplied by an external producer. Mineval imports
 selected history, isolates preparation work in rootless Docker, diagnoses drafts in
 fresh containers, freezes cleaned starting trees, and privately preserves selected
-future verification. Task discovery, evaluated-agent harnesses, adaptive verification,
-and grading are outside this implementation.
+future verification. It runs coding agents on frozen tasks and independently evaluates
+saved results with inspectable private checks. Discovery remains an external skill workflow.
 
 Python 3.11+, Git, and the Docker CLI are required. The Python runtime uses only the
 standard library. Install with `python -m pip install -e .`, or use
@@ -22,6 +22,71 @@ contain Git and the `mineval` client (see [example Dockerfile](examples/Dockerfi
 Use a trusted image without embedded credentials. Container UID 0 maps to the
 unprivileged daemon owner, permitting access to the managed bind mounts.
 See Docker's [rootless resource requirements](https://docs.docker.com/engine/security/rootless/tips/#limiting-resources).
+
+## Browse tasks and results locally
+
+```sh
+mineval --data mineval-data observe
+# Optional fixed loopback port:
+mineval --data mineval-data observe --port 8765
+```
+
+Open the private URL printed in the terminal. The observation UI reads your actual
+store and checks artifact receipts. Follow task → prepared revision → suite/run →
+evaluation links to inspect cleanup, independent review, private verification
+provenance and limitations, output diffs, commands and assessment adaptations.
+The Compare page accepts explicit run or assessment selections and shows exact
+common-revision coverage. Evaluation rates use that common set; differing subsets
+are not an overall leaderboard. No common tasks means no pass rate.
+
+This is a **private human view**: it includes future verification and preparation
+material. The server binds only to `127.0.0.1`, uses a fresh secret URL per launch,
+validates the Host header, disables browser caching and loads no external resources.
+Keep its URL private; do not proxy, tunnel, or embed it in an agent environment.
+It has no write/execution endpoints. Use independent CLI commands, then refresh.
+Ctrl-C stops the server. Browsing requires Python and Git but no running Docker daemon.
+File previews and diffs are bounded; use `bench export` for full code outputs.
+
+Retire a bad task deliberately, preserving its exact revisions, suites, runs and
+assessments:
+
+```sh
+mineval --data mineval-data task retire TASK --reason "Evidence does not cover the intended behavior"
+```
+
+Retirement blocks new preparation, freezing, suite enrollment and benchmark runs.
+An existing suite containing a retired task fails preflight before launching any
+member. Saved outputs remain inspectable/exportable and independently re-evaluable.
+Rejection remains a separate preparation decision. Retirement has no restore command
+in this MVP; import a corrected candidate under a new ID when needed.
+
+For a reproducible, persistent end-to-end demonstration using a small **actual Git
+history**, preloaded rootless fixture image and fake/scripted agents:
+
+```sh
+python -m examples.phase8_demo --directory /tmp/mineval-demo \
+  --context mineval-rootless --image mineval-fixture:phase4
+python -m mineval --data /tmp/mineval-demo/data observe
+```
+
+Run from this checkout. Choose a new directory and a trusted image with Python 3,
+Git and the Mineval verification client; the command never pulls images or calls a
+model. It exercises CLI import, no-edit cleanup and broker verification, private
+extraction, base/future checks, distinct scripted review, freeze, suite benchmark,
+independent evaluation and real HTTP inspection. Its fake agent leaves the task
+unsolved, so the saved verdict is correctly **fail**. It verifies accessible past
+history, excluded future commits/checks, independent-process persistence, pool
+growth/retirement and unchanged historical artifacts. `summary.json` records the
+outcome. This fixture demonstrates integration, not task-selection or model quality.
+See [Phase 8 handoff](docs/phase-handoffs/phase-8.md) for tested paths and limits.
+
+Troubleshooting: a busy task is locked by a CLI operation; wait for it to finish and
+refresh. A hash mismatch means evidence changed: preserve the store and investigate,
+rather than rewriting receipts. A comparison error usually means duplicate tasks,
+mixed model/harness identities or incompatible verification policies/images; select
+one record per task per side with matching evaluation inputs. For Docker errors, run
+`mineval --context YOUR_CONTEXT doctor` and check your preloaded image and runtimes.
+If a fixed port is busy, omit `--port`. Each restart prints a new private URL.
 
 ## Local task registry and independent operations
 
@@ -51,11 +116,113 @@ new versions leaves existing suites unchanged. Suite inspection checks the defin
 receipt; it does not revalidate the referenced task artifacts or current eligibility.
 
 `mineval bench run` now executes frozen revisions or fixed suites with the dedicated
-fake/Codex adapters. `evaluate` remains reserved for phase 7 and exits 2 without
-creating records. The existing `run` command is a generic sandbox utility and
+fake/Codex adapters. `evaluate` independently assesses saved trees without rerunning
+the coding model. The existing `run` command is a generic sandbox utility and
 `agent-run` is the lower-level adapter primitive. Existing schema-1 identity
 reservations remain readable; benchmark execution creates schema-2 identities and
 separate immutable outputs. Inspect them with `bench show` or `task run TASK RUN`.
+
+## Evaluate a saved result
+
+```sh
+mineval --context mineval-rootless --data mineval-data evaluate attempt-001 \
+  --task external-task-001 --config examples/evaluation.json --evaluation-id assessment-001
+mineval --data mineval-data evaluation show external-task-001 assessment-001
+mineval --data mineval-data task evaluation external-task-001 assessment-001
+# Re-evaluate the same saved candidate; keep the first assessment intact.
+mineval --context mineval-rootless --data mineval-data evaluate attempt-001 \
+  --task external-task-001 --config examples/evaluation.json --evaluation-id assessment-002
+mineval --data mineval-data evaluation compare examples/evaluation-comparison.json
+```
+
+Adapt [evaluation.json](examples/evaluation.json) to the frozen extraction plan's
+private test paths and runtime. This is a trusted operator selection using the
+`verify.json` command format, with at least one `kind: tests` command. It cannot
+exempt historical `expected_failure` checks. Each command records its name, argv
+(in the saved config), bounded stdout/stderr, exit code, duration, timeout and OOM.
+Run setup/build separately: any nonzero exit there is **error**. Test commands use
+an explicit exit contract: 0 passes, `failure_exit_codes` (default `[1]`) establish
+behavioral failure, `inconclusive_exit_codes` (default `[2]`) cannot establish a
+verdict; other codes, deadlines, OOM and container failures are **error**. Outcome
+lists must be disjoint integers 1–124. Configure wrappers so dependency, import,
+collection and infrastructure failures do **not** use a behavioral-failure code.
+The example wrapper handles direct Python assertion scripts; adapt it for pytest,
+unittest or other frameworks and install the required dependencies in the image.
+Mineval cannot infer arbitrary test semantics from a process exit code.
+
+Evaluation checks the run's receipts and exact frozen revision, safely unpacks its
+saved tree into a disposable copy, and overlays the original extracted checks at
+their authoritative paths. Every selected private file gets a **read-only nested
+bind mount**; candidate checks cannot replace or delete it. Duplicate destinations
+from different historical sources require a corrected verification revision. The
+candidate's original run output and frozen task remain unchanged. Only disposable
+copies mount in evaluation containers; the host store and Docker socket do not.
+Tests run with configured networking; optional evaluator agents have ordinary web
+access under the existing isolation policy. Read-only files do not prove resistance
+to adversarial interpreter manipulation or guarantee that the chosen commands test
+the right behavior. Inspect the retained evidence and command selection.
+
+Optionally supply `--command EXECUTABLE ...` or `--adapter codex --model MODEL`
+(and, if needed, `--auth-file FILE`) to invoke a separate evaluator in the trusted
+image. It sees the saved candidate, frozen task statement, extraction plan/source
+bytes, configuration and **original execution results**. It writes
+`/mineval-control/assessment.json`:
+
+```json
+{
+  "adaptations": [{
+    "path": "tests/test_regression.py",
+    "content": "REPLACEMENT TEST CONTENT, PRESERVING THE BEHAVIORAL ASSERTIONS",
+    "reason": "Explain the legitimate interface difference and why behavior is unchanged",
+    "evidence": [{"commit": "FULL_SOURCE_SHA", "path": "tests/test_regression.py"}]
+  }],
+  "limitations": [],
+  "inconclusive_reason": null,
+  "error_reason": null
+}
+```
+
+Only selected private paths can change, and every adaptation must cite original
+extracted evidence. The agent must preserve the task's behavioral requirements,
+avoid historical implementation-shape constraints and never weaken assertions to
+pass incorrect code. Unjustifiable/flaky evidence gets `inconclusive_reason`;
+execution problems get optional `error_reason`. Adaptations execute once in another
+fresh copy of the **original saved candidate**, so evaluator edits to production
+code or state from the baseline test execution cannot affect it. Infrastructure
+errors cannot be promoted to pass/fail by an evaluator. Original and adapted
+outcomes remain inspectable; provenance/shape are validated mechanically, behavioral
+equivalence requires evaluator judgment and human inspection. No transcripts,
+agent logs, hidden sessions or resume controls survive. Real Codex calls require the
+same explicit smoke-test authorization as other development phases.
+
+Verdicts are **pass**, **fail**, **inconclusive**, **error**, with CLI exits
+0, 1, 2, 125 respectively. No saved workspace yields inconclusive, including a run
+whose harness crashed before collecting output. A saved partial workspace can still
+be assessed. Harness completion and task correctness remain separate. Failures
+before valid input identity is established are command errors (125), without a new
+assessment. Evaluator failure/cancellation is an error assessment.
+
+Every new evaluation has a new ID and incrementing per-run `evaluation_version`.
+Schema-2 records in `evaluations/ID.json` pin the launch JSON, sealed output manifest,
+exact revision, verification manifest, configuration, policy and evidence hashes.
+`evaluation-evidence/ID/` contains the extracted original bytes/plan, config,
+`baseline/selected-checks.json`, `baseline/execution.json`, optional adapted checks
+and outcomes, evaluator assessment and final report. Copies of adaptations include
+the executed content and original evidence references; selected-check manifests
+include original and executed hashes. Inspection rechecks records, evidence and
+inputs. Legacy schema-1 evaluation reservations remain readable but are not verdicts.
+Publication uses sealed evidence followed by a receipted record; host loss may leave
+an orphan evidence directory that reserves its ID. Use a new ID to retry. There is
+no automatic coding-agent rerun or assessment replacement.
+
+Comparisons select explicit `task_id/evaluation_id` pairs on each side, one per task
+and one model + harness per side. They report exact common prepared revisions and
+coverage, and require the same configuration, verification and evaluation policy
+for common tasks, plus matching resolved runtime images where available. Rates use **only that common set**, with pass/fail/inconclusive/error
+counts, total denominator, pass rate and decided coverage. Errors and inconclusives
+stay in the denominator and retain their own counts; they are never relabeled task
+failures. Zero common coverage gives null rates. No latest/best assessment is selected
+implicitly, and no aggregates over different subsets are presented as comparable.
 
 ## Run a frozen benchmark
 
@@ -115,7 +282,7 @@ agent: inspect code before sharing. Unsupported links/special files fail collect
 Comparisons take explicit left/right lists of saved task/run IDs, one attempt per task
 and one model + harness per side. They report the exact **common revisions**, coverage,
 and left/right-only revisions, including zero overlap. Different revisions of the same
-task do not overlap. Execution failures stay visible in coverage; no task grading or
+task do not overlap. Execution failures stay visible in coverage; benchmark comparison adds no task grading or
 aggregate scores are produced in this phase. Task/suite/run identities remain immutable.
 See [decisions](docs/mineval-decisions.md) for the boundaries and deferred choices.
 
@@ -398,14 +565,14 @@ mineval --data mineval-data workspace external-task-001 VERSION runs/run-002/wor
 
 Each destination must be new. Mineval verifies the archive and extracted hashes.
 The resulting writable directories are independent, and the archive is never mounted.
-A future harness can bind only its own working copy into `SandboxSpec(workspace=...)`.
+The benchmark harness binds only its disposable working copy into `SandboxSpec(workspace=...)`.
 Do not mount a version directory or share workspaces between runs.
 
 The existing API exposes create/destroy through `with DockerSandbox().container(spec)`,
 plus `start`, `exec`, `inspect`, `logs`, `wait`, `result`, and `export_workspace`.
 Workspace export pauses a running container, copies its result, and returns an archive
-hash. The orchestration layer chooses the command; no agent CLI or grading protocol
-is prescribed. See [architecture and limitations](docs/foundation.md).
+hash. The dedicated adapters choose the coding-agent command; independent evaluation uses
+explicit trusted private-check commands. See [architecture and limitations](docs/foundation.md).
 
 ## Checks
 

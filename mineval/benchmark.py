@@ -150,8 +150,9 @@ def run_suite(store, suite_id, *, run_id=None, **options):
     # Preflight every member before launching any agent; each attempt still gets a
     # separate durable identity. Cancellation stops the sequence, never auto-retries.
     for member in suite['members']:
-        if store.inspect_revision(member['task_id'], member['version']) != member:
-            raise ValueError('Suite revision identity mismatch')
+        with store.operation(member['task_id']):
+            if store._inspect_revision(member['task_id'], member['version']) != member:
+                raise ValueError('Suite revision identity mismatch')
     prefix = identifier(run_id or uuid4().hex)
     if len(prefix) > 90:
         raise ValueError('Suite run ID prefix must be at most 90 characters')
