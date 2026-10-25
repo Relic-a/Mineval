@@ -41,7 +41,7 @@ class EvaluationRunner:
             process = subprocess.run(argv, cwd=spec.workspace, capture_output=True, text=True,
                                      env={'PATH': os.environ['PATH'], 'PYTHONPATH': str(spec.workspace)})
             code = 127 if self.mode == 'command-error' else process.returncode
-            return {'exit_code': code, 'timed_out': self.mode == 'timeout', 'oom_killed': False,
+            return {'exit_code': code, 'timed_out': self.mode == 'timeout', 'oom_killed': self.mode == 'oom',
                     'stdout': process.stdout, 'stderr': process.stderr, 'logs_truncated': False,
                     'duration_seconds': 0.01}
         container.exec.side_effect = execute
@@ -124,6 +124,54 @@ class EvaluationTests(HistoryFixture):
                                     command=['fixture-evaluator'])['verdict'], 'fail')
         assessment['adaptations'][0]['evidence'][0]['commit'] = 'a' * 40
         self.assertEqual(self.assess(runner=EvaluationRunner(assessment), command=['fixture-evaluator'])['verdict'], 'error')
+
+    def test_test_execution_error_can_be_adapted_without_weakening_assertions(self):
+        cfg = read_json(self.config)
+        cfg['commands'][0]['argv'] = ['python3', '-c',
+            "import runpy, sys\ntry:\n runpy.run_path('tests/test_answer.py')\n"
+            "except ImportError:\n sys.exit(3)\nexcept AssertionError:\n sys.exit(1)"]
+        write_json(self.config, cfg)
+        assessment = {'adaptations': [{'path': 'tests/test_answer.py',
+            'content': 'from app import result\nassert result() == 42\n',
+            'reason': 'Use the alternative interface while preserving the answer requirement.',
+            'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
+            'limitations': [], 'inconclusive_reason': None}
+        for run_id, answer, expected in [('correct-interface', 42, 'pass'), ('wrong-interface', 7, 'fail')]:
+            self.saved(run_id, code=f'def result(): return {answer}\n')
+            runner = EvaluationRunner(assessment)
+            result = self.assess(run_id, runner=runner, command=['fixture-evaluator'])
+            self.assertEqual(runner.baseline['verdict'], 'error')
+            self.assertEqual(runner.baseline['commands'][0]['exit_code'], 3)
+            self.assertEqual(result['verdict'], expected, result)
+            self.assertNotIn('error_kind', result)
+            self.assertEqual(len(runner.specs), 3)
+            self.assertNotEqual(runner.specs[0].workspace, runner.specs[2].workspace)
+            evidence = self.store.task('example') / 'evaluation-evidence' / result['evaluation_id']
+            self.assertEqual(read_json(evidence / 'baseline/execution.json')['verdict'], 'error')
+            self.assertEqual(read_json(evidence / 'adapted/execution.json')['verdict'], expected)
+
+        # A proposed adaptation that still cannot import its interface stays error.
+        assessment['adaptations'][0]['content'] = 'from app import missing\nassert missing() == 42\n'
+        self.assertEqual(self.assess('correct-interface', runner=EvaluationRunner(assessment),
+                                    command=['fixture-evaluator'])['verdict'], 'error')
+
+    def test_adaptations_cannot_override_infrastructure_failure(self):
+        self.saved()
+        assessment = {'adaptations': [{'path': 'tests/test_answer.py',
+            'content': 'from app import answer\nassert answer() == 42\n',
+            'reason': 'Evidence-backed test proposal does not repair infrastructure.',
+            'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
+            'limitations': [], 'inconclusive_reason': None}
+        for mode in ('command-error', 'timeout', 'oom'):
+            runner = EvaluationRunner(assessment, mode=mode)
+            self.assertEqual(self.assess(runner=runner, command=['fixture-evaluator'])['verdict'], 'error')
+            self.assertEqual(len(runner.specs), 2)
+        cfg = read_json(self.config)
+        cfg['commands'].insert(0, {'name': 'setup', 'kind': 'setup', 'argv': ['sh', '-c', 'exit 3']})
+        write_json(self.config, cfg)
+        runner = EvaluationRunner(assessment)
+        self.assertEqual(self.assess(runner=runner, command=['fixture-evaluator'])['verdict'], 'error')
+        self.assertEqual(len(runner.specs), 2)
 
     def test_inconclusive_and_infrastructure_error_are_not_task_failure(self):
         self.saved()

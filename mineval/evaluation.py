@@ -224,11 +224,22 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                 report['adaptations'] = assessment['adaptations']
                 report['limitations'].extend(assessment['limitations'])
                 write_json(staged / 'assessment.json', assessment)
+                # An interface/collection error in a test can be repaired by a
+                # justified adaptation. Startup, setup, timeout, OOM and missing
+                # executable failures must remain infrastructure errors.
+                last_check = baseline['commands'][-1] if baseline['commands'] else {}
+                can_adapt = baseline['verdict'] != 'error' or (
+                    last_check.get('kind') == 'tests'
+                    and last_check.get('status') == 'error'
+                    and isinstance(last_check.get('exit_code'), int)
+                    and 0 < last_check['exit_code'] < 125
+                    and not last_check.get('timed_out') and not last_check.get('oom_killed'))
                 if assessment.get('error_reason'):
                     report.update(verdict='error', explanation=assessment['error_reason'])
                 elif assessment['inconclusive_reason'] and baseline['verdict'] != 'error':
                     report.update(verdict='inconclusive', explanation=assessment['inconclusive_reason'])
-                elif assessment['adaptations'] and baseline['verdict'] != 'error':
+                elif assessment['adaptations'] and can_adapt:
+                    report.pop('error_kind', None)
                     report.update(execute_checks(temp / 'candidate', temp / 'adapted-workspace',
                         staged / 'adapted', verification, artifacts, assessment['adaptations'], config, image, runner))
                 else:

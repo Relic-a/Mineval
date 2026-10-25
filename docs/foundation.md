@@ -303,6 +303,10 @@ separate failed assertions from dependency/collection/execution errors; Mineval
 cannot infer an arbitrary command's semantics. An evaluator may flag insufficient
 or flaky evidence as inconclusive and identify execution errors explicitly. Missing
 saved workspaces are inconclusive. Infrastructure failures cannot become pass/fail.
+An ordinary test execution error (exit 1–124, without timeout or OOM) may still
+receive one justified interface adaptation, with the verdict determined by fresh
+execution. Startup errors, failed setup/build/smoke steps, missing executables,
+timeout and OOM do not permit an adapted execution. The baseline evidence is retained.
 
 Assessments pin launch identity, sealed output manifest, exact frozen revision and
 verification manifest, configuration, policy and evidence hash; they get unique IDs

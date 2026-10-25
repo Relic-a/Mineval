@@ -189,7 +189,10 @@ pass incorrect code. Unjustifiable/flaky evidence gets `inconclusive_reason`;
 execution problems get optional `error_reason`. Adaptations execute once in another
 fresh copy of the **original saved candidate**, so evaluator edits to production
 code or state from the baseline test execution cannot affect it. Infrastructure
-errors cannot be promoted to pass/fail by an evaluator. Original and adapted
+errors cannot be promoted to pass/fail by an evaluator. A test command's ordinary
+execution error (for example, an import mismatch) may receive an evidence-backed
+adaptation; only the fresh execution can establish a new verdict. Startup/setup
+failures, missing executables, timeout and OOM remain errors. Original and adapted
 outcomes remain inspectable; provenance/shape are validated mechanically, behavioral
 equivalence requires evaluator judgment and human inspection. No transcripts,
 agent logs, hidden sessions or resume controls survive. Real Codex calls require the
