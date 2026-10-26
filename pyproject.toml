@@ -14,3 +14,9 @@ mineval = "mineval.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["mineval*"]
+
+[project.optional-dependencies]
+arena-share = ["Pillow>=10", "playwright>=1.40"]
+
+[tool.setuptools.package-data]
+mineval = ["web/*.html", "web/*.css", "web/*.js"]

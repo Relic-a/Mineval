@@ -59,7 +59,9 @@ class Pages:
         return '<a href="' + esc(self.url(*parts, **query)) + '">' + esc(text) + '</a>'
 
     def page(self, title, content):
-        return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + ' · Mineval</title><style>' + CSS + '</style><body><header><strong>Mineval</strong><nav aria-label="Main">' + self.link('Tasks') + self.link('Suites', 'suites') + self.link('Compare', 'compare') + '</nav><span>Local observation · private human view</span></header><main><h1>' + esc(title) + '</h1>' + content + '</main></body></html>'
+        arena_link = ('<a href="' + esc(self.prefix[:-len('/history')] + '/') + '">Web Arena</a>'
+                      if self.prefix.endswith('/history') else self.link('Web Arena', 'arena'))
+        return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + ' · Mineval</title><style>' + CSS + '</style><body><header><strong>Mineval</strong><nav aria-label="Main">' + self.link('Tasks') + self.link('Suites', 'suites') + self.link('Compare', 'compare') + arena_link + '</nav><span>Local observation · private human view</span></header><main><h1>' + esc(title) + '</h1>' + content + '</main></body></html>'
 
     def task_link(self, task):
         return self.link(task, 'tasks', task)
@@ -109,6 +111,10 @@ class Pages:
             if not rows:
                 body += '<p>Start with <code>mineval task add candidate.json</code>. See README.md for the discovery skill and preparation workflow.</p>'
             return self.page('Task pool', body)
+        if parts == ['arena']:
+            if self.prefix.endswith('/history'):
+                return self.page('Web Arena', '<p><a href="' + esc(self.prefix[:-len('/history')] + '/') + '">Return to the Web Arena workspace</a></p>')
+            return self.page('Web Arena', '<p>Persistent design briefs, interactive websites, human preference rankings, and share images.</p><p>Open the Arena workspace with <code>mineval --data ' + esc(self.store.root) + ' arena serve --image YOUR_PRELOADED_WEB_IMAGE</code>. It also includes this historical view.</p>')
         if parts == ['suites']:
             return self.page('Suites', '<p>Each suite pins exact prepared revisions. Pool changes leave these selections intact.</p>' + table(['Suite', 'Description', 'Tasks'], ((self.link(s['suite_id'], 'suites', s['suite_id']), esc(s['description']), str(len(s['members']))) for s in self.store.list_suites())))
         if len(parts) == 2 and parts[0] == 'suites':

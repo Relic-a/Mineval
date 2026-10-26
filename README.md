@@ -23,6 +23,25 @@ Use a trusted image without embedded credentials. Container UID 0 maps to the
 unprivileged daemon owner, permitting access to the managed bind mounts.
 See Docker's [rootless resource requirements](https://docs.docker.com/engine/security/rootless/tips/#limiting-resources).
 
+## Web Arena: frontend design benchmarks
+
+Create a persistent design brief, generate independent websites with multiple Codex
+models and reasoning efforts, interact with isolated saved applications, rank them
+with human preferences and ties, and export privacy-reviewed PNG/GIF comparisons.
+Return later to add models or explicitly rerun a configuration without replacing old
+results. Web Arena has its own store and execution path; historical Git preparation
+and private verification remain separate.
+
+```sh
+mineval --context mineval-rootless --data mineval-data arena serve \
+  --image YOUR_PRELOADED_WEB_IMAGE --auth-file /path/to/model-only/auth.json
+```
+
+The Arena workspace also links to the historical observation pages. Use the fixture
+harness for no-model demonstrations. See [Web Arena](docs/web-arena.md) for image
+requirements, runtime contracts, ranking/coverage policy, sharing setup, validation,
+and current limitations.
+
 ## Browse tasks and results locally
 
 ```sh

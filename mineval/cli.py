@@ -18,6 +18,24 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("doctor", help="verify rootless Docker and resource controller support")
     observe = commands.add_parser('observe', help='serve a private, read-only local observation UI')
     observe.add_argument('--port', type=int, default=0, help='loopback port (default: choose a free port)')
+    arena = commands.add_parser('arena', help='persistent web design benchmarks and interactive preference ranking')
+    arenas = arena.add_subparsers(dest='arena_action', required=True)
+    arena_serve = arenas.add_parser('serve', help='open the private Web Arena workspace')
+    arena_serve.add_argument('--image', required=True, help='trusted preloaded image with python3, node/npm and Codex')
+    arena_serve.add_argument('--auth-file', help='explicit model-only Codex credential file')
+    arena_serve.add_argument('--port', type=int, default=0)
+    arena_serve.add_argument('--timeout', type=float, default=600)
+    arenas.add_parser('create').add_argument('definition', help='JSON title/prompt/references/assets/starter')
+    arenas.add_parser('list')
+    arenas.add_parser('show').add_argument('benchmark')
+    arena_run = arenas.add_parser('run', help='explicit new dated generation')
+    arena_run.add_argument('benchmark')
+    arena_run.add_argument('--image', required=True)
+    arena_run.add_argument('--model', required=True)
+    arena_run.add_argument('--effort', choices=('minimal','low','medium','high','xhigh'), default='medium')
+    arena_run.add_argument('--adapter', choices=('codex','fixture'), default='fixture')
+    arena_run.add_argument('--auth-file')
+    arena_run.add_argument('--timeout', type=float, default=600)
     run = commands.add_parser("run", help="run an explicit command in an ephemeral sandbox")
     run.add_argument("--image", required=True, help="preloaded image reference; never pulled automatically")
     run.add_argument("--network", choices=("none", "bridge"), default="none")
@@ -136,6 +154,32 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     sandbox = DockerSandbox(context=args.context)
     try:
+        if args.action == 'arena':
+            from .arena import Arena
+            from .artifacts import read_json
+            arena = Arena(args.data)
+            if args.arena_action == 'serve':
+                from .arena_server import serve
+                from .benchmark import termination_handler
+                with termination_handler():
+                    serve(args.data, args.image, context=args.context, auth_file=args.auth_file,
+                          port=args.port, timeout=args.timeout)
+                return 0
+            if args.arena_action == 'create':
+                result = arena.create(read_json(args.definition))
+            elif args.arena_action == 'list':
+                result = arena.records('benchmarks')
+            elif args.arena_action == 'show':
+                result = arena.summary(args.benchmark)
+            else:
+                from .arena_runtime import Runner
+                from .artifacts import lock
+                from .benchmark import termination_handler
+                with lock(arena.root / 'server.lock'), termination_handler():
+                    result = arena.enqueue(args.benchmark, [dict(harness=args.adapter, model=args.model, effort=args.effort)])[0]
+                    result = Runner(arena, args.image, args.context, args.auth_file, args.timeout).generate(result['id'])
+            print(json.dumps(result))
+            return 125 if args.arena_action == 'run' and result['status'] != 'ready' else 0
         if args.action == 'observe':
             from .observation import serve
             from .preparation import Store
