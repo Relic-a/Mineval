@@ -370,7 +370,7 @@ class WorkflowTests(HistoryFixture):
             prefix = urlsplit(server.observation_url).path.rstrip('/')
             connection = http.client.HTTPConnection('127.0.0.1', server.server_port)
             self.addCleanup(connection.close)
-            connection.request('GET', prefix + '/')
+            connection.request('GET', prefix + '/settings')
             response = connection.getresponse(); body = response.read().decode()
             self.assertEqual(response.getheader('Referrer-Policy'), 'same-origin')
             csrf = re.search(r'name="csrf" value="([^"]+)"', body)[1]
@@ -391,6 +391,58 @@ class WorkflowTests(HistoryFixture):
             self.assertEqual(self.store.inspect_task('example')['state']['status'], 'retired')
             self.assertIn('Request already received', post('retire-confirm', confirmed)[1])
             self.assertEqual(self.store.inspect_revision('example', self.version)['version'], self.version)
+
+    def test_dashboard_separates_preparation_models_and_benchmark_review(self):
+        flow = self.flow()
+        flow.catalog.get = lambda **kw: {'models': [{'model': 'catalog-model', 'name': 'Catalog model', 'efforts': ['low', 'high'], 'default_effort': 'high'}], 'error': None}
+        pages = Pages(self.store, workflows=flow)
+        overview = pages.render('/')
+        self.assertIn('Benchmark overview', overview)
+        self.assertIn('Run benchmark', overview)
+        pool = pages.render('/tasks')
+        self.assertLess(pool.index('Prepare all'), pool.index('<table>'))
+        self.assertNotIn('name="configuration"', pool)
+        self.assertNotIn('name="csrf"', pool)  # GET selection does not put CSRF in URLs.
+        confirmation = pages.render('/prepare', {'all': ['yes']})
+        self.assertIn('0 tasks will be prepared; 1 skipped', confirmation)
+        self.assertEqual(flow.jobs(), [])
+        picker = pages.render('/benchmarks/new', {'task': ['example'], 'step': ['models'], 'version_example': [self.version]})
+        self.assertIn('Models being benchmarked', picker)
+        self.assertIn('catalog-model', picker)
+        self.assertIn('value="' + self.version + '"', picker)
+        searched = pages.render('/benchmarks/new', {'task': ['example'], 'step': ['models'], 'model_step': ['yes'], 'model_search': ['catalog'], 'models': ['explicit/model'], 'effort': ['ultra']})
+        self.assertIn('rows="3">explicit/model</textarea>', searched)
+        self.assertIn('<option value="ultra" selected>', searched)
+        self.assertNotIn('name="exclude" value="yes" checked', searched)
+        config = json.dumps({'model': 'catalog-model', 'effort': 'high', 'adapter': 'codex'})
+        selection = {'task': ['example'], 'step': ['review'], 'configuration': [config], 'version_example': [self.version], 'exclude': ['yes']}
+        review = pages.render('/benchmarks/new', selection)
+        self.assertIn('1 task/model combinations ready to queue', review)
+        self.assertIn('AI-assisted evaluation: disabled', review)
+        self.assertEqual(flow.jobs(), [])  # Review does not enqueue or spend inference.
+        with patch('mineval.benchmark.run_agent', side_effect=self._run_agent):
+            benchmark.run(self.store, 'example', self.version, run_id='prior', adapter=FakeAdapter(model='catalog-model', effort='high'))
+        selection['configuration'] = [json.dumps({'model':'catalog-model', 'effort':'high', 'adapter':'fake'})]
+        skipped = pages.render('/benchmarks/new', selection)
+        self.assertIn('Skip · already attempted', skipped)
+        self.assertIn('<button disabled>Run benchmark</button>', skipped)
+        del flow.settings['evaluation_config']
+        unavailable = pages.render('/benchmarks/new', selection)
+        self.assertIn('Configure private evaluation commands', unavailable)
+        self.assertIn('<button disabled>Run benchmark</button>', unavailable)
+
+    def test_dashboard_read_only_boundary_and_host_review_configuration(self):
+        pages = Pages(self.store)
+        for route in ('/', '/tasks', '/benchmarks/new', '/settings', '/prepare'):
+            html = pages.render(route)
+            self.assertIn('Read-only historical view', html)
+            self.assertNotIn('method="post"', html)
+        flow = self.flow()
+        flow.settings.update(review_model='host-review', review_effort='ultra')
+        settings = Pages(self.store, workflows=flow).render('/settings')
+        self.assertIn('host-review · ultra', settings)
+        self.assertIn('host-controlled review override', settings)
+        self.assertNotIn('name="review_model"', settings)
 
 
 

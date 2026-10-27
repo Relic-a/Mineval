@@ -87,11 +87,11 @@ class ModelSettingsTests(unittest.TestCase):
             self.flow.save_model_settings({r:c | {'model':'--bad'} for r,c in choices.items()})
         self.assertEqual(self.flow.model_settings()['preparation']['model'], 'changed')
 
-    def test_discovered_models_in_task_picker_and_settings(self):
+    def test_discovered_models_in_settings_and_separate_task_workspace(self):
         pages = Pages(self.store, workflows=self.flow)
-        body = pages.render('/')
-        self.assertIn('model-a', body)
-        self.assertIn('model-a · high · codex', body)
+        body = pages.render('/tasks')
+        self.assertNotIn('name="configuration"', body)
+        self.assertIn('model-a', pages.render('/settings'))
         self.assertIn('Prep / extract', pages.render('/settings'))
         self.flow.catalog.get = lambda **kw: {'models': [], 'error': 'Discovery unavailable'}
         self.assertIn('Discovery unavailable', pages.render('/settings'))

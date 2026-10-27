@@ -92,9 +92,9 @@ def make_server(app, port=0):
                     pages = Pages(Store(app.arena.root.parent), prefix + '/history')
                     self.respond(200, pages.render(unquote(route[len('history'):]), parse_qs(parsed.query)).encode(), 'text/html; charset=utf-8', historical=True)
                     return
-                if method == 'GET' and route in ('', 'arena.js', 'arena.css'):
+                if method == 'GET' and route in ('', 'arena.js', 'arena.css', 'historical.css'):
                     name = route or 'arena.html'
-                    mime = {'arena.html': 'text/html; charset=utf-8', 'arena.js': 'text/javascript; charset=utf-8', 'arena.css': 'text/css; charset=utf-8'}[name]
+                    mime = {'arena.html': 'text/html; charset=utf-8', 'arena.js': 'text/javascript; charset=utf-8', 'arena.css': 'text/css; charset=utf-8', 'historical.css': 'text/css; charset=utf-8'}[name]
                     self.respond(200, (static / name).read_bytes(), mime); return
                 if method == 'GET' and route.startswith('download/'):
                     key = route.split('/')[1]

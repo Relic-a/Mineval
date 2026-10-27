@@ -1,0 +1,260 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-27T18:14:11.755440+00:00",
+  "title": "Design System: Mineval historical workspace",
+  "extensions": {
+    "colorMeta": {
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "tonalRamp": [
+          "oklch(15% 0.0072 258.37)",
+          "oklch(26% 0.0072 258.37)",
+          "oklch(38% 0.0072 258.37)",
+          "oklch(49% 0.0072 258.37)",
+          "oklch(61% 0.0072 258.37)",
+          "oklch(72% 0.0072 258.37)",
+          "oklch(84% 0.0072 258.37)",
+          "oklch(95% 0.0072 258.37)"
+        ]
+      },
+      "sidebar": {
+        "role": "neutral",
+        "displayName": "Sidebar",
+        "tonalRamp": [
+          "oklch(15% 0.0067 270.98)",
+          "oklch(26% 0.0067 270.98)",
+          "oklch(38% 0.0067 270.98)",
+          "oklch(49% 0.0067 270.98)",
+          "oklch(61% 0.0067 270.98)",
+          "oklch(72% 0.0067 270.98)",
+          "oklch(84% 0.0067 270.98)",
+          "oklch(95% 0.0067 270.98)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Surface",
+        "tonalRamp": [
+          "oklch(15% 0.0088 264.33)",
+          "oklch(26% 0.0088 264.33)",
+          "oklch(38% 0.0088 264.33)",
+          "oklch(49% 0.0088 264.33)",
+          "oklch(61% 0.0088 264.33)",
+          "oklch(72% 0.0088 264.33)",
+          "oklch(84% 0.0088 264.33)",
+          "oklch(95% 0.0088 264.33)"
+        ]
+      },
+      "soft": {
+        "role": "neutral",
+        "displayName": "Soft",
+        "tonalRamp": [
+          "oklch(15% 0.0127 264.27)",
+          "oklch(26% 0.0127 264.27)",
+          "oklch(38% 0.0127 264.27)",
+          "oklch(49% 0.0127 264.27)",
+          "oklch(61% 0.0127 264.27)",
+          "oklch(72% 0.0127 264.27)",
+          "oklch(84% 0.0127 264.27)",
+          "oklch(95% 0.0127 264.27)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "tonalRamp": [
+          "oklch(15% 0.0013 286.38)",
+          "oklch(26% 0.0013 286.38)",
+          "oklch(38% 0.0013 286.38)",
+          "oklch(49% 0.0013 286.38)",
+          "oklch(61% 0.0013 286.38)",
+          "oklch(72% 0.0013 286.38)",
+          "oklch(84% 0.0013 286.38)",
+          "oklch(95% 0.0013 286.38)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted",
+        "tonalRamp": [
+          "oklch(15% 0.0164 269.93)",
+          "oklch(26% 0.0164 269.93)",
+          "oklch(38% 0.0164 269.93)",
+          "oklch(49% 0.0164 269.93)",
+          "oklch(61% 0.0164 269.93)",
+          "oklch(72% 0.0164 269.93)",
+          "oklch(84% 0.0164 269.93)",
+          "oklch(95% 0.0164 269.93)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Line",
+        "tonalRamp": [
+          "oklch(15% 0.0156 264.30)",
+          "oklch(26% 0.0156 264.30)",
+          "oklch(38% 0.0156 264.30)",
+          "oklch(49% 0.0156 264.30)",
+          "oklch(61% 0.0156 264.30)",
+          "oklch(72% 0.0156 264.30)",
+          "oklch(84% 0.0156 264.30)",
+          "oklch(95% 0.0156 264.30)"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Accent",
+        "tonalRamp": [
+          "oklch(15% 0.1228 273.43)",
+          "oklch(26% 0.1228 273.43)",
+          "oklch(38% 0.1228 273.43)",
+          "oklch(49% 0.1228 273.43)",
+          "oklch(61% 0.1228 273.43)",
+          "oklch(72% 0.1228 273.43)",
+          "oklch(84% 0.1228 273.43)",
+          "oklch(95% 0.1228 273.43)"
+        ]
+      },
+      "success": {
+        "role": "semantic",
+        "displayName": "Success",
+        "tonalRamp": [
+          "oklch(15% 0.1285 168.82)",
+          "oklch(26% 0.1285 168.82)",
+          "oklch(38% 0.1285 168.82)",
+          "oklch(49% 0.1285 168.82)",
+          "oklch(61% 0.1285 168.82)",
+          "oklch(72% 0.1285 168.82)",
+          "oklch(84% 0.1285 168.82)",
+          "oklch(95% 0.1285 168.82)"
+        ]
+      },
+      "danger": {
+        "role": "semantic",
+        "displayName": "Danger",
+        "tonalRamp": [
+          "oklch(15% 0.1277 13.28)",
+          "oklch(26% 0.1277 13.28)",
+          "oklch(38% 0.1277 13.28)",
+          "oklch(49% 0.1277 13.28)",
+          "oklch(61% 0.1277 13.28)",
+          "oklch(72% 0.1277 13.28)",
+          "oklch(84% 0.1277 13.28)",
+          "oklch(95% 0.1277 13.28)"
+        ]
+      },
+      "warning": {
+        "role": "semantic",
+        "displayName": "Warning",
+        "tonalRamp": [
+          "oklch(15% 0.1120 83.77)",
+          "oklch(26% 0.1120 83.77)",
+          "oklch(38% 0.1120 83.77)",
+          "oklch(49% 0.1120 83.77)",
+          "oklch(61% 0.1120 83.77)",
+          "oklch(72% 0.1120 83.77)",
+          "oklch(84% 0.1120 83.77)",
+          "oklch(95% 0.1120 83.77)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "mono": {
+        "displayName": "Evidence and code",
+        "purpose": "Code blocks, frozen identifiers and original evidence."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "state-color",
+        "value": "background .12s ease, color .12s ease",
+        "purpose": "Links and buttons only when reduced motion is not requested."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "mobile",
+        "value": "800px"
+      },
+      {
+        "name": "wide",
+        "value": "1600px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "description": "Primary button from the historical workspace.",
+      "html": "<button class=\"ds-primary\">Review benchmark</button>",
+      "css": ".ds-primary{font:13px/1.55 'Geist Sans',Geist,Inter,system-ui,sans-serif;background:var(--ink);color:var(--surface);border:1px solid #d5d7de;padding:7px 12px;border-radius:6px;font-weight:600;cursor:pointer}.ds-primary:hover{filter:brightness(.9)}.ds-primary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.ds-primary:disabled{opacity:.4;cursor:not-allowed}",
+      "refersTo": "button-primary"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "description": "Secondary button from the historical workspace.",
+      "html": "<button class=\"ds-secondary\">Review benchmark</button>",
+      "css": ".ds-secondary{font:13px/1.55 'Geist Sans',Geist,Inter,system-ui,sans-serif;background:var(--soft);color:var(--ink);border:1px solid var(--line);padding:7px 12px;border-radius:6px;font-weight:600;cursor:pointer}.ds-secondary:hover{filter:brightness(.9)}.ds-secondary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.ds-secondary:disabled{opacity:.4;cursor:not-allowed}",
+      "refersTo": "button-secondary"
+    },
+    {
+      "name": "Model search",
+      "kind": "input",
+      "description": "Model search from the historical workspace.",
+      "html": "<label class=\"ds-label\">Search models <input class=\"ds-input\" placeholder=\"Model identifier\"></label>",
+      "css": ".ds-label{font:13px/1.55 'Geist Sans',Geist,Inter,system-ui,sans-serif;color:var(--ink)}.ds-input{font:13px/1.55 'Geist Sans',Geist,Inter,system-ui,sans-serif;background:var(--soft);color:var(--ink);border:1px solid var(--line);padding:7px 10px;border-radius:6px;caret-color:var(--accent)}.ds-input:hover{border-color:var(--muted)}.ds-input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}",
+      "refersTo": "input"
+    },
+    {
+      "name": "Workspace navigation",
+      "kind": "nav",
+      "description": "Workspace navigation from the historical workspace.",
+      "html": "<nav class=\"ds-nav\"><a href=\"#overview\">Overview</a><a href=\"#models\" aria-current=\"page\">Models</a></nav>",
+      "css": ".ds-nav{display:flex;flex-direction:column;gap:4px;font:13px/1.55 'Geist Sans',Geist,Inter,system-ui,sans-serif;}.ds-nav a{color:var(--muted);padding:9px 12px;border-radius:6px;text-decoration:none}.ds-nav a:hover,.ds-nav a[aria-current=page]{color:var(--ink);background:#1e2229}.ds-nav a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}"
+    },
+    {
+      "name": "Outcome tag",
+      "kind": "chip",
+      "description": "Outcome tag from the historical workspace.",
+      "html": "<span class=\"ds-status\">Passed</span>",
+      "css": ".ds-status{font:13px/1.55 'Geist Sans',Geist,Inter,system-ui,sans-serif;font-size:11px;color:#59d9b0;background:#14241f;border:1px solid #315246;padding:1px 6px;border-radius:5px;white-space:nowrap}"
+    },
+    {
+      "name": "Statistic panel",
+      "kind": "card",
+      "description": "Statistic panel from the historical workspace.",
+      "html": "<div class=\"ds-stat\"><strong>12 / 18</strong><span>Evaluated samples</span></div>",
+      "css": ".ds-stat{font:13px/1.55 'Geist Sans',Geist,Inter,system-ui,sans-serif;background:#11151a;border:1px solid var(--line);border-radius:7px;padding:16px;color:var(--ink)}.ds-stat strong{display:block;font-size:25px;font-weight:600;line-height:1.5}.ds-stat span{color:var(--muted);font-size:12px}"
+    }
+  ],
+  "narrative": {
+    "overview": "The historical workspace is dark, compact and restrained, following the user-pinned direction of Linear, Vercel, Better Auth and Resend. Its first viewport prioritizes evaluated configuration comparisons and category coverage, with task preparation and benchmark launch easy to find. The supplied reference establishes visual direction; its sample data is never product data.",
+    "keyCharacteristics": [
+      "Persistent navigation and dense, scannable operational tables.",
+      "Quiet tonal surfaces, compact controls and sparse semantic color.",
+      "Evidence, denominators and task coverage remain visible beside rates."
+    ],
+    "rules": [
+      {
+        "name": "The Contained Table Rule",
+        "body": "Preserve the page inset; wide comparison content scrolls within its own container.",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "Do use the shared historical stylesheet for workspace tokens and primitives.",
+      "Do keep tables scrollable inside their containers and preserve mobile content insets.",
+      "Do retain sample denominators, task coverage and explicit unavailable states.",
+      "Do preserve model choices, explicit identifiers, effort and skip settings while searching."
+    ],
+    "donts": [
+      "Don't add decorative gradients or large charts to operational comparisons.",
+      "Don't load external fonts or introduce client scripts into historical server forms.",
+      "Don't collapse distinct frozen conditions into an implied comparable result."
+    ]
+  }
+}

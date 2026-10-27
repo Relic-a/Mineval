@@ -1,17 +1,17 @@
 # Historical benchmarking from the web and CLI
 
 Run `mineval --context YOUR_ROOTLESS_CONTEXT --data DATA observe --image YOUR_PRELOADED_PREPARATION_IMAGE --auth-file /explicit/model-only/auth.json`.
-The printed secret loopback URL opens the historical task pool. The image must
+The printed secret loopback URL opens the benchmark overview. The image must
 already exist and contain Git, Python, Mineval and the isolated Codex executable
 (and the dependencies the project needs). No images are pulled. The browser never
 receives the auth path, credentials, host command execution or Docker APIs.
 Web Arena continues to use its separate server, store, execution path and policies;
 its embedded historical pages remain read-only. Use `observe` for historical actions.
 
-The task pool lists every repository and supports repository, category, state,
-prepared/unprepared and text filters. Check task rows to prepare, run or retire them.
+The **Tasks** workspace lists every repository and supports repository, category, state,
+prepared/unprepared and text filters. Check task rows to reveal preparation, benchmarking and removal actions above the table. Task filters explicitly clear selection; selection is limited to the visible table. Choose **Select all visible** for bulk selection.
 Each prepared row lets you select an exact frozen revision (the current frozen
-revision is selected initially). Prepare all considers eligible unprepared tasks
+revision is selected initially). **Prepare all** is always available above the table and opens a confirmation showing eligible and skipped tasks plus the effective preparation agents. It considers eligible unprepared tasks
 across all repositories, independently of the visible filters. Removal means
 confirmed retirement, not erasing historical evidence; there is no restore command.
 Existing task detail, revision, run, assessment and evidence pages remain available.
@@ -31,9 +31,46 @@ records a factual model observation and, for Codex attempts by default, runs a
 separate qualitative review and compaction when needed. The fake adapter is available
 through settings/CLI for fixtures; its reviews are factual only. It never calls a model.
 
+## Application navigation and benchmark configuration
+
+The persistent sidebar opens Overview, Tasks, Benchmarks, Models, Activity,
+Web Arena and Settings. Overview shows real evaluated configuration summaries,
+coverage, the fixed engineering-category matrix and recent queue activity.
+All-evidence statistics remain descriptive; comparable results use only the exact
+common revision and evaluation-condition intersection. Empty data is unavailable,
+never a fabricated percentage.
+
+**Run benchmark** in Overview or Benchmarks opens a dedicated three-step workspace:
+choose prepared tasks, choose models being benchmarked, then review and run.
+Starting from task selection preselects eligible tasks and identifies exclusions.
+Task filters in the wizard preserve selected tasks, including those outside the
+visible results. Model discovery lists supported reasoning efforts as independent
+checkbox configurations, so the same model can be tested at several efforts.
+Explicit identifiers remain available under advanced disclosure.
+The review step pins exact revisions, checks private evaluation configuration and
+previews already-attempted combinations before confirmation. With no runnable
+combinations the launch action is disabled. Queue submission revalidates all inputs.
+The skip option matches complete revisions, model, effort and harness, including
+unsuccessful attempts. Automatic private evaluation remains part of every run.
+
+Preparation and benchmark submission open Activity with per-task submission outcomes,
+durable stages, saved result links and appropriate retry actions. Activity has state
+filters; refresh retrieves current progress. Settings expose effective preparation,
+AI-assisted evaluation and qualitative review roles, including read-only host review
+overrides. Private checks themselves do not require an AI model. Settings changes
+apply only to newly queued jobs; the existing model snapshots and retry semantics
+are preserved.
+
+Task details organize preparation, frozen verification, evaluations and diagnostics
+behind section links and artifact disclosures. Selecting a model opens a dedicated
+profile with per-effort performance, category breakdowns, accumulated observations,
+source provenance and historical runs, rather than appending details to the list.
+The Arena workspace uses the same dark visual system; its historical pages remain
+read-only and explain how to open the trusted operational observe server.
+
 ## Model settings and Codex discovery
 
-Open **Settings** in the historical dashboard to select the **Prep / extract** and
+Open **Settings → Agents & models** in the historical dashboard to select the **Prep / extract** and
 **Evaluation** model and reasoning effort. Prep applies to cleanup, extraction and
 independent preparation review. Evaluation applies to the evaluator, qualitative
 review and memory compaction. The trusted host `review_model` / `review_effort`
@@ -48,7 +85,7 @@ snapshot resolve the current choices when executing.
 Following Aproekt, Mineval starts the host `codex app-server --stdio`, performs
 `initialize` / `initialized`, and pages through `model/list`. Discovery performs no
 inference. It lists visible models, their supported reasoning efforts and defaults;
-the task pool uses these models when no host `models` presets are configured.
+the benchmark configuration picker uses these models when no host `models` presets are configured.
 Results are cached for five minutes (failures for fifteen seconds). **Refresh Codex
 models** bypasses the cache. Explicit identifiers remain usable on discovery failure
 or for models outside the visible catalog.
@@ -110,7 +147,7 @@ validated config; later settings edits do not change that queued evaluation.
 `historical-jobs.sqlite3` stores the queue and stage checkpoints, with WAL and full
 synchronous commits. One worker holds a local filesystem execution lock; inference
 does not hold a database transaction. Failed tasks do not stop unrelated tasks.
-The UI's Queue page shows queued/running/failed/interrupted/completed state, current
+The UI's **Activity** page shows queued/running/failed/interrupted/completed state, current
 stage and links to saved run and assessment IDs. Refresh to update. A server polls
 for queued work; a standalone CLI worker drains the queue once.
 
@@ -130,7 +167,7 @@ reused when only model review failed. Uncertain/orphan evaluator evidence reserv
 ID: retries allocate a new assessment ID. A run left `running` by host loss is sealed
 using existing `bench recover`, then the job reports that a new explicit rerun is
 needed. Attempts without collected output cannot be retried toward evaluation.
-The queue exposes “Start new benchmark attempt” for these jobs, allocating fresh run
+Activity exposes “Start new benchmark attempt” for these jobs, allocating fresh run
 and assessment IDs while preserving the old evidence; ordinary retries are rejected.
 Partial evidence and immutable launches are never overwritten. Preparation
 retries use fresh sessions/approvals; an already frozen revision is checked and reused.
@@ -181,7 +218,7 @@ and display as uncategorized; arbitrary labels in existing records are retained
 without pretending they belong to the new taxonomy. No historical metadata or receipt is rewritten or inferred from a title.
 
 Models and results shows each model/effort/harness configuration's all-evidence
-performance and category average. More details shows pass/fail/inconclusive/error,
+performance and category average. Each dedicated model profile shows pass/fail/inconclusive/error,
 pass rates, decided counts, denominators, task coverage, exact assessment selections,
 and accumulated observations. Pass rate includes all four verdicts in the denominator.
 A sample is an exact prepared revision and evaluation condition. Repeated reruns
@@ -216,7 +253,7 @@ it. Textual observations cannot change an independent verdict.
 At 24 active observations the worker folds the oldest two into one summary until
 the active list is below 24. A separate review model does this outside a transaction.
 The summary takes their oldest position, unions source references and records parent
-IDs. Originals never disappear; More details exposes the full archive and CLI can
+IDs. Originals never disappear; The model profile exposes the full archive and CLI can
 retrieve it. Reservations last 15 minutes by default, with a maximum of one hour.
 
 The CLI is also a compaction protocol for independent review agents:

@@ -36,7 +36,7 @@ class ObservationTests(fixtures.HistoryFixture):
         self.store.create_suite({'suite_id': 'sample', 'members': [
             {'task_id': 'example', 'version': self.version}]})
         pages = Pages(self.store)
-        for route, expected in [('/', 'Task pool'), ('/tasks/example', 'Preparation history'),
+        for route, expected in [('/', 'Benchmark overview'), ('/tasks/example', 'Preparation history'),
                 ('/suites', 'sample'), ('/suites/sample', self.version),
                 ('/tasks/example/revisions/' + self.version, 'private/verification'),
                 ('/tasks/example/runs/left', '+def answer(): return 42'),

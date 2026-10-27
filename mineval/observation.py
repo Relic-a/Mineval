@@ -14,19 +14,7 @@ from .preparation import identifier
 from .review import checked
 
 TEXT_LIMIT = 256 * 1024
-CSS = """
-:root {color-scheme:light; --paper:#f5f4ef; --ink:#242d2a; --muted:#53645e; --line:#c6cfc8; --accent:#235d48}
-*{box-sizing:border-box} body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.55 system-ui,sans-serif}
-header{border-bottom:1px solid var(--line);padding:18px max(24px,calc((100vw - 1200px)/2));display:flex;gap:32px;align-items:center;flex-wrap:wrap}
-header strong{font-size:21px;letter-spacing:-.025em} header span{color:var(--muted);font-size:14px} nav{display:flex;gap:24px;flex-wrap:wrap}
-main{max-width:1248px;margin:auto;padding:36px 24px 72px} h1{font-size:34px;line-height:1.2;letter-spacing:-.025em;overflow-wrap:anywhere;margin:12px 0 20px} h2{font-size:22px;margin:40px 0 12px} h3{font-size:17px;margin:24px 0 8px}
-a{color:var(--accent);text-underline-offset:3px} a:hover{color:#123a2c} a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #956519;outline-offset:4px}
-p{max-width:75ch} .muted,small{color:var(--muted)} .notice{padding:14px 18px;background:#e7ece6;border:1px solid var(--line)}
-.scroll{overflow:auto} .model-catalog table{min-width:640px} .task-pool table{min-width:1050px} .task-pool td:nth-child(3){min-width:250px} .task-pool td:nth-child(4){min-width:90px} table{border-collapse:collapse;width:100%;text-align:left;font-variant-numeric:tabular-nums} td,th{padding:14px 16px 14px 0;border-bottom:1px solid var(--line);vertical-align:top} th{font-size:13px;color:var(--muted);font-weight:600} td:first-child{min-width:140px} td{overflow-wrap:anywhere} code{font:13px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}
-pre{background:#e9ede7;border:1px solid var(--line);padding:18px;overflow:auto;max-height:650px;font:13px/1.6 ui-monospace,monospace;tab-size:4} details{margin:12px 0} summary{cursor:pointer;color:var(--accent);padding:8px 0} .status{white-space:nowrap;font-size:13px;font-weight:600;color:#235d48} .status.fail,.status.failed,.status.error,.status.rejected{color:#9c3026} .status.retired,.status.interrupted,.status.inconclusive,.status.needs-review{color:#775313}
-.trail{font-size:14px;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:24px} label{display:block;margin:12px 0} input,select,button,textarea{max-width:100%;font:inherit;accent-color:var(--accent)} button{background:var(--accent);color:white;padding:10px 20px;border:0;cursor:pointer} button:hover{background:#123a2c} fieldset{border:1px solid var(--line);padding:18px;min-width:0} .columns{display:grid;grid-template-columns:1fr 1fr;gap:24px} ul{padding-left:22px} li{margin:8px 0} ::selection{background:#c4d9cc;color:#192d23} :root{scrollbar-color:#8c9b90 var(--paper)}
-@media(max-width:640px){header{gap:12px;padding:16px 20px} nav{width:100%} main{padding:24px 20px 48px} h1{font-size:28px}.columns{grid-template-columns:1fr} td,th{padding:12px 12px 12px 0}}
-"""
+CSS = (Path(__file__).parent / 'web' / 'historical.css').read_text()
 
 
 def esc(value):
@@ -60,9 +48,24 @@ class Pages:
         return '<a href="' + esc(self.url(*parts, **query)) + '">' + esc(text) + '</a>'
 
     def page(self, title, content):
-        arena_link = ('<a href="' + esc(self.prefix[:-len('/history')] + '/') + '">Web Arena</a>'
-                      if self.prefix.endswith('/history') else self.link('Web Arena', 'arena'))
-        return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + ' · Mineval</title><style>' + CSS + '</style><body><header><strong>Mineval</strong><nav aria-label="Main">' + self.link('Tasks') + self.link('Models', 'models') + self.link('Queue', 'jobs') + self.link('Settings', 'settings') + self.link('Suites', 'suites') + self.link('Compare', 'compare') + arena_link + '</nav><span>Local observation · private human view</span></header><main><h1>' + esc(title) + '</h1>' + content + '</main></body></html>'
+        destinations = [('Overview', ''), ('Tasks', 'tasks'), ('Benchmarks', 'benchmarks'), ('Models', 'models'), ('Activity', 'jobs'), ('Web Arena', 'arena'), ('Settings', 'settings')]
+        active = getattr(self, 'active', '')
+        icons = {'': '<rect x="3" y="3" width="14" height="14" rx="2"/><path d="M3 8h14M8 8v9"/>',
+                 'tasks': '<rect x="3" y="3" width="14" height="14" rx="2"/><path d="M6 7h8M6 10h8M6 13h5"/>',
+                 'benchmarks': '<path d="m7 4 10 6-10 6Z"/>',
+                 'models': '<path d="m10 2 8 4v8l-8 4-8-4V6Zm0 0v16M2 6l8 4 8-4"/>',
+                 'jobs': '<circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/>',
+                 'arena': '<rect x="2" y="3" width="16" height="14" rx="2"/><path d="M2 7h16M5 5h1M8 5h1"/>',
+                 'settings': '<circle cx="10" cy="10" r="3"/><path d="M10 1v3m0 12v3M1 10h3m12 0h3M4 4l2 2m8 8 2 2M4 16l2-2m8-8 2-2"/>'}
+        nav = ''
+        for name, route in destinations:
+            target = self.prefix[:-len('/history')] + '/' if route == 'arena' and self.prefix.endswith('/history') else self.url(route)
+            nav += '<a href="' + esc(target) + '"' + (' aria-current="page"' if active == route else '') + '><svg viewBox="0 0 20 20" aria-hidden="true">' + icons[route] + '</svg>' + name + '</a>'
+
+        mode = 'Operational workspace' if self.workflows else 'Read-only historical view'
+        boundary = '' if self.workflows else '<p class="notice">Read-only historical view. To prepare tasks or run coding benchmarks, start <code>mineval observe</code> in a trusted local terminal. Generated websites cannot access these operations.</p>'
+        return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + ' · Mineval</title><style>' + CSS + '</style><body><header><strong>mineval</strong><nav aria-label="Main">' + nav + '</nav><small>' + mode + '<br>Private local workspace</small></header><main><h1>' + esc(title) + '</h1>' + boundary + content + '</main></body></html>'
+
 
     def task_link(self, task):
         return self.link(task, 'tasks', task)
@@ -71,7 +74,7 @@ class Pages:
         return self.link(ref['version'], 'tasks', ref['task_id'], 'revisions', ref['version'])
 
     def trail(self, task, ref=None, run=None):
-        items = [self.link('Task pool'), self.task_link(task)]
+        items = [self.link('Task pool', 'tasks'), self.task_link(task)]
         if ref:
             items.append(self.revision_link(ref))
         if run:
@@ -105,9 +108,22 @@ class Pages:
     def render(self, path, query=None):
         query = query or {}
         parts = [p for p in path.split('/') if p]
+        self.active = parts[0] if parts else ''
         if not parts:
+            from .dashboard import overview
+            return overview(self)
+        if parts == ['tasks']:
             from .dashboard import pool
             return pool(self, query)
+        if parts in (['benchmarks'], ['benchmarks', 'new']):
+            from .dashboard import benchmarks
+            return benchmarks(self, query, new=len(parts) == 2)
+        if parts == ['remove'] and self.workflows:
+            from .dashboard import action
+            return action(self, 'selection', query | {'operation': ['retire']})
+        if parts == ['prepare']:
+            from .dashboard import prepare
+            return prepare(self, query)
         if parts == ['settings']:
             from .dashboard import settings
             return settings(self)
@@ -116,7 +132,7 @@ class Pages:
             return models(self, query)
         if parts == ['jobs']:
             from .dashboard import jobs
-            return jobs(self)
+            return jobs(self, query)
         if parts == ['arena']:
             if self.prefix.endswith('/history'):
                 return self.page('Web Arena', '<p><a href="' + esc(self.prefix[:-len('/history')] + '/') + '">Return to the Web Arena workspace</a></p>')
@@ -158,7 +174,7 @@ class Pages:
                 if completion:
                     body += '<p>' + esc(completion.get('summary', '')) + '</p><p class="muted">Historical solution seen: ' + esc(completion.get('historical_solution_seen', 'unknown')) + ' (self-reported).</p>'
                 assessments = [evaluation.inspect(self.store, task, p.stem) for p in sorted((self.store.task(task) / 'evaluations').glob('*.json'))]
-                body += '<h2>Evaluations</h2>' + table(['Assessment', 'Verdict'], ((self.link(e['evaluation_id'], 'tasks', task, 'evaluations', e['evaluation_id']), status(e.get('verdict', e['status']))) for e in assessments if e['run_id'] == parts[3]))
+                body += '<h2 id="evaluations">Evaluations</h2>' + table(['Assessment', 'Verdict'], ((self.link(e['evaluation_id'], 'tasks', task, 'evaluations', e['evaluation_id']), status(e.get('verdict', e['status']))) for e in assessments if e['run_id'] == parts[3]))
                 if run.get('output_available'):
                     body += '<h2>Output changes</h2>' + self.diff(task, run)
                     body += '<h2>Saved output artifacts</h2>' + self.files(task, 'runs', parts[3], self.artifact_root(task, 'runs', parts[3]))
@@ -199,13 +215,15 @@ class Pages:
     def task_page(self, task):
         record = self.store.inspect_task(task)
         body = self.trail(task) + '<p>' + esc(record['metadata']['task_summary']) + '</p><p>Status: ' + status(record['state']['status']) + '</p>'
+        from .categories import category_for
+        body += table(['Repository', 'Category', 'Prepared revisions'], [(esc(record['metadata'].get('repository', record['metadata'].get('repo', 'Unknown'))), esc(category_for(record['metadata'])), str(len(record['prepared_revisions'])))])
         if self.workflows:
             from .dashboard import form, hidden
-            body += '<p>' + self.link('Select models and run this task', search=task) + '</p>'
+            body += '<p>' + self.link('Run benchmark with this task', 'benchmarks', 'new', task=task) + '</p>'
             body += form(self, 'selection', hidden('task', task) + '<button name="operation" value="retire">Remove from active pool…</button>')
         body += '<details><summary>Candidate provenance and state history</summary>' + pretty({'metadata': record['metadata'], 'state': record['state']}) + '</details>'
-        body += '<h2>Prepared revisions</h2>' + table(['Revision', 'Inspection'], ((self.link(v, 'tasks', task, 'revisions', v), 'Cleanup, independent review and private verification') for v in record['prepared_revisions']))
-        body += '<h2>Preparation history</h2>'
+        body += '<div class="tabs"><a href="#overview">Overview</a><a href="#preparation">Preparation</a><a href="#verification">Verification</a><a href="#evaluations">Evaluations</a><a href="#logs">Logs</a></div><h2 id="overview">Overview</h2><h2 id="verification">Prepared revisions</h2>' + table(['Revision', 'Inspection'], ((self.link(v, 'tasks', task, 'revisions', v), 'Cleanup, independent review and private verification') for v in record['prepared_revisions']))
+        body += '<h2 id="preparation">Preparation history</h2>'
         with self.store.operation(task, allow_rejected=True):
             for scope in ('cleanups', 'extractions', 'extraction-attempts', 'reviews'):
                 parent = self.store.task(task) / ('cleanups' if scope == 'cleanups' else 'private/' + scope)
@@ -214,7 +232,7 @@ class Pages:
                     name = {'cleanups': 'cleanup-report.json', 'extractions': 'extraction-manifest.json',
                             'extraction-attempts': 'report.json', 'reviews': 'review.json'}[scope]
                     body += '<details><summary>' + esc(scope + ' / ' + directory.name) + '</summary>' + pretty(read_json(root / name)) + self.files(task, scope, directory.name, root) + '</details>'
-            body += '<h3>Fresh-environment diagnostics</h3>'
+            body += '<h3 id="logs">Fresh-environment diagnostics</h3>'
             for path in sorted((self.store.task(task) / 'diagnostics').glob('*.json')):
                 if path.name.endswith('.sha256.json'):
                     continue
@@ -224,7 +242,7 @@ class Pages:
         body += '<h2>Benchmark runs</h2>'
         runs = [self.store.inspect_run(task, Path(name).stem) for name in record['runs']]
         body += table(['Run', 'Model + harness', 'State', 'Revision'], ((self.link(r['run_id'], 'tasks', task, 'runs', r['run_id']), esc(r['model']['name'] + ' / ' + r['harness']['name']), status(r['status']), self.revision_link(r['prepared_revision'])) for r in runs))
-        body += '<h2>Evaluations</h2>'
+        body += '<h2 id="evaluations">Evaluations</h2>'
         results = [self.store.inspect_evaluation(task, Path(name).stem) for name in record['evaluations']]
         body += table(['Assessment', 'Run', 'Verdict'], ((self.link(e['evaluation_id'], 'tasks', task, 'evaluations', e['evaluation_id']), self.link(e['run_id'], 'tasks', task, 'runs', e['run_id']), status(e.get('verdict', e['status']))) for e in results))
         body += '<p class="muted">To exclude this task from future work: <code>mineval task retire ' + esc(task) + ' --reason "Reason"</code>. Old results remain available.</p>'
