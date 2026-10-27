@@ -24,6 +24,10 @@ def normalize(candidate):
     if not isinstance(candidate, dict):
         raise ValueError('Candidate must be a JSON object')
     candidate = dict(candidate)
+    from .categories import CATEGORIES, LEGACY_LABELS
+    if 'category' in candidate and (not isinstance(candidate['category'], str) or
+            candidate['category'] not in CATEGORIES.keys() | LEGACY_LABELS):
+        raise ValueError('category must be one of: ' + ', '.join(CATEGORIES))
     for field in ('repository', 'task_summary'):
         if not isinstance(candidate.get(field), str) or not candidate[field].strip():
             raise ValueError(f'{field} must be a nonempty string')

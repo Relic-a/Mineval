@@ -18,13 +18,13 @@ CSS = """
 :root {color-scheme:light; --paper:#f5f4ef; --ink:#242d2a; --muted:#53645e; --line:#c6cfc8; --accent:#235d48}
 *{box-sizing:border-box} body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.55 system-ui,sans-serif}
 header{border-bottom:1px solid var(--line);padding:18px max(24px,calc((100vw - 1200px)/2));display:flex;gap:32px;align-items:center;flex-wrap:wrap}
-header strong{font-size:21px;letter-spacing:-.025em} header span{color:var(--muted);font-size:14px} nav{display:flex;gap:24px}
+header strong{font-size:21px;letter-spacing:-.025em} header span{color:var(--muted);font-size:14px} nav{display:flex;gap:24px;flex-wrap:wrap}
 main{max-width:1248px;margin:auto;padding:36px 24px 72px} h1{font-size:34px;line-height:1.2;letter-spacing:-.025em;overflow-wrap:anywhere;margin:12px 0 20px} h2{font-size:22px;margin:40px 0 12px} h3{font-size:17px;margin:24px 0 8px}
 a{color:var(--accent);text-underline-offset:3px} a:hover{color:#123a2c} a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #956519;outline-offset:4px}
 p{max-width:75ch} .muted,small{color:var(--muted)} .notice{padding:14px 18px;background:#e7ece6;border:1px solid var(--line)}
-.scroll{overflow:auto} table{border-collapse:collapse;width:100%;text-align:left;font-variant-numeric:tabular-nums} td,th{padding:14px 16px 14px 0;border-bottom:1px solid var(--line);vertical-align:top} th{font-size:13px;color:var(--muted);font-weight:600} td:first-child{min-width:140px} td{overflow-wrap:anywhere} code{font:13px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}
-pre{background:#e9ede7;border:1px solid var(--line);padding:18px;overflow:auto;max-height:650px;font:13px/1.6 ui-monospace,monospace;tab-size:4} details{margin:12px 0} summary{cursor:pointer;color:var(--accent);padding:8px 0} .status{font-size:13px;font-weight:600;color:#235d48} .status.fail,.status.error,.status.rejected{color:#9c3026} .status.retired,.status.inconclusive,.status.needs-review{color:#775313}
-.trail{font-size:14px;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:24px} label{display:block;margin:12px 0} input,select,button{font:inherit;accent-color:var(--accent)} button{background:var(--accent);color:white;padding:10px 20px;border:0;cursor:pointer} button:hover{background:#123a2c} fieldset{border:1px solid var(--line);padding:18px;min-width:0} .columns{display:grid;grid-template-columns:1fr 1fr;gap:24px} ul{padding-left:22px} li{margin:8px 0} ::selection{background:#c4d9cc;color:#192d23} :root{scrollbar-color:#8c9b90 var(--paper)}
+.scroll{overflow:auto} .task-pool table{min-width:1050px} .task-pool td:nth-child(3){min-width:250px} .task-pool td:nth-child(4){min-width:90px} table{border-collapse:collapse;width:100%;text-align:left;font-variant-numeric:tabular-nums} td,th{padding:14px 16px 14px 0;border-bottom:1px solid var(--line);vertical-align:top} th{font-size:13px;color:var(--muted);font-weight:600} td:first-child{min-width:140px} td{overflow-wrap:anywhere} code{font:13px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}
+pre{background:#e9ede7;border:1px solid var(--line);padding:18px;overflow:auto;max-height:650px;font:13px/1.6 ui-monospace,monospace;tab-size:4} details{margin:12px 0} summary{cursor:pointer;color:var(--accent);padding:8px 0} .status{white-space:nowrap;font-size:13px;font-weight:600;color:#235d48} .status.fail,.status.failed,.status.error,.status.rejected{color:#9c3026} .status.retired,.status.interrupted,.status.inconclusive,.status.needs-review{color:#775313}
+.trail{font-size:14px;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:24px} label{display:block;margin:12px 0} input,select,button,textarea{max-width:100%;font:inherit;accent-color:var(--accent)} button{background:var(--accent);color:white;padding:10px 20px;border:0;cursor:pointer} button:hover{background:#123a2c} fieldset{border:1px solid var(--line);padding:18px;min-width:0} .columns{display:grid;grid-template-columns:1fr 1fr;gap:24px} ul{padding-left:22px} li{margin:8px 0} ::selection{background:#c4d9cc;color:#192d23} :root{scrollbar-color:#8c9b90 var(--paper)}
 @media(max-width:640px){header{gap:12px;padding:16px 20px} nav{width:100%} main{padding:24px 20px 48px} h1{font-size:28px}.columns{grid-template-columns:1fr} td,th{padding:12px 12px 12px 0}}
 """
 
@@ -49,8 +49,9 @@ def table(headers, rows):
 
 
 class Pages:
-    def __init__(self, store, prefix=''):
+    def __init__(self, store, prefix='', workflows=None, csrf=''):
         self.store, self.prefix = store, prefix
+        self.workflows, self.csrf = workflows, csrf
 
     def url(self, *parts, **query):
         return self.prefix + '/' + '/'.join(quote(str(p), safe='') for p in parts) + ('?' + urlencode(query, doseq=True) if query else '')
@@ -61,7 +62,7 @@ class Pages:
     def page(self, title, content):
         arena_link = ('<a href="' + esc(self.prefix[:-len('/history')] + '/') + '">Web Arena</a>'
                       if self.prefix.endswith('/history') else self.link('Web Arena', 'arena'))
-        return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + ' · Mineval</title><style>' + CSS + '</style><body><header><strong>Mineval</strong><nav aria-label="Main">' + self.link('Tasks') + self.link('Suites', 'suites') + self.link('Compare', 'compare') + arena_link + '</nav><span>Local observation · private human view</span></header><main><h1>' + esc(title) + '</h1>' + content + '</main></body></html>'
+        return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + ' · Mineval</title><style>' + CSS + '</style><body><header><strong>Mineval</strong><nav aria-label="Main">' + self.link('Tasks') + self.link('Models', 'models') + self.link('Queue', 'jobs') + self.link('Suites', 'suites') + self.link('Compare', 'compare') + arena_link + '</nav><span>Local observation · private human view</span></header><main><h1>' + esc(title) + '</h1>' + content + '</main></body></html>'
 
     def task_link(self, task):
         return self.link(task, 'tasks', task)
@@ -105,12 +106,14 @@ class Pages:
         query = query or {}
         parts = [p for p in path.split('/') if p]
         if not parts:
-            rows = self.store.list_tasks()
-            body = '<p>Inspect historical tasks, their preparation, and the evidence behind saved results. Refresh to see changes from CLI operations.</p>'
-            body += table(['Task', 'Problem', 'Status'], ((self.task_link(t['task_id']), esc(t['task_summary']), status(t['state']['status'])) for t in rows))
-            if not rows:
-                body += '<p>Start with <code>mineval task add candidate.json</code>. See README.md for the discovery skill and preparation workflow.</p>'
-            return self.page('Task pool', body)
+            from .dashboard import pool
+            return pool(self, query)
+        if parts == ['models']:
+            from .dashboard import models
+            return models(self, query)
+        if parts == ['jobs']:
+            from .dashboard import jobs
+            return jobs(self)
         if parts == ['arena']:
             if self.prefix.endswith('/history'):
                 return self.page('Web Arena', '<p><a href="' + esc(self.prefix[:-len('/history')] + '/') + '">Return to the Web Arena workspace</a></p>')
@@ -193,6 +196,10 @@ class Pages:
     def task_page(self, task):
         record = self.store.inspect_task(task)
         body = self.trail(task) + '<p>' + esc(record['metadata']['task_summary']) + '</p><p>Status: ' + status(record['state']['status']) + '</p>'
+        if self.workflows:
+            from .dashboard import form, hidden
+            body += '<p>' + self.link('Select models and run this task', search=task) + '</p>'
+            body += form(self, 'selection', hidden('task', task) + '<button name="operation" value="retire">Remove from active pool…</button>')
         body += '<details><summary>Candidate provenance and state history</summary>' + pretty({'metadata': record['metadata'], 'state': record['state']}) + '</details>'
         body += '<h2>Prepared revisions</h2>' + table(['Revision', 'Inspection'], ((self.link(v, 'tasks', task, 'revisions', v), 'Cleanup, independent review and private verification') for v in record['prepared_revisions']))
         body += '<h2>Preparation history</h2>'
@@ -220,7 +227,7 @@ class Pages:
         body += '<p class="muted">To exclude this task from future work: <code>mineval task retire ' + esc(task) + ' --reason "Reason"</code>. Old results remain available.</p>'
         return self.page(task, body)
 
-    def diff(self, task, run):
+    def diff(self, task, run, *, text=False):
         self.store._inspect_revision(task, run['prepared_revision']['version'])
         with tempfile.TemporaryDirectory(prefix='mineval-observe-') as temp:
             temp = Path(temp)
@@ -250,7 +257,8 @@ class Pages:
                 output.append(encoded[:budget].decode('utf-8', errors='replace')); budget -= len(encoded)
                 if budget <= 0:
                     output.append('\nPreview truncated; export output for the full changes.'); break
-            return '<pre>' + esc(''.join(output) or 'No file changes.') + '</pre>'
+            content = ''.join(output) or 'No file changes.'
+            return content if text else '<pre>' + esc(content) + '</pre>'
 
     def comparison(self, query):
         kind = query.get('kind', ['evaluations'])[0]
@@ -297,15 +305,84 @@ class Pages:
         return self.page('Compare ' + kind, body)
 
 
-def make_server(store, port=0):
+def make_server(store, port=0, workflows=None):
     if not isinstance(port, int) or not 0 <= port <= 65535:
         raise ValueError('Port must be between 0 and 65535')
     prefix = '/' + secrets.token_urlsafe(24)
-    pages = Pages(store, prefix)
+    pages = Pages(store, prefix, workflows, secrets.token_urlsafe(32))
+    import threading
+    worker_guard = threading.Lock()
+    worker_thread = None
+    worker_stop = threading.Event()
+    def start_worker():
+        nonlocal worker_thread
+        if workflows is None:
+            return
+        with worker_guard:
+            if worker_thread is None or not worker_thread.is_alive():
+                def work():
+                    while not worker_stop.is_set():
+                        try:
+                            workflows.work(stop_event=worker_stop)
+                        except KeyboardInterrupt:
+                            break
+                        except ValueError:
+                            pass  # Another local CLI/server worker owns the queue.
+                        worker_stop.wait(0.5)
+                worker_thread = threading.Thread(target=work, daemon=False)
+                worker_thread.start()
+    pages.start_worker = start_worker
+    # Do not resume interrupted inference implicitly; work() marks uncertain jobs.
+    start_worker()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass  # Keep private URLs, source names and evidence out of access logs.
+
+        def do_POST(self):
+            if workflows is None:
+                self.send_error(501); return
+            parsed = urlsplit(self.path)
+            origin = f'http://127.0.0.1:{self.server.server_port}'
+            if (self.headers.get('Host') != f'127.0.0.1:{self.server.server_port}'
+                    or self.headers.get('Origin') != origin
+                    or self.headers.get('Sec-Fetch-Site', 'same-origin') != 'same-origin'
+                    or not parsed.path.startswith(prefix + '/actions/')
+                    or self.headers.get('Content-Type') != 'application/x-www-form-urlencoded'):
+                self.send_error(403); return
+            submitted_id = None
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+                if not 0 < size <= 128 * 1024:
+                    raise ValueError('Invalid request size')
+                fields = parse_qs(self.rfile.read(size).decode('utf-8'), max_num_fields=4000)
+                if not secrets.compare_digest(fields.get('csrf', [''])[0], pages.csrf):
+                    self.send_error(403); return
+                from .dashboard import action
+                if workflows.submit_once(fields.get('request_id', [''])[0]):
+                    submitted_id = fields['request_id'][0]
+                    body = action(pages, parsed.path[len(prefix + '/actions/'):], fields)
+                else:
+                    body = pages.page('Request already received', '<p>This form was already submitted. ' + pages.link('View queue', 'jobs') + '</p>')
+                code = 200
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                if submitted_id is not None:
+                    workflows.release_submission(submitted_id)
+                code = 400
+                body = pages.page('Unable to submit work', '<p class="notice">' + esc(exc) + '</p>' + pages.link('Return to tasks'))
+            self.respond(code, body)
+
+        def respond(self, code, body):
+            data = body.encode('utf-8')
+            self.send_response(code)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'same-origin' if workflows else 'no-referrer')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+            self.end_headers()
+            self.wfile.write(data)
 
         def do_GET(self):
             parsed = urlsplit(self.path)
@@ -324,21 +401,30 @@ def make_server(store, port=0):
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(data)))
             self.send_header('Cache-Control', 'no-store')
-            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('Referrer-Policy', 'same-origin' if workflows else 'no-referrer')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
             self.end_headers()
             self.wfile.write(data)
 
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    original_close = server.server_close
+    def close():
+        worker_stop.set()
+        original_close()
+        if worker_thread is not None:
+            # Finish the bounded current sandbox stage so its context cleans up.
+            # The stage checkpoint stops subsequent inference and leaves work retryable.
+            worker_thread.join()
+    server.server_close = close
     server.observation_url = f'http://127.0.0.1:{server.server_port}{prefix}/'
     return server
 
 
-def serve(store, port=0):
-    with make_server(store, port) as server:
+def serve(store, port=0, workflows=None):
+    with make_server(store, port, workflows) as server:
         print('Human observation (contains private verification): ' + server.observation_url, flush=True)
-        print('Stop with Ctrl-C. Execution remains in the CLI.', flush=True)
+        print('Stop with Ctrl-C. Historical workflow progress is durable.', flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

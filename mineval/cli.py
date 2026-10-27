@@ -16,8 +16,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data", default=os.environ.get("MINEVAL_DATA", "mineval-data"))
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("doctor", help="verify rootless Docker and resource controller support")
-    observe = commands.add_parser('observe', help='serve a private, read-only local observation UI')
+    observe = commands.add_parser('observe', help='serve the private historical benchmarking dashboard')
     observe.add_argument('--port', type=int, default=0, help='loopback port (default: choose a free port)')
+    observe.add_argument('--image', help='trusted preloaded default preparation image')
+    observe.add_argument('--settings', help='trusted historical workflow settings JSON')
+    observe.add_argument('--auth-file', help='explicit model-only credentials, never sent to the browser')
     arena = commands.add_parser('arena', help='persistent web design benchmarks and interactive preference ranking')
     arenas = arena.add_subparsers(dest='arena_action', required=True)
     arena_serve = arenas.add_parser('serve', help='open the private Web Arena workspace')
@@ -87,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     benchmark.add_argument('--run-id', help='new attempt ID (prefix for suite attempts)')
     benchmark.add_argument('--adapter', choices=('fake', 'codex'), default='fake')
     benchmark.add_argument('--model', help='explicit model; default fake or gpt-6-luna by adapter')
+    benchmark.add_argument('--effort', choices=('minimal','low','medium','high','xhigh','max','ultra'))
     benchmark.add_argument('--auth-file')
     benchmark.add_argument('--timeout', type=float, help='override frozen environment timeout')
     benches.add_parser('list', help='list durable attempts').add_argument('--task')
@@ -151,6 +155,43 @@ def main(argv: list[str] | None = None) -> int:
     materialize.add_argument("task_id")
     materialize.add_argument("version")
     materialize.add_argument("destination")
+    workflow = commands.add_parser('workflow', help='historical preparation/run/evaluation queue shared with the dashboard')
+    workflow.add_argument('--image', help='trusted preloaded default preparation image')
+    workflow.add_argument('--settings', help='trusted reusable settings JSON')
+    workflow.add_argument('--auth-file', help='explicit model-only credentials')
+    flows = workflow.add_subparsers(dest='workflow_action', required=True)
+    submit = flows.add_parser('submit', help='enqueue JSON {kind,selections,configurations,exclude}')
+    submit.add_argument('definition')
+    flows.add_parser('list')
+    flows.add_parser('work', help='process queued tasks; independent failures do not stop the queue')
+    flows.add_parser('retry').add_argument('job_id')
+    flows.add_parser('prepare-all', help='enqueue all eligible unprepared tasks')
+    memory = commands.add_parser('model-review', help='append-only model memory and safe compaction reservations')
+    memories = memory.add_subparsers(dest='memory_action', required=True)
+    history = memories.add_parser('history')
+    history.add_argument('model')
+    history.add_argument('--archive', action='store_true')
+    claim = memories.add_parser('claim', help='reserve oldest two active inputs, only above threshold')
+    claim.add_argument('model')
+    claim.add_argument('--ttl', type=int, default=900)
+    memories.add_parser('inspect-claim').add_argument('reservation_id')
+    commit = memories.add_parser('commit', help='commit JSON bullet array for a live reservation; retries are idempotent')
+    commit.add_argument('reservation_id')
+    commit.add_argument('summary')
+    remember = memories.add_parser('record', help='append evidence-grounded review of a saved evaluation')
+    remember.add_argument('task_id')
+    remember.add_argument('evaluation_id')
+    remember.add_argument('--bullets', help='JSON bullet array; omitted records the factual verdict and explanation')
+    for name in ('review', 'compact'):
+        operation = memories.add_parser(name, help='run a separate sandboxed review model')
+        if name == 'review':
+            operation.add_argument('task_id')
+            operation.add_argument('evaluation_id')
+        else:
+            operation.add_argument('model_name')
+        operation.add_argument('--image', required=True)
+        operation.add_argument('--model', default='gpt-6-luna')
+        operation.add_argument('--auth-file')
     args = parser.parse_args(argv)
     sandbox = DockerSandbox(context=args.context)
     try:
@@ -180,10 +221,65 @@ def main(argv: list[str] | None = None) -> int:
                     result = Runner(arena, args.image, args.context, args.auth_file, args.timeout).generate(result['id'])
             print(json.dumps(result))
             return 125 if args.arena_action == 'run' and result['status'] != 'ready' else 0
+        if args.action in ('workflow', 'model-review'):
+            from .preparation import Store
+            from .artifacts import read_json
+            store = Store(args.data)
+            if args.action == 'workflow':
+                from .workflows import Workflows, tasks
+                from .workflows import load_settings
+                settings = load_settings(store, args.settings)
+                if args.image:
+                    settings['preparation_image'] = args.image
+                flow = Workflows(store, settings, context=args.context, auth_file=args.auth_file)
+                if args.workflow_action == 'submit':
+                    definition = read_json(args.definition)
+                    result = flow.enqueue(**definition)
+                elif args.workflow_action == 'list':
+                    result = flow.jobs()
+                elif args.workflow_action == 'retry':
+                    result = flow.retry(args.job_id)
+                elif args.workflow_action == 'prepare-all':
+                    result = flow.enqueue('prepare', [{'task_id': t['task_id']} for t in tasks(store)
+                        if not t['versions'] and t['state']['status'] not in ('retired','rejected','needs-review')])
+                else:
+                    from .benchmark import termination_handler
+                    with termination_handler():
+                        flow.work()
+                    result = flow.jobs()
+            else:
+                from .memory import Memory, record_evaluation
+                memory = Memory(store)
+                if args.memory_action == 'history':
+                    result = memory.history(args.model, archive=args.archive)
+                elif args.memory_action == 'claim':
+                    result = memory.claim(args.model, ttl=args.ttl)
+                elif args.memory_action == 'inspect-claim':
+                    result = memory.inspect_claim(args.reservation_id)
+                elif args.memory_action == 'commit':
+                    result = memory.commit(args.reservation_id, read_json(args.summary))
+                elif args.memory_action == 'record':
+                    result = record_evaluation(store, args.task_id, args.evaluation_id,
+                                               read_json(args.bullets) if args.bullets else None)
+                else:
+                    from .model_review import review_evaluation, compact
+                    options = dict(image=args.image, model=args.model, context=args.context, auth_file=args.auth_file)
+                    result = (review_evaluation(store, args.task_id, args.evaluation_id, **options)
+                              if args.memory_action == 'review' else compact(store, args.model_name, **options))
+            print(json.dumps(result, indent=2))
+            return 0
         if args.action == 'observe':
             from .observation import serve
             from .preparation import Store
-            serve(Store(args.data), port=args.port)
+            from .workflows import Workflows
+            from .artifacts import read_json
+            from pathlib import Path
+            store = Store(args.data)
+            from .workflows import load_settings
+            settings = load_settings(store, args.settings)
+            if args.image:
+                settings['preparation_image'] = args.image
+            serve(store, port=args.port, workflows=Workflows(store, settings, context=args.context, auth_file=args.auth_file))
             return 0
         if args.action == "agent-run":
             from pathlib import Path
@@ -225,8 +321,8 @@ def main(argv: list[str] | None = None) -> int:
                         from .agents import CodexAdapter, FakeAdapter
                         if bool(args.task) != bool(args.version):
                             raise ValueError('Use --task with --version, or --suite without --version')
-                        adapter = (CodexAdapter(args.model or 'gpt-6-luna') if args.adapter == 'codex'
-                                   else FakeAdapter(model=args.model or 'fake'))
+                        adapter = (CodexAdapter(args.model or 'gpt-6-luna', effort=args.effort) if args.adapter == 'codex'
+                                   else FakeAdapter(model=args.model or 'fake', effort=args.effort))
                         options = dict(run_id=args.run_id, adapter=adapter, context=args.context,
                                        auth_file=args.auth_file, timeout=args.timeout)
                         with benchmark.termination_handler():

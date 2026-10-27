@@ -136,7 +136,7 @@ placeholder SHAs with full lowercase object IDs):
   "head_commit": "<sha-after-related-fix>",
   "related_commits": ["<feature-sha>", "<fix-sha>"],
   "related_prs": [],
-  "category": "feature",
+  "category": "integration",
   "signal_patterns": ["fixup-chain"],
   "task_summary": "Support batched requests, including empty batches, while preserving single-request behavior.",
   "why_high_signal": "A later regression exposed an overlooked boundary case.",
@@ -207,3 +207,21 @@ This skill does not clean, extract private tests, evaluate solutions or launch a
 benchmark. Sanitized pre-base history is a later preparation responsibility; current
 intake drafts contain only base files. Never pass a private store or source clone
 to a benchmarked agent.
+
+## Required primary category
+
+Every newly selected candidate must include `category`, chosen from this fixed list.
+Choose the primary engineering obligation, not the type of commit (bug/feature/refactor).
+Use exactly one; do not invent categories:
+
+- `behavior`: core domain behavior, algorithms, parsing and computation.
+- `integration`: APIs, protocols and interoperability between components.
+- `data`: storage, queries, migrations, serialization and data integrity.
+- `reliability`: concurrency, performance, resource management and recovery.
+- `security`: authentication, authorization and trust boundaries.
+- `developer-tools`: builds, packaging, configuration and development workflows.
+- `user-interface`: interaction, rendering, accessibility and presentation.
+
+For overlap select the area whose requirements principally establish correctness.
+Old handoffs without a category remain importable as uncategorized; do not infer a
+historical label from a task title.

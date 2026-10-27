@@ -42,16 +42,23 @@ harness for no-model demonstrations. See [Web Arena](docs/web-arena.md) for imag
 requirements, runtime contracts, ranking/coverage policy, sharing setup, validation,
 and current limitations.
 
-## Browse tasks and results locally
+## Prepare and benchmark historical tasks locally
 
 ```sh
-mineval --data mineval-data observe
+mineval --context mineval-rootless --data mineval-data observe \
+  --image YOUR_PRELOADED_PREPARATION_IMAGE --auth-file /explicit/model-only/auth.json
 # Optional fixed loopback port:
 mineval --data mineval-data observe --port 8765
 ```
 
-Open the private URL printed in the terminal. The observation UI reads your actual
-store and checks artifact receipts. Follow task → prepared revision → suite/run →
+Open the private URL printed in the terminal. The historical dashboard reads your actual
+store and checks artifact receipts. Filter and select tasks across repositories,
+prepare them, choose model/effort configurations, then run and automatically evaluate.
+The Queue page shows durable stage progress and explicit retries. Confirmed task
+removal retires registrations while preserving their history. Models and results
+shows category performance and accumulated model reviews behind More details.
+See [historical workflows](docs/historical-workflows.md) for reusable settings,
+evaluation command selection, CLI equivalents, compaction and recovery. Follow task → prepared revision → suite/run →
 evaluation links to inspect cleanup, independent review, private verification
 provenance and limitations, output diffs, commands and assessment adaptations.
 The Compare page accepts explicit run or assessment selections and shows exact
@@ -62,7 +69,10 @@ This is a **private human view**: it includes future verification and preparatio
 material. The server binds only to `127.0.0.1`, uses a fresh secret URL per launch,
 validates the Host header, disables browser caching and loads no external resources.
 Keep its URL private; do not proxy, tunnel, or embed it in an agent environment.
-It has no write/execution endpoints. Use independent CLI commands, then refresh.
+Historical operations require same-origin POSTs, a session CSRF token and
+persistent single-use form IDs. They call the existing isolated host operations;
+no credentials, host commands or Docker APIs are exposed to browser requests.
+The historical pages embedded in Web Arena remain read-only.
 Ctrl-C stops the server. Browsing requires Python and Git but no running Docker daemon.
 File previews and diffs are bounded; use `bench export` for full code outputs.
 
@@ -124,7 +134,8 @@ persistent: supply one or let intake assign one from repository identity and com
 boundaries. Re-adding an ID fails. Inspection returns readable JSON.
 Prepared revisions use the existing immutable `versions/<version>` artifacts created
 by `finalize`; revision inspection checks their integrity receipts. `prepare` still
-requires an explicit executable. `cleanup` selects a dedicated fake or Codex adapter
+requires an explicit executable; the new `workflow` queue and web Prepare actions
+orchestrate the existing separate preparation stages automatically. `cleanup` selects a dedicated fake or Codex adapter
 for the same preparation workflow; it defaults to fake.
 
 Use [suite.json](examples/suite.json) for an explicit ordered list of task/version

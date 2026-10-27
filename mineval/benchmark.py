@@ -112,7 +112,7 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
         store._reserve_record(task_id, 'runs', run_id, {
             'schema_version': 2, 'task_id': task_id, 'run_id': run_id,
             'prepared_revision': revision, 'suite': suite,
-            'model': {'name': adapter.model}, 'harness': {'name': adapter.name, 'adapter_version': 1},
+            'model': {'name': adapter.model, 'reasoning_effort': adapter.effort}, 'harness': {'name': adapter.name, 'adapter_version': 1},
             'status': 'running', 'started_at': now(), 'task_instructions': instructions,
             'instructions_sha256': prompt_hash,
             'operation': {'image': image, 'configured_image': config['image'],
@@ -220,7 +220,8 @@ def compare(store, definition):
             record = store.inspect_run(ref['task_id'], ref['run_id'])
             if record['schema_version'] != 2 or record['status'] in ('running', 'reserved'):
                 raise ValueError('Comparison requires finished benchmark attempts')
-            ranking_identity = (record['model']['name'], record['harness']['name'])
+            ranking_identity = (record['model']['name'], record['model'].get('reasoning_effort'),
+                                record['harness'])
             if identity is not None and ranking_identity != identity:
                 raise ValueError('Each side must select one model + harness')
             identity = ranking_identity

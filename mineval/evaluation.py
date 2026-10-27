@@ -245,7 +245,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                 else:
                     report.update(baseline)
         except KeyboardInterrupt:
-            report.update(verdict='error', explanation='Evaluation cancelled; no task failure inferred.')
+            report.update(verdict='error', explanation='Evaluation cancelled; no task failure inferred.', error_kind='interrupted')
         except Exception as exc:
             # No raw infrastructure exceptions/session output in durable records.
             report.update(verdict='error', explanation='Verification or evaluation infrastructure failed.',
@@ -255,7 +255,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
         write_json(staged / 'report.json', report)
         target = task / 'evaluation-evidence' / evaluation_id
         seal(staged, target)
-        return store._reserve_record(task_id, 'evaluations', evaluation_id, {
+        result = store._reserve_record(task_id, 'evaluations', evaluation_id, {
             'schema_version': 2, 'task_id': task_id, 'evaluation_id': evaluation_id,
             'evaluation_version': version, 'run_id': run_id, 'prepared_revision': revision,
             'run_sha256': digest(task / 'runs' / (run_id + '.json')),
@@ -263,6 +263,10 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
             'verification_sha256': verification_hash, 'evidence_sha256': checked(target),
             'policy': POLICY, 'config_sha256': digest(target / 'config.json'),
             'finished_at': now(), 'status': 'completed', **report})
+
+    from .memory import record_evaluation
+    record_evaluation(store, task_id, evaluation_id)
+    return result
 
 
 def compare(store, definition):

@@ -357,3 +357,22 @@ checks integration rather than the semantic quality of independent agent judgmen
 The agreed pre-base Git policy in `docs/mineval-decisions.md` remains authoritative;
 legacy tree-only import/archive descriptions do not prohibit sanitized Git attached
 to materialized historical workspaces.
+
+## Historical operating dashboard
+
+The historical dashboard now wraps the same preparation, benchmark and independent
+evaluation operations. `workflows.py` owns a durable SQLite queue with exact pinned
+inputs and stage checkpoints; `observe` enables loopback, same-origin, CSRF-protected
+form submissions. The Arena server's embedded historical pages stay read-only.
+Task removal reuses retirement. Frozen revisions, run identities and sealed evidence
+are not migrated or overwritten. Reasoning effort is a model identity field for new
+runs; absent historical efforts remain unspecified.
+
+`memory.py` adds append-only model observations and events in a separate SQLite
+namespace keyed by the model identifier. Active positions are a mutable projection;
+archive sequence is append-only. Expiring compaction reservations and commits use
+short `BEGIN IMMEDIATE` transactions. Independent review/compaction agents can append
+or claim across processes while inference runs, without acquiring the queue worker's
+process-ownership lock. Summary commits preserve every source and original parent.
+See [historical workflows](historical-workflows.md) for schema/storage contracts,
+selection and comparison policies, CLI, security boundaries and runtime limitations.

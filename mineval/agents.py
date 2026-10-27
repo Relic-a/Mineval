@@ -27,14 +27,17 @@ SCHEMA = {'type': 'object', 'properties': {
 class CodexAdapter:
     model: str = 'gpt-6-luna'
     name: str = 'codex'
+    effort: str | None = None
 
     def stage(self, inputs):
         if not self.model or self.model.startswith('-') or any(c.isspace() for c in self.model):
             raise ValueError('Supply an explicit model identifier')
+        if self.effort not in (None, 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
+            raise ValueError('Unsupported reasoning effort')
         write_json(inputs / 'schema.json', SCHEMA)
         # No host binary, user config, plugins, home, or session directory is mounted.
         # Shell runs only in the container; task text is stdin, never shell source.
-        return ('sh', '-c', '''
+        command = ('sh', '-c', '''
 set -eu
 mkdir -p /tmp/codex
 if [ -f /mineval-input/auth.json ]; then
@@ -48,6 +51,10 @@ exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp CODEX_HOME=/tmp/codex \
   --output-last-message /mineval-control/final.json - \
   < /mineval-input/prompt.txt > /dev/null 2>&1
 ''', 'mineval-codex', self.model)
+        if self.effort:
+            return (*command[:2], command[2].replace('--model "$1"', '"$@"'), command[3],
+                    '-c', 'model_reasoning_effort="' + self.effort + '"', '--model', self.model)
+        return command
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,7 @@ class FakeAdapter:
     model: str = 'fake'
     name: str = 'fake'
     cleanup: bool = False
+    effort: str | None = None
 
     def stage(self, inputs):
         if self.outcome not in ('success', 'error', 'timeout'):

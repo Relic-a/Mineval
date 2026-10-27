@@ -7,7 +7,9 @@ from uuid import uuid4
 from .artifacts import digest, inventory, pack, read_json, relative, write_json
 
 INSTRUCTIONS = """You are preparing the historical base, not solving its task.
-Change as little as necessary for reproducible setup. Never fix or partially fix
+Change as little as necessary for reproducible setup. If verify.json contains only
+a bootstrap-runtime command, replace it with meaningful repository setup/build/smoke
+or tests commands before declaring ready-for-review; the bootstrap is not task verification. Never fix or partially fix
 the target behavior, simplify requirements, remove relevant failing tests, or add
 meaningless tests. Do not inspect this project's future solution or verification.
 Use `mineval verify` for a fresh, consistent sandbox copy of the current workspace

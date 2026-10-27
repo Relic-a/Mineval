@@ -17,12 +17,21 @@ fixtures and essential test-only dependencies from the supplied history. Never
 select production implementation as test support. Explain behavioral obligations,
 not arbitrary implementation choices. If no credible checks exist, use unavailable
 and an empty artifacts list. Do not invent superficial checks. No transcripts.
+Also supply evaluation_config when runnable verification is available: a JSON object
+with image (use the supplied runtime), network, optional limits, and commands
+[{name, kind: setup|build|tests|smoke, argv: [strings]}]. Include a tests command
+executing the selected private checks at /workspace paths. Distinguish behavioral
+failure (exit 1) from inconclusive (2) and infrastructure errors (other codes).
+Never exempt expected failures. This config is private, reviewed and frozen.
+Omit it if no defensible runnable command exists; explain limitations.
 """
 REVIEW = """You are the independent third reviewer, after cleanup and extraction.
 Inspect task.json, base, cleaned, future/diffs, cleanup.json, diagnostic.json,
 extraction and any validation results. Check task integrity, every cleanup edit,
 future/credential leakage, test-only provenance, meaningful behavioral relevance,
 arbitrary assumptions, alternate legitimate solutions, dependencies and reproducibility.
+Review any evaluation_config against selected checks and exit-code semantics; do not
+approve misleading or unjustified commands.
 Write /mineval-control/review.json: {verdict: approve|revise|reject, reasons: [nonempty
 strings], objective_preserved: boolean, snapshot_reviewed: boolean, changes:
 [{path, reason}]}. Account for exactly each cleanup change. Approve only credible
@@ -101,6 +110,7 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
         checked(task / 'cleanups' / identifier(cleanup['cleanup_id']))
         workspace, control, prompts = temp / 'workspace', temp / 'control', temp / 'inputs'
         workspace.mkdir(); control.mkdir(); prompts.mkdir()
+        write_json(workspace / 'runtime.json', config)
         private = task / 'private'
         for name in ('base', 'future', 'diffs'):
             if (private / name).exists():
@@ -178,7 +188,7 @@ def strings(value):
 
 
 def validate_plan(plan):
-    if (not isinstance(plan, dict) or set(plan) != {'strategy', 'rationale', 'dependencies',
+    if (not isinstance(plan, dict) or set(plan) - {'evaluation_config'} != {'strategy', 'rationale', 'dependencies',
             'instructions', 'limitations', 'artifacts'} or
             plan['strategy'] not in ('focused', 'fuller', 'unavailable') or
             any(not isinstance(plan[k], str) or not plan[k].strip() for k in ('rationale', 'instructions')) or
@@ -186,6 +196,14 @@ def validate_plan(plan):
             not isinstance(plan['artifacts'], list) or
             (bool(plan['artifacts']) != (plan['strategy'] != 'unavailable'))):
         raise ValueError('Invalid private verification plan')
+    if 'evaluation_config' in plan:
+        from .verification import load_config
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'config.json'
+            write_json(path, plan['evaluation_config'])
+            config = load_config(path, evaluation=True)
+        if not any(c['kind'] == 'tests' for c in config['commands']) or any(c.get('expected_failure') for c in config['commands']):
+            raise ValueError('Private evaluation config needs tests without exemptions')
 
 
 def validate_review(report):
@@ -210,7 +228,7 @@ def validate(store, task_id, extraction_id, config_path, *, future_commit=None, 
         extraction_hash = checked(extraction)
         extraction_inventory = inventory(extraction)
         manifest = read_json(extraction / 'extraction-manifest.json')
-        config = load_config(config_path)
+        config = load_config(config_path, evaluation=True)
         if future_commit:
             future_commit = commit(future_commit)
             if future_commit not in read_json(task / 'metadata.json')['future_commits']:

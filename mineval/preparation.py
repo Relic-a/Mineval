@@ -105,6 +105,7 @@ class Store:
 
     def list_tasks(self):
         """The task pool grows independently of any published suite."""
+        from .categories import category_for
         pool = self.root / 'tasks'
         if not pool.exists():
             return []
@@ -113,7 +114,8 @@ class Store:
             with lock(self.root / 'locks' / (identifier(task.name) + '.lock')):
                 metadata = read_json(task / 'metadata.json')
                 result.append({key: metadata[key] for key in ('task_id', 'repository', 'task_summary')} |
-                              {'state': read_json(task / 'status.json')})
+                              {'category': category_for(metadata),
+                               'state': read_json(task / 'status.json')})
         return result
 
     def inspect_task(self, task_id):
