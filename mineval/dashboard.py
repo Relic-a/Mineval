@@ -53,13 +53,18 @@ def pool(pages, query):
     content = ('<p>No tasks match these filters. ' + pages.link('Clear filters') + '</p>' if all_rows and not rows else
                '<div class="task-pool">' + table(['Task', 'Repository / category', 'Problem', 'Status', 'Frozen revision'], task_rows) + '</div>')
     if pages.workflows:
-        presets = pages.workflows.settings.get('models', [{'model': 'gpt-6-luna', 'effort': 'medium', 'adapter': 'codex'}])
+        catalog = pages.workflows.catalog.get()
+        discovered = [{'model': m['model'], 'effort': m['default_effort'], 'adapter': 'codex'} for m in catalog['models']]
+        presets = pages.workflows.settings.get('models', discovered or [pages.workflows.model_settings()['evaluation']])
         from .workflows import configuration
         choices = ''
         import json
         for item in presets:
             config = configuration(item)
             choices += '<label><input type="checkbox" name="configuration" value="' + esc(json.dumps(config)) + '"> ' + esc(config['model'] + ' · ' + config['effort'] + ' · ' + config['adapter']) + '</label>'
+        if catalog['error']:
+            content += '<p class="notice">' + esc(catalog['error']) + '</p>'
+        content += '<p>' + pages.link('Configure prep / extract and evaluation models', 'settings') + '</p>'
         content += '<h2>Run selected tasks</h2><fieldset><legend>Models and reasoning efforts</legend>' + choices
         content += '<label>Explicit model identifiers (one per line)<br><textarea name="models" rows="3" cols="40" placeholder="provider/model-name"></textarea></label>'
         content += select('effort', [(x, x) for x in EFFORTS], 'medium', 'Effort for explicit identifiers')
@@ -147,8 +152,49 @@ def models(pages, query):
     return pages.page('Models and results', body)
 
 
+def settings(pages, *, refreshed=False, saved=False):
+    if not pages.workflows:
+        return pages.page('Model settings', '<p>Start <code>mineval observe</code> to configure workflow models.</p>')
+    workflow = pages.workflows
+    catalog = workflow.catalog.get(refresh=refreshed)
+    current = workflow.model_settings()
+    body = '<p>Choose the models used for preparation and independent evaluation. Settings apply to newly queued work; queued jobs and retries keep their original choices.</p>'
+    if saved:
+        body += '<p class="notice" role="status">Model settings saved.</p>'
+    if catalog['error']:
+        body += '<p class="notice">' + esc(catalog['error']) + '</p>'
+    elif not catalog['models']:
+        body += '<p class="notice">Codex returned no visible models. Enter an explicit identifier or refresh after signing in.</p>'
+    body += form(pages, 'refresh-models', '<button>Refresh Codex models</button>')
+    options = ''.join('<option value="' + esc(m['model']) + '">' + esc(m['name']) + '</option>' for m in catalog['models'])
+    content = '<datalist id="codex-models">' + options + '</datalist>'
+    for role, title, explanation in (
+            ('preparation', 'Prep / extract', 'Cleanup, private verification extraction, and independent preparation review.'),
+            ('evaluation', 'Evaluation', 'Independent evaluation of saved benchmark output, qualitative model review, and memory compaction.')):
+        config = current[role]
+        content += '<fieldset><legend>' + title + '</legend><p>' + explanation + '</p>'
+        content += '<label>Model <input name="' + role + '_model" list="codex-models" value="' + esc(config['model']) + '" required maxlength="200" spellcheck="false"></label>'
+        content += select(role + '_effort', [(x, x) for x in EFFORTS], config['effort'], 'Reasoning effort')
+        content += '</fieldset>'
+    content += '<p>Choose a discovered model or type an explicit identifier. Supported efforts are listed below; availability also depends on the Codex runtime in your configured image.</p><button>Save model settings</button>'
+    body += form(pages, 'model-settings', content)
+    body += '<h2>Available Codex models</h2><div class="model-catalog">' + table(['Model', 'Identifier', 'Reasoning efforts', 'Default effort'], (
+        (esc(m['name']), '<code>' + esc(m['model']) + '</code>', esc(', '.join(m['efforts']) or 'Not reported'), esc(m['default_effort']))
+        for m in catalog['models'])) + '</div>'
+    if workflow.settings.get('review_model'):
+        body += '<p class="notice">The host review_model setting overrides the model for preparation review, qualitative review, and compaction.</p>'
+    return pages.page('Model settings', body)
+
+
 def action(pages, route, fields):
     workflows = pages.workflows
+    if route == 'refresh-models':
+        return settings(pages, refreshed=True)
+    if route == 'model-settings':
+        workflows.save_model_settings({role: {'model': fields.get(role + '_model', [''])[0].strip(),
+            'effort': fields.get(role + '_effort', ['medium'])[0], 'adapter': 'codex'}
+            for role in ('preparation', 'evaluation')})
+        return settings(pages, saved=True)
     if route in ('retry', 'new-attempt'):
         workflows.retry(fields['job'][0], new_attempt=route == 'new-attempt')
         return pages.page('Retry queued', '<p>' + pages.link('View progress', 'jobs') + '</p>')

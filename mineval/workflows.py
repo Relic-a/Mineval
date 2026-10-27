@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from . import benchmark, evaluation, review, service, verification
 from .agents import CodexAdapter, FakeAdapter
-from .artifacts import lock, read_json
+from .artifacts import lock, read_json, write_json
 from .categories import category_for
 from .memory import encoded
 from .sandbox import DockerSandbox
@@ -32,6 +32,9 @@ def load_settings(store, filename=None):
         settings['evaluation_config'] = str((path.parent / settings['evaluation_config']).resolve(strict=True))
     settings['evaluation_configs'] = {task: str((path.parent / value).resolve(strict=True))
                                       for task, value in settings.get('evaluation_configs', {}).items()}
+    for role in ('preparation', 'evaluation', 'review'):
+        if role + '_model' in settings:
+            configuration({'model': settings[role + '_model'], 'effort': settings.get(role + '_effort', 'medium')})
     for preset in settings.get('models', []):
         configuration(preset)
     return settings
@@ -79,9 +82,11 @@ def matches(record, revision, config):
 class Workflows:
     def __init__(self, store, settings=None, *, context=None, auth_file=None):
         self.store = store
-        # Host settings only. Never accepted as a browser request.
+        # Runtime paths and commands remain host-only; browser settings allow model choices only.
         self.settings = settings or {}
         self.context, self.auth_file = context, auth_file
+        from .codex_models import Catalog
+        self.catalog = Catalog(auth_file)
         self.path = store.root / 'historical-jobs.sqlite3'
         with self.db() as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS submissions(id TEXT PRIMARY KEY, created REAL NOT NULL);
@@ -92,6 +97,27 @@ class Workflows:
               dedup TEXT NOT NULL);
               CREATE UNIQUE INDEX IF NOT EXISTS active_job ON jobs(dedup)
                 WHERE state IN ('queued','running','interrupted');''')
+
+    def model_settings(self):
+        path = self.store.root / 'historical-model-settings.json'
+        saved = read_json(path) if path.exists() else {}
+        return {role: configuration(saved.get(role, {
+            'model': self.settings.get(role + '_model', 'gpt-6-luna'),
+            'effort': self.settings.get(role + '_effort', 'medium')}))
+            for role in ('preparation', 'evaluation')}
+
+    def save_model_settings(self, values):
+        if set(values) != {'preparation', 'evaluation'}:
+            raise ValueError('Choose preparation and evaluation models')
+        checked = {role: configuration(value) for role, value in values.items()}
+        if any(value['adapter'] != 'codex' for value in checked.values()):
+            raise ValueError('Workflow models must use Codex')
+        with lock(self.store.root / 'historical-model-settings.lock'):
+            write_json(self.store.root / 'historical-model-settings.json', checked)
+
+    def role_adapter(self, role, payload):
+        choices = payload['model_settings'] if 'model_settings' in payload else self.model_settings()
+        return adapter(choices[role])
 
     @contextmanager
     def db(self):
@@ -159,6 +185,7 @@ class Workflows:
         configs = [configuration(c) for c in (configurations or [])]
         if kind == 'benchmark' and not 1 <= len(configs) <= 50:
             raise ValueError('Select 1–50 model configurations')
+        model_settings = self.model_settings()
         pool = {t['task_id']: t for t in tasks(self.store)}
         results = []
         for selection in selections:
@@ -173,7 +200,8 @@ class Workflows:
                 revision = self.store._inspect_revision(task, selection['version']) if kind == 'benchmark' else None
                 for config in configs if kind == 'benchmark' else [None]:
                     payload = {'selection': selection, 'revision': revision, 'configuration': config,
-                               'run_id': uuid4().hex, 'evaluation_id': uuid4().hex}
+                               'run_id': uuid4().hex, 'evaluation_id': uuid4().hex,
+                               'model_settings': model_settings}
                     if kind == 'benchmark':
                         payload['evaluation_config'] = self.checked_config(self.eval_config(task, selection['version']))
                     dedup = hashlib.sha256(encoded([kind, task, revision, config]).encode()).hexdigest()
@@ -289,8 +317,8 @@ class Workflows:
                     'limits': {'timeout_seconds': 600}, 'commands': [
                     {'name': 'bootstrap-runtime', 'kind': 'setup', 'argv': ['python3', '--version']}]})
         self.stage(jid, 'cleanup')
-        model = self.settings.get('preparation_model', 'gpt-6-luna')
-        options = dict(adapter=CodexAdapter(model), auth_file=self.auth_file, context=self.context)
+        prep_adapter = self.role_adapter('preparation', p)
+        options = dict(adapter=prep_adapter, auth_file=self.auth_file, context=self.context)
         result = service.session(self.store, task, **options)
         cleanup = read_json(self.store.task(task) / 'cleanup-latest.json')
         if cleanup.get('disposition') != 'ready-for-review':
@@ -323,7 +351,7 @@ class Workflows:
                     review.validate(self.store, task, extraction_id, path, future_commit=future, sandbox=DockerSandbox(context=self.context))
         self.stage(jid, 'independent review')
         approval = review.session(self.store, task, stage='review', extraction_id=extraction_id,
-            **(options | {'adapter': CodexAdapter(self.settings.get('review_model', model))}))
+            **(options | {'adapter': CodexAdapter(self.settings['review_model'], effort=self.settings.get('review_effort')) if self.settings.get('review_model') else prep_adapter}))
         if approval['verdict'] != 'approve':
             raise WorkflowFailure('Independent review: ' + approval['verdict'] + '. ' + '; '.join(approval['reasons']))
         self.stage(jid, 'freezing')
@@ -359,7 +387,7 @@ class Workflows:
                 config = Path(temp) / 'config.json'; write_json(config, p['evaluation_config'])
                 assessed = evaluation.evaluate(self.store, task, p['run_id'], config,
                     evaluation_id=p['evaluation_id'], sandbox=DockerSandbox(context=self.context),
-                    adapter=CodexAdapter(self.settings.get('evaluation_model', 'gpt-6-luna')) if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None,
+                    adapter=self.role_adapter('evaluation', p) if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None,
                     auth_file=self.auth_file if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None)
                 if assessed.get('error_kind') == 'interrupted':
                     raise KeyboardInterrupt()
@@ -372,7 +400,8 @@ class Workflows:
             if not image:
                 raise WorkflowFailure('Qualitative review failed; benchmark and evaluation results are preserved. Configure review_image or preparation_image, then retry the review.')
             options = dict(image=image, context=self.context, auth_file=self.auth_file,
-                           model=self.settings.get('review_model', 'gpt-6-luna'))
+                           model=self.settings.get('review_model', self.role_adapter('evaluation', p).model),
+                           effort=self.settings.get('review_effort', self.role_adapter('evaluation', p).effort))
             try:
                 review_evaluation(self.store, task, assessed['evaluation_id'], **options)
                 from .memory import Memory

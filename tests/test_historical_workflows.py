@@ -85,6 +85,8 @@ class MemoryTests(unittest.TestCase):
 class WorkflowTests(HistoryFixture):
     def setUp(self):
         super().setUp()
+        catalog = patch('mineval.codex_models.Catalog.get', return_value={'models': [], 'error': None})
+        catalog.start(); self.addCleanup(catalog.stop)
         self.version = self.freeze('example', self.review)['version']
         self.config = self.root / 'evaluation.json'
         write_json(self.config, {'image': 'local:test', 'network': 'none', 'commands': [
@@ -115,6 +117,21 @@ class WorkflowTests(HistoryFixture):
         self.assertEqual(flow.enqueue('benchmark', selection, [config[0] | {'effort': 'low'}])[0]['state'], 'queued')
         newer = self.freeze('example', self.review)['version']
         self.assertEqual(flow.enqueue('benchmark', [{'task_id': 'example', 'version': newer}], config)[0]['state'], 'queued')
+
+    def test_evaluation_uses_queued_model_and_effort(self):
+        flow = Workflows(self.store, {'evaluation_config': str(self.config),
+            'evaluation_model': 'eval-selected', 'evaluation_effort': 'ultra',
+            'qualitative_review': False})
+        flow.enqueue('benchmark', [{'task_id': 'example', 'version': self.version}],
+                     [{'model': 'candidate', 'effort': 'low', 'adapter': 'codex'}])
+        job = flow.jobs()[0]
+        flow.settings['evaluation_model'] = 'changed-after-queue'
+        with patch('mineval.workflows.benchmark.run', return_value={'output_available': True, 'status': 'completed'}), \
+             patch('mineval.workflows.evaluation.evaluate', return_value={'evaluation_id': 'fixture'}) as evaluate, \
+             patch('mineval.memory.record_evaluation'):
+            flow.benchmark(job['id'], 'example', job['payload'])
+        evaluator = evaluate.call_args.kwargs['adapter']
+        self.assertEqual((evaluator.model, evaluator.effort), ('eval-selected', 'ultra'))
 
     def _run_agent(self, *args, **kwargs):
         from mineval.agents import run_agent
@@ -383,12 +400,15 @@ class PreparationWorkflowTests(HistoryFixture):
         self.store.register(self.candidate | {'task_id': 'rejected-task'})
         write_json(self.store.draft('rejected-task') / 'control/verify.json', read_json(self.config_path))
         diagnose(self.store, 'rejected-task', sandbox=FakeRunner([step()]))
-        flow = Workflows(self.store)
+        flow = Workflows(self.store, {'preparation_model': 'prep-selected', 'preparation_effort': 'ultra'})
         flow.enqueue('prepare', [{'task_id': 'example'}, {'task_id': 'rejected-task'}])
+        flow.settings['preparation_model'] = 'changed-after-queue'
         from mineval.cleanup import save_attempt
         from mineval.artifacts import copy_tree, inventory
         from mineval.sandbox import RunResult
         def cleanup(store, tid, **kwargs):
+            self.assertEqual(kwargs['adapter'].model, 'prep-selected')
+            self.assertEqual(kwargs['adapter'].effort, 'ultra')
             with store.operation(tid), tempfile.TemporaryDirectory(dir=store.root) as temp:
                 temp = Path(temp)
                 copy_tree(store.draft(tid) / 'workspace', temp / 'clean')
@@ -406,6 +426,8 @@ class PreparationWorkflowTests(HistoryFixture):
         calls = []
         original_session = review.session
         def private(store, tid, **kwargs):
+            self.assertEqual(kwargs['adapter'].model, 'prep-selected')
+            self.assertEqual(kwargs['adapter'].effort, 'ultra')
             calls.append(kwargs['stage'])
             if kwargs['stage'] == 'extraction':
                 kwargs['sandbox'] = ReportAgent('selection.json', plan(self.head) | {

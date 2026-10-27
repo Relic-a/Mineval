@@ -25,11 +25,40 @@ replace it with meaningful repository checks. Runtime settings for an existing v
 draft are preserved. Validation failures are retained for the independent reviewer;
 a historical base failing a behavioral check is not a reason to reject automatically.
 
-Choose one or several saved model/effort presets, or enter explicit model identifiers
+Choose one or several discovered model/effort choices (or saved host presets), or enter explicit model identifiers
 (one per line) and an effort. Run automatically evaluates the saved candidate,
 records a factual model observation and, for Codex attempts by default, runs a
 separate qualitative review and compaction when needed. The fake adapter is available
 through settings/CLI for fixtures; its reviews are factual only. It never calls a model.
+
+## Model settings and Codex discovery
+
+Open **Settings** in the historical dashboard to select the **Prep / extract** and
+**Evaluation** model and reasoning effort. Prep applies to cleanup, extraction and
+independent preparation review. Evaluation applies to the evaluator, qualitative
+review and memory compaction. The trusted host `review_model` / `review_effort`
+settings can override the review sessions, and are called out on the settings page.
+
+Choices are saved atomically in `DATA/historical-model-settings.json` and override
+the corresponding host defaults for web and CLI workflow queues. Delete that file
+to return to host defaults. New jobs snapshot these choices; changing settings
+leaves existing queued jobs and their retries unchanged. Legacy jobs without a
+snapshot resolve the current choices when executing.
+
+Following Aproekt, Mineval starts the host `codex app-server --stdio`, performs
+`initialize` / `initialized`, and pages through `model/list`. Discovery performs no
+inference. It lists visible models, their supported reasoning efforts and defaults;
+the task pool uses these models when no host `models` presets are configured.
+Results are cached for five minutes (failures for fifteen seconds). **Refresh Codex
+models** bypasses the cache. Explicit identifiers remain usable on discovery failure
+or for models outside the visible catalog.
+
+Discovery uses an isolated temporary Codex home, copying only the explicit
+`--auth-file`, or the local Codex credential file when no explicit file is given.
+It does not load host rules, plugins or configuration. Discovery requires a host
+Codex CLI; execution still requires Codex in the trusted preloaded Docker image
+and the explicit `--auth-file` when credentials are needed. The host catalog does
+not prove that an older image runtime supports every discovered model or effort.
 
 ## Reusable settings
 
@@ -40,9 +69,11 @@ selects another trusted host JSON file. Example:
 {
   "preparation_image": "mineval-preparation:local",
   "preparation_model": "gpt-6-luna",
+  "preparation_effort": "medium",
   "review_model": "gpt-6-luna",
   "review_image": "mineval-review:local",
   "evaluation_model": "gpt-6-luna",
+  "evaluation_effort": "high",
   "models": [
     {"model": "gpt-6-luna", "effort": "medium", "adapter": "codex"},
     {"model": "gpt-6-luna", "effort": "high", "adapter": "codex"}
@@ -219,7 +250,7 @@ form content type, bounded input and single-use request IDs. Operating pages use
 `Referrer-Policy: same-origin` so browser form POSTs retain a verifiable Origin;
 private URLs are never sent to other origins as referrers. Browser callers select
 tasks/models/efforts; they cannot supply Docker flags, host commands, credential paths
-or trusted workflow settings. Generated Arena sites retain their isolated origin and
+or runtime paths and commands. Model settings accept only model identifiers and efforts. Generated Arena sites retain their isolated origin and
 cannot call these operations. Do not proxy/tunnel/share the private human URL or
 place it in an agent environment. Queue error messages suppress raw infrastructure
 exceptions and retain deliberate per-task recovery guidance.

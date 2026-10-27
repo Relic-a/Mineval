@@ -57,6 +57,8 @@ prepare them, choose model/effort configurations, then run and automatically eva
 The Queue page shows durable stage progress and explicit retries. Confirmed task
 removal retires registrations while preserving their history. Models and results
 shows category performance and accumulated model reviews behind More details.
+Use **Settings** to choose prep/extract and evaluation models and reasoning efforts.
+Mineval discovers Codex models through the installed CLI, with manual identifiers available.
 See [historical workflows](docs/historical-workflows.md) for reusable settings,
 evaluation command selection, CLI equivalents, compaction and recovery. Follow task → prepared revision → suite/run →
 evaluation links to inspect cleanup, independent review, private verification

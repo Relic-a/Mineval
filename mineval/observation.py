@@ -22,7 +22,7 @@ header strong{font-size:21px;letter-spacing:-.025em} header span{color:var(--mut
 main{max-width:1248px;margin:auto;padding:36px 24px 72px} h1{font-size:34px;line-height:1.2;letter-spacing:-.025em;overflow-wrap:anywhere;margin:12px 0 20px} h2{font-size:22px;margin:40px 0 12px} h3{font-size:17px;margin:24px 0 8px}
 a{color:var(--accent);text-underline-offset:3px} a:hover{color:#123a2c} a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #956519;outline-offset:4px}
 p{max-width:75ch} .muted,small{color:var(--muted)} .notice{padding:14px 18px;background:#e7ece6;border:1px solid var(--line)}
-.scroll{overflow:auto} .task-pool table{min-width:1050px} .task-pool td:nth-child(3){min-width:250px} .task-pool td:nth-child(4){min-width:90px} table{border-collapse:collapse;width:100%;text-align:left;font-variant-numeric:tabular-nums} td,th{padding:14px 16px 14px 0;border-bottom:1px solid var(--line);vertical-align:top} th{font-size:13px;color:var(--muted);font-weight:600} td:first-child{min-width:140px} td{overflow-wrap:anywhere} code{font:13px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}
+.scroll{overflow:auto} .model-catalog table{min-width:640px} .task-pool table{min-width:1050px} .task-pool td:nth-child(3){min-width:250px} .task-pool td:nth-child(4){min-width:90px} table{border-collapse:collapse;width:100%;text-align:left;font-variant-numeric:tabular-nums} td,th{padding:14px 16px 14px 0;border-bottom:1px solid var(--line);vertical-align:top} th{font-size:13px;color:var(--muted);font-weight:600} td:first-child{min-width:140px} td{overflow-wrap:anywhere} code{font:13px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}
 pre{background:#e9ede7;border:1px solid var(--line);padding:18px;overflow:auto;max-height:650px;font:13px/1.6 ui-monospace,monospace;tab-size:4} details{margin:12px 0} summary{cursor:pointer;color:var(--accent);padding:8px 0} .status{white-space:nowrap;font-size:13px;font-weight:600;color:#235d48} .status.fail,.status.failed,.status.error,.status.rejected{color:#9c3026} .status.retired,.status.interrupted,.status.inconclusive,.status.needs-review{color:#775313}
 .trail{font-size:14px;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:24px} label{display:block;margin:12px 0} input,select,button,textarea{max-width:100%;font:inherit;accent-color:var(--accent)} button{background:var(--accent);color:white;padding:10px 20px;border:0;cursor:pointer} button:hover{background:#123a2c} fieldset{border:1px solid var(--line);padding:18px;min-width:0} .columns{display:grid;grid-template-columns:1fr 1fr;gap:24px} ul{padding-left:22px} li{margin:8px 0} ::selection{background:#c4d9cc;color:#192d23} :root{scrollbar-color:#8c9b90 var(--paper)}
 @media(max-width:640px){header{gap:12px;padding:16px 20px} nav{width:100%} main{padding:24px 20px 48px} h1{font-size:28px}.columns{grid-template-columns:1fr} td,th{padding:12px 12px 12px 0}}
@@ -62,7 +62,7 @@ class Pages:
     def page(self, title, content):
         arena_link = ('<a href="' + esc(self.prefix[:-len('/history')] + '/') + '">Web Arena</a>'
                       if self.prefix.endswith('/history') else self.link('Web Arena', 'arena'))
-        return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + ' · Mineval</title><style>' + CSS + '</style><body><header><strong>Mineval</strong><nav aria-label="Main">' + self.link('Tasks') + self.link('Models', 'models') + self.link('Queue', 'jobs') + self.link('Suites', 'suites') + self.link('Compare', 'compare') + arena_link + '</nav><span>Local observation · private human view</span></header><main><h1>' + esc(title) + '</h1>' + content + '</main></body></html>'
+        return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(title) + ' · Mineval</title><style>' + CSS + '</style><body><header><strong>Mineval</strong><nav aria-label="Main">' + self.link('Tasks') + self.link('Models', 'models') + self.link('Queue', 'jobs') + self.link('Settings', 'settings') + self.link('Suites', 'suites') + self.link('Compare', 'compare') + arena_link + '</nav><span>Local observation · private human view</span></header><main><h1>' + esc(title) + '</h1>' + content + '</main></body></html>'
 
     def task_link(self, task):
         return self.link(task, 'tasks', task)
@@ -108,6 +108,9 @@ class Pages:
         if not parts:
             from .dashboard import pool
             return pool(self, query)
+        if parts == ['settings']:
+            from .dashboard import settings
+            return settings(self)
         if parts == ['models']:
             from .dashboard import models
             return models(self, query)
