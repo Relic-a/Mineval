@@ -197,6 +197,69 @@ class WorkflowTests(HistoryFixture):
         recovered = self.store.inspect_run('example', p['run_id'])
         self.assertEqual(recovered['status'], 'error')
         self.assertEqual(recovered['failure_kind'], 'unclean_host_exit')
+        with self.assertRaisesRegex(ValueError, 'new benchmark attempt'):
+            flow.retry(job['id'])
+        flow.update(job['id'], state='queued')
+        with patch('mineval.workflows.evaluation.evaluate', side_effect=AssertionError('unusable output must not be evaluated')):
+            flow.work()
+        self.assertIn('no usable saved output', flow.jobs()[0]['detail'])
+        html = Pages(self.store, workflows=flow).render('/jobs', {})
+        self.assertIn('Start new benchmark attempt', html)
+        flow.retry(job['id'], new_attempt=True)
+        replacement = flow.jobs()[0]['payload']
+        self.assertNotEqual(replacement['run_id'], p['run_id'])
+        self.assertNotEqual(replacement['evaluation_id'], p['evaluation_id'])
+        with patch('mineval.benchmark.run_agent', side_effect=self._run_agent), \
+             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+            flow.work()
+        self.assertEqual(flow.jobs()[0]['state'], 'completed')
+        self.assertEqual(self.store.inspect_run('example', p['run_id']), recovered)
+
+
+    def test_review_image_and_failure_are_independent_of_evaluation(self):
+        config = read_json(self.config)
+        write_json(self.config, config | {'image': 'private-tests:local'})
+        for settings, expected in [({'review_image': 'review:local', 'preparation_image': 'prep:local'}, 'review:local'),
+                                   ({'preparation_image': 'prep:local'}, 'prep:local'),
+                                   ({}, 'local:test')]:
+            with self.subTest(settings=settings):
+                flow = self.flow()
+                flow.settings.update(settings)
+                result = flow.enqueue('benchmark', [{'task_id': 'example', 'version': self.version}],
+                    [{'model': 'sample', 'effort': 'high', 'adapter': 'codex'}], exclude=False)
+                jid = result[0]['id']
+                with patch('mineval.workflows.adapter', return_value=FakeAdapter(model='sample', effort='high', name='codex')), \
+                     patch('mineval.benchmark.run_agent', side_effect=self._run_agent), \
+                     patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()), \
+                     patch('mineval.model_review.review_evaluation', side_effect=ValueError('secret output')) as review:
+                    flow.work()
+                job = next(j for j in flow.jobs() if j['id'] == jid)
+                self.assertEqual(review.call_args.kwargs['image'], expected)
+                self.assertEqual(job['stage'], 'model review')
+                self.assertIn('Qualitative review failed', job['detail'])
+                self.assertNotIn('secret output', job['detail'])
+                assessment = self.store.inspect_evaluation('example', job['payload']['evaluation_id'])
+                flow.retry(jid)
+                with patch('mineval.workflows.benchmark.run', side_effect=AssertionError('saved run')) , \
+                     patch('mineval.workflows.evaluation.evaluate', side_effect=AssertionError('saved evaluation')), \
+                     patch('mineval.model_review.review_evaluation'):
+                    flow.work()
+                self.assertEqual(next(j for j in flow.jobs() if j['id'] == jid)['state'], 'completed')
+                self.assertEqual(self.store.inspect_evaluation('example', assessment['evaluation_id']), assessment)
+
+    def test_coverage_separates_multiple_conditions_from_unique_tasks(self):
+        self.saved('one'); self.assess('one', 'first')
+        changed = read_json(self.config)
+        changed['commands'][0]['name'] = 'second-condition'
+        path = self.root / 'second-condition.json'; write_json(path, changed)
+        evaluation.evaluate(self.store, 'example', 'one', path, evaluation_id='second', sandbox=EvaluationRunner())
+        metric = summaries(self.store)['models'][0]['overall']
+        self.assertEqual(metric['evaluated'], 2)
+        self.assertEqual(metric['available_samples'], 2)
+        self.assertEqual(metric['sample_coverage'], 1)
+        self.assertEqual(metric['covered_tasks'], 1)
+        self.assertEqual(metric['available'], 1)
+        self.assertEqual(metric['coverage'], 1)
 
     def test_cli_submission_worker_and_review_history_share_saved_records(self):
         from contextlib import redirect_stdout
@@ -275,7 +338,12 @@ class WorkflowTests(HistoryFixture):
         path = self.root / 'different.json'; write_json(path, changed)
         # Different evaluation conditions create a separate sample, not an equivalent score.
         evaluation.evaluate(self.store, 'logic-two', 'a', path, evaluation_id='other', sandbox=EvaluationRunner())
-        self.assertEqual(summaries(self.store)['common_samples'], 1)
+        updated = summaries(self.store)
+        self.assertEqual(updated['common_samples'], 1)
+        updated_models = {m['model']['name']: m for m in updated['models']}
+        self.assertEqual(updated_models['A']['overall']['sample_coverage'], 1)
+        self.assertEqual(updated_models['B']['overall']['sample_coverage'], .25)
+        self.assertEqual(updated_models['A']['overall']['coverage'], .75)
 
     def test_http_writes_require_origin_csrf_and_idempotency_and_retirement_confirmation(self):
         flow = self.flow()

@@ -29,6 +29,7 @@ class DiscoveryIntakeTests(unittest.TestCase):
         self.evidence = self.save('tests/test_batch.py', 'import unittest\nfrom dispatch import dispatch\n\nclass BatchTests(unittest.TestCase):\n    def test_batch(self):\n        self.assertEqual(dispatch([]), [])\n        self.assertEqual(dispatch(["b", "a"]), ["B", "A"])\n        self.assertEqual(dispatch("a"), "A")\n', 'Regression coverage for batch boundaries')
         self.store = Store(self.root / 'private-data')
         self.candidate = {
+            'schema_version': 2, 'category': 'integration',
             'repository': str(self.repo), 'base_source': {'type': 'git', 'path': 'project'},
             'base_commit': self.base, 'head_commit': self.head,
             'related_commits': [self.feature, self.head],
@@ -64,6 +65,19 @@ class DiscoveryIntakeTests(unittest.TestCase):
 
     def direct(self, **overrides):
         return self.candidate | {'base_source': {'type': 'git', 'path': str(self.repo)}} | overrides
+
+    def test_new_schema_requires_primary_category_while_legacy_remains_importable(self):
+        from mineval.intake import normalize
+        candidate = self.direct()
+        for value in (None, '', 'feature', 'unknown', []):
+            with self.subTest(category=value), self.assertRaisesRegex(ValueError, 'primary category'):
+                normalize(candidate | {'category': value})
+        candidate.pop('category')
+        with self.assertRaisesRegex(ValueError, 'primary category'):
+            normalize(candidate)
+        candidate.pop('schema_version')
+        normalized, _ = normalize(candidate)
+        self.assertNotIn('category', normalized)
 
     def test_feature_fix_later_test_handoff_and_private_retention(self):
         # Prove the cited check distinguishes the feature's bug from the final state.

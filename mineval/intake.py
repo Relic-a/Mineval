@@ -25,6 +25,11 @@ def normalize(candidate):
         raise ValueError('Candidate must be a JSON object')
     candidate = dict(candidate)
     from .categories import CATEGORIES, LEGACY_LABELS
+    schema = candidate.get('schema_version', 1)
+    if type(schema) is not int or schema not in (1, 2):
+        raise ValueError('Unsupported discovery schema_version; expected 1 or 2')
+    if schema == 2 and (not isinstance(candidate.get('category'), str) or candidate['category'] not in CATEGORIES):
+        raise ValueError('New discovery records require a primary category: ' + ', '.join(CATEGORIES))
     if 'category' in candidate and (not isinstance(candidate['category'], str) or
             candidate['category'] not in CATEGORIES.keys() | LEGACY_LABELS):
         raise ValueError('category must be one of: ' + ', '.join(CATEGORIES))

@@ -130,6 +130,7 @@ placeholder SHAs with full lowercase object IDs):
 
 ```json
 {
+  "schema_version": 2,
   "repository": "/local/project",
   "base_source": {"type": "git", "path": "/local/project"},
   "base_commit": "<sha-before-feature>",
@@ -210,7 +211,7 @@ to a benchmarked agent.
 
 ## Required primary category
 
-Every newly selected candidate must include `category`, chosen from this fixed list.
+Every newly selected candidate must use `schema_version: 2` and include `category`, chosen from this fixed list.
 Choose the primary engineering obligation, not the type of commit (bug/feature/refactor).
 Use exactly one; do not invent categories:
 

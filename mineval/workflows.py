@@ -199,7 +199,16 @@ class Workflows:
                 results.append({'task': task, 'state': 'error', 'detail': str(exc)})
         return results
 
-    def retry(self, jid):
+    def needs_new_attempt(self, job):
+        if job['kind'] != 'benchmark':
+            return False
+        path = self.store.task(job['task']) / 'runs' / (job['payload']['run_id'] + '.json')
+        if not path.exists():
+            return False
+        record = self.store.inspect_run(job['task'], job['payload']['run_id'])
+        return record['status'] == 'running' or not record.get('output_available', False)
+
+    def retry(self, jid, *, new_attempt=False):
         # Failed/interrupted states are published only after ownership ended; the
         # atomic state transition permits retries while unrelated work is running.
         with self.db() as db:
@@ -211,6 +220,17 @@ class Workflows:
             if other:
                 raise ValueError('This configuration already has active work; open the queue instead')
             p = json.loads(row['payload'])
+            unusable = self.needs_new_attempt(dict(row) | {'payload': p})
+            if unusable:
+                record = self.store.inspect_run(row['task'], p['run_id'])
+                if record['status'] == 'running':
+                    benchmark.recover(self.store, row['task'], p['run_id'])
+                if not new_attempt:
+                    raise ValueError('This attempt has no usable saved output; start a new benchmark attempt')
+                p['run_id'] = uuid4().hex
+                p['evaluation_id'] = uuid4().hex
+            elif new_attempt:
+                raise ValueError('Saved output is usable; retry the remaining stages')
             # Saved runs are reused; uncertain evaluator IDs are never overwritten.
             if not (self.store.task(row['task']) / 'evaluations' / (p['evaluation_id'] + '.json')).exists():
                 p['evaluation_id'] = uuid4().hex
@@ -326,6 +346,8 @@ class Workflows:
                 auth_file=self.auth_file if p['configuration']['adapter'] == 'codex' else None)
             if record['status'] == 'cancelled':
                 raise KeyboardInterrupt()
+        if not record.get('output_available', False):
+            raise WorkflowFailure('Attempt has no usable saved output. Start a new benchmark attempt; its evidence is preserved.')
         self.stage(jid, 'evaluation')
         ep = self.store.task(task) / 'evaluations' / (p['evaluation_id'] + '.json')
         if ep.exists():
@@ -346,14 +368,20 @@ class Workflows:
         record_evaluation(self.store, task, assessed['evaluation_id'])
         if p['configuration']['adapter'] != 'fake' and self.settings.get('qualitative_review', True):
             from .model_review import review_evaluation, compact
-            options = dict(image=p['evaluation_config']['image'], context=self.context, auth_file=self.auth_file,
+            image = self.settings.get('review_image') or self.settings.get('preparation_image') or record.get('operation', {}).get('configured_image')
+            if not image:
+                raise WorkflowFailure('Qualitative review failed; benchmark and evaluation results are preserved. Configure review_image or preparation_image, then retry the review.')
+            options = dict(image=image, context=self.context, auth_file=self.auth_file,
                            model=self.settings.get('review_model', 'gpt-6-luna'))
-            review_evaluation(self.store, task, assessed['evaluation_id'], **options)
-            from .memory import Memory
-            while len(Memory(self.store).history(p['configuration']['model'])) >= Memory.threshold:
-                self.stage(jid, 'review compaction')
-                if compact(self.store, p['configuration']['model'], **options) is None:
-                    break
+            try:
+                review_evaluation(self.store, task, assessed['evaluation_id'], **options)
+                from .memory import Memory
+                while len(Memory(self.store).history(p['configuration']['model'])) >= Memory.threshold:
+                    self.stage(jid, 'review compaction')
+                    if compact(self.store, p['configuration']['model'], **options) is None:
+                        break
+            except Exception as exc:
+                raise WorkflowFailure('Qualitative review failed (' + type(exc).__name__ + '); benchmark and evaluation results are preserved. Check the trusted review image and configuration, then retry the review.') from exc
 
 
 class WorkflowFailure(ValueError):

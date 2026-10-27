@@ -86,7 +86,10 @@ def jobs(pages):
         config = p.get('configuration')
         detail = esc(job['detail'])
         if job['state'] in ('failed', 'interrupted'):
-            detail += form(pages, 'retry', hidden('job', job['id']) + '<button>Retry this work</button>')
+            new_attempt = pages.workflows.needs_new_attempt(job)
+            route = 'new-attempt' if new_attempt else 'retry'
+            label = 'Start new benchmark attempt' if new_attempt else ('Retry qualitative review' if job['stage'] in ('model review', 'review compaction') else 'Retry remaining stages')
+            detail += form(pages, route, hidden('job', job['id']) + '<button>' + label + '</button>')
         refs = pages.task_link(tid)
         for field, route in (('run_id', 'runs'), ('evaluation_id', 'evaluations')):
             if (pages.store.task(tid) / route / (p[field] + '.json')).exists():
@@ -124,6 +127,8 @@ def models(pages, query):
                 continue
             body += '<h3>Effort: ' + esc(m['model'].get('reasoning_effort') or 'unspecified') + ' · ' + esc(m['harness']['name']) + '</h3>'
             body += table(['Overall', 'Pass', 'Fail', 'Inconclusive', 'Error', 'Pass rate', 'Denominator', 'Decided count'], [('All evaluated samples', *metrics(m['overall']))])
+            overall = m['overall']
+            body += '<p>Task coverage: ' + str(overall['covered_tasks']) + '/' + str(overall['available']) + ' prepared tasks (' + percent(overall['coverage']) + '). Sample coverage: ' + str(overall['evaluated']) + '/' + str(overall['available_samples']) + ' observed revision/condition samples (' + percent(overall['sample_coverage']) + ').</p>'
             breakdown = []
             for category, r in m['categories'].items():
                 breakdown.append((esc(category), *metrics(r), str(r['covered_tasks']) + '/' + str(r['available']) + ' tasks'))
@@ -144,8 +149,8 @@ def models(pages, query):
 
 def action(pages, route, fields):
     workflows = pages.workflows
-    if route == 'retry':
-        workflows.retry(fields['job'][0])
+    if route in ('retry', 'new-attempt'):
+        workflows.retry(fields['job'][0], new_attempt=route == 'new-attempt')
         return pages.page('Retry queued', '<p>' + pages.link('View progress', 'jobs') + '</p>')
     if route == 'retire-confirm':
         if fields.get('confirm') != ['retire'] or not fields.get('reason', [''])[0].strip():

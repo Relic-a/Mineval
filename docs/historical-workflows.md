@@ -41,6 +41,7 @@ selects another trusted host JSON file. Example:
   "preparation_image": "mineval-preparation:local",
   "preparation_model": "gpt-6-luna",
   "review_model": "gpt-6-luna",
+  "review_image": "mineval-review:local",
   "evaluation_model": "gpt-6-luna",
   "models": [
     {"model": "gpt-6-luna", "effort": "medium", "adapter": "codex"},
@@ -54,7 +55,11 @@ selects another trusted host JSON file. Example:
 `evaluation_configs` overrides it per task. Paths resolve relative to the settings
 file. Settings contain configuration, never credentials. Supply authentication only
 through the explicit launcher flag. `--image` overrides the default preparation image
-for this server/worker. Use `evaluator_agent: false` for checks-only evaluation or
+for this server/worker. `review_image` selects the trusted Codex-capable image for
+qualitative review and compaction. It defaults to `preparation_image`, then the saved
+benchmark's configured agent image, independently of the private test image. Review
+failures are labeled separately and preserve benchmark and evaluation results;
+retrying them reuses both saved artifacts. Use `evaluator_agent: false` for checks-only evaluation or
 `qualitative_review: false` to retain factual observations without qualitative model
 inference. Separate sessions and frozen independent review are always required to
 prepare tasks, regardless of these evaluation/review options.
@@ -93,7 +98,10 @@ retry. Finished runs are reused for evaluation retries; published assessments ar
 reused when only model review failed. Uncertain/orphan evaluator evidence reserves its
 ID: retries allocate a new assessment ID. A run left `running` by host loss is sealed
 using existing `bench recover`, then the job reports that a new explicit rerun is
-needed. Partial evidence and immutable launches are never overwritten. Preparation
+needed. Attempts without collected output cannot be retried toward evaluation.
+The queue exposes “Start new benchmark attempt” for these jobs, allocating fresh run
+and assessment IDs while preserving the old evidence; ordinary retries are rejected.
+Partial evidence and immutable launches are never overwritten. Preparation
 retries use fresh sessions/approvals; an already frozen revision is checked and reused.
 
 Normal sandbox cleanup remains in force. A hard process kill/host loss can still
@@ -111,6 +119,8 @@ mineval --data DATA workflow --settings settings.json prepare-all
 mineval --context ROOTLESS --data DATA workflow --settings settings.json --auth-file /explicit/auth.json work
 mineval --data DATA workflow list
 mineval --data DATA workflow retry JOB_ID
+# For an interrupted/recovered attempt without saved output:
+mineval --data DATA workflow retry JOB_ID --new-attempt
 mineval --data DATA workflow submit selection.json
 ```
 
@@ -133,7 +143,8 @@ export, recover, evaluation and explicit comparison commands remain supported.
 The discovery skill gives the selecting model seven fixed engineering areas:
 behavior, integration, data, reliability, security, developer-tools and user-interface,
 with definitions and an instruction to choose one primary obligation. Intake validates
-any supplied category; older handoffs and stored records without one display as
+a required primary category on new `schema_version: 2` selector handoffs. Unversioned
+and schema-1 handoffs retain legacy category handling; older handoffs and stored records without one display as
 uncategorized. Old change-type labels such as feature and bugfix remain importable
 and display as uncategorized; arbitrary labels in existing records are retained
 without pretending they belong to the new taxonomy. No historical metadata or receipt is rewritten or inferred from a title.
@@ -146,7 +157,9 @@ A sample is an exact prepared revision and evaluation condition. Repeated reruns
 use the first assessment of the earliest attempt for that sample; no best score is
 selected. Distinct revisions/conditions remain distinct samples; task coverage counts
 distinct task registrations, not samples, against prepared registrations including
-archived history. The category average equally weights **observed named categories**;
+archived history. Overall coverage uses the same distinct-task denominator. Separate
+sample coverage divides evaluated samples by the union of observed exact revision/condition
+samples across configurations (not unobserved possible conditions). The category average equally weights **observed named categories**;
 missing categories are excluded and their number is shown. Uncategorized samples
 contribute to overall rates but not the named-category mean. Zero data yields an
 unavailable rate, not zero. Small sample counts are visible rather than ranked.

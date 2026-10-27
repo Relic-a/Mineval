@@ -164,7 +164,9 @@ def main(argv: list[str] | None = None) -> int:
     submit.add_argument('definition')
     flows.add_parser('list')
     flows.add_parser('work', help='process queued tasks; independent failures do not stop the queue')
-    flows.add_parser('retry').add_argument('job_id')
+    retry = flows.add_parser('retry')
+    retry.add_argument('job_id')
+    retry.add_argument('--new-attempt', action='store_true', help='allocate a new run identity for an attempt without usable output')
     flows.add_parser('prepare-all', help='enqueue all eligible unprepared tasks')
     memory = commands.add_parser('model-review', help='append-only model memory and safe compaction reservations')
     memories = memory.add_subparsers(dest='memory_action', required=True)
@@ -238,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.workflow_action == 'list':
                     result = flow.jobs()
                 elif args.workflow_action == 'retry':
-                    result = flow.retry(args.job_id)
+                    result = flow.retry(args.job_id, new_attempt=args.new_attempt)
                 elif args.workflow_action == 'prepare-all':
                     result = flow.enqueue('prepare', [{'task_id': t['task_id']} for t in tasks(store)
                         if not t['versions'] and t['state']['status'] not in ('retired','rejected','needs-review')])

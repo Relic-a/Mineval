@@ -14,11 +14,13 @@ def sample_key(record):
                     record['verification_sha256'], record.get('image_id')])
 
 
-def counts(records, total):
+def counts(records, total, sample_total):
     result = {v: sum(r['verdict'] == v for r in records) for v in VERDICTS}
     n = len(records)
+    covered = len({r['task_id'] for r in records})
     return result | {'evaluated': n, 'available': total, 'pass_rate': result['pass'] / n if n else None,
-                     'coverage': n / total if total else None,
+                     'covered_tasks': covered, 'coverage': covered / total if total else None,
+                     'available_samples': sample_total, 'sample_coverage': n / sample_total if sample_total else None,
                      'decided': result['pass'] + result['fail']}
 
 
@@ -46,21 +48,21 @@ def summaries(store):
         identity = encoded([run['model'], run['harness']])
         groups[identity].setdefault(sample_key(ev), ev | {'category': categories[ev['task_id']]})
     common = set.intersection(*(set(records) for records in groups.values())) if groups else set()
+    sample_pool = {key: record for records in groups.values() for key, record in records.items()}
     results = []
     for identity, records in groups.items():
         model, harness = json.loads(identity)
         # All-evidence figures count exact revision/condition samples, explicitly not
         # unique tasks. Coverage counts distinct tasks against prepared registrations.
-        breakdown = {c: counts([r for r in records.values() if r['category'] == c], available[c]) for c in available}
-        for c, metric in breakdown.items():
-            metric['covered_tasks'] = len({r['task_id'] for r in records.values() if r['category'] == c})
-            metric['coverage'] = metric['covered_tasks'] / available[c] if available[c] else None
+        breakdown = {c: counts([r for r in records.values() if r['category'] == c], available[c],
+                               sum(r['category'] == c for r in sample_pool.values())) for c in available}
         rates = [m['pass_rate'] for c, m in breakdown.items() if c != LEGACY and m['evaluated']]
         comparable = [records[k] for k in common]
-        results.append({'model': model, 'harness': harness, 'overall': counts(list(records.values()), sum(available.values())),
+        results.append({'model': model, 'harness': harness, 'overall': counts(list(records.values()), sum(available.values()), len(sample_pool)),
             'categories': breakdown, 'category_average': sum(rates) / len(rates) if rates else None,
-            'category_count': len(rates), 'comparable': counts(comparable, len(common)),
+            'category_count': len(rates), 'comparable': counts(comparable, len({r['task_id'] for r in comparable}), len(common)),
             'comparable_categories': {c: counts([r for r in comparable if r['category'] == c],
+                                              len({r['task_id'] for r in comparable if r['category'] == c}),
                                               sum(records[k]['category'] == c for k in common)) for c in available},
             'selections': [{'task_id': r['task_id'], 'evaluation_id': r['evaluation_id']} for r in records.values()],
             'common_selections': [{'task_id': records[k]['task_id'], 'evaluation_id': records[k]['evaluation_id']} for k in sorted(common)]})
