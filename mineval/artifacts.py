@@ -108,9 +108,11 @@ def inventory(root, *, allow_git=False, skip_root_git=False):
     return result
 
 
-def copy_tree(source, target, *, allow_git=False):
+def copy_tree(source, target, *, allow_git=False, expected_inventory=None):
     # The owner must quiesce writers. Detect accidental external changes as well.
     before = inventory(source, allow_git=allow_git)
+    if expected_inventory is not None and before != expected_inventory:
+        raise ValueError('Source integrity mismatch')
     shutil.copytree(source, target, copy_function=clone_file)
     if inventory(source, allow_git=allow_git) != before or inventory(target, allow_git=allow_git) != before:
         raise ValueError('Source changed during copy; stop external writers and retry')

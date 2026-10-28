@@ -189,9 +189,13 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
             raise ValueError('Evaluation needs one authoritative source per destination path')
         # Other runs may be between atomic record and receipt publication. Only
         # this run's records affect its version, and its run lock excludes writers.
-        previous = [store._inspect_record(task_id, 'evaluations', p.stem)
-                    for p in (task / 'evaluations').glob('*.json')
-                    if read_json(p)['run_id'] == run_id]
+        previous = []
+        for p in (task / 'evaluations').glob('*.json'):
+            if not p.with_suffix('.sha256').exists():
+                continue  # Interrupted publication; preserve it without treating it as evidence.
+            record = store._inspect_record(task_id, 'evaluations', p.stem)
+            if record['run_id'] == run_id:
+                previous.append(record)
         version = 1 + max((r.get('evaluation_version', 0) for r in previous if r['run_id'] == run_id), default=0)
         staged = temp / 'evidence'; staged.mkdir()
         write_json(staged / 'config.json', config)

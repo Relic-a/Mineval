@@ -211,3 +211,61 @@ class IncrementalTests(HistoryFixture):
         (attempt / 'tree-hashes.json').write_text('{}')
         with self.assertRaisesRegex(ValueError, 'hash mismatch'):
             progress.cleanup(cleanup)
+
+    def test_oversized_evaluation_waits_while_other_jobs_progress(self):
+        from mineval.publication import published
+        flow = self.flow()
+        self.enqueue(flow, 'large', 'small')
+        large = next(j for j in flow.jobs() if j['payload']['configuration']['model'] == 'large')
+        payload = large['payload']
+        payload['evaluation_config']['limits'] = {'memory_mb': 8192}
+        flow.update(large['id'], payload=payload)
+        with patch('mineval.resources.capacity', return_value=(8, 4096)), patch('mineval.benchmark.run_agent', side_effect=self.agent), patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+            flow.work()
+        jobs = {j['payload']['configuration']['model']: j for j in flow.jobs()}
+        self.assertEqual(jobs['small']['state'], 'completed')
+        self.assertEqual(jobs['large']['state'], 'queued')
+        self.assertEqual(jobs['large']['payload']['phase'], 'evaluation')
+        self.assertFalse(published(self.store, 'example', jobs['large']['payload']['run_id']))
+
+    def test_partial_evaluation_receipt_recovery(self):
+        from mineval import evaluation
+        from mineval.publication import published
+        for boundary in ('seal', 'receipt'):
+            with self.subTest(boundary=boundary):
+                flow = self.flow()
+                self.enqueue(flow, 'partial-' + boundary)
+                original = self.store._reserve_record
+                seal = evaluation.seal
+                def partial(task, namespace, identity, value):
+                    if namespace == 'evaluations':
+                        write_json(self.store.task(task) / namespace / (identity + '.json'), value)
+                        raise KeyboardInterrupt()
+                    return original(task, namespace, identity, value)
+                def after_seal(staged, target):
+                    seal(staged, target)
+                    raise KeyboardInterrupt()
+                target = patch.object(self.store, '_reserve_record', side_effect=partial) if boundary == 'receipt' else patch('mineval.evaluation.seal', side_effect=after_seal)
+                with patch('mineval.benchmark.run_agent', side_effect=self.agent), patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()), target:
+                    with self.assertRaises(KeyboardInterrupt):
+                        flow.work()
+                job = next(j for j in flow.jobs() if j['state'] == 'interrupted')
+                old = job['payload']['evaluation_id']
+                self.assertFalse(published(self.store, 'example', job['payload']['run_id'], old))
+                flow.retry(job['id'])
+                with patch('mineval.workflows.benchmark.run', side_effect=AssertionError('repeated run')), patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+                    flow.work()
+                finished = next(j for j in flow.jobs() if j['id'] == job['id'])
+                self.assertEqual(finished['state'], 'completed', finished)
+                self.assertNotEqual(old, finished['payload']['evaluation_id'])
+                self.assertFalse(published(self.store, 'example', finished['payload']['run_id'], old))
+
+
+def setUpModule():
+    global resource_patch
+    resource_patch = patch('mineval.resources.capacity', return_value=(64, 131072))
+    resource_patch.start()
+
+
+def tearDownModule():
+    resource_patch.stop()

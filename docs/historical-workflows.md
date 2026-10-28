@@ -28,7 +28,7 @@ a historical base failing a behavioral check is not a reason to reject automatic
 Choose one or several discovered model/effort choices (or saved host presets), or enter explicit model identifiers
 (one per line) and an effort. Run automatically evaluates the saved candidate,
 records a factual model observation and, for Codex attempts by default, runs a
-separate qualitative review and compaction when needed. The fake adapter is available
+separate qualitative review. Compaction is independent maintenance. The fake adapter is available
 through settings/CLI for fixtures; its reviews are factual only. It never calls a model.
 
 ## Application navigation and benchmark configuration
@@ -73,7 +73,7 @@ read-only and explain how to open the trusted operational observe server.
 Open **Settings → Agents & models** in the historical dashboard to select the **Prep / extract** and
 **Evaluation** model and reasoning effort. Prep applies to cleanup, extraction and
 independent preparation review. Evaluation applies to the evaluator, qualitative
-review and memory compaction. The trusted host `review_model` / `review_effort`
+review. Memory compaction uses the separate maintenance queue. The trusted host `review_model` / `review_effort`
 settings can override the review sessions, and are called out on the settings page.
 
 Choices are saved atomically in `DATA/historical-model-settings.json` and override
@@ -303,7 +303,7 @@ model/effort. The CLI exposes `evaluate --effort` and `--evaluator-timeout` too.
 
 `historical-jobs.sqlite3` stores the queue and execution phases, with WAL and full
 synchronous commits. One coordinator owns crash recovery and schedules bounded
-stage workers. Benchmark execution, evaluation, and qualitative review/compaction
+stage workers. Benchmark execution, evaluation, and qualitative review
 have separate configurable limits and return to the queue between phases. Inference
 does not hold a database transaction. Multiple models can run the same prepared task
 concurrently; per-run ownership excludes duplicate launches and unsafe recovery.
@@ -398,7 +398,7 @@ and display as uncategorized; arbitrary labels in existing records are retained
 without pretending they belong to the new taxonomy. No historical metadata or receipt is rewritten or inferred from a title.
 
 Workflow runs stay out of summaries and explicit comparisons until required
-evaluation and qualitative review/compaction finish. Failed reviews keep their
+evaluation and qualitative review finish. Failed reviews keep their
 benchmark/evaluation evidence for retry without publishing a final result. Raw
 evidence and progress remain inspectable. Legacy and standalone CLI assessments
 retain their existing publication behavior. Qualitative observations cannot change
@@ -488,3 +488,17 @@ made by the tests. Rootless Docker cold/warm and batch measurements are document
 in [Incremental pipeline validation](incremental-pipeline.md); no live-model smoke
 test was performed for this change. Existing
 opt-in rootless runtime tests remain available.
+
+### Independent memory maintenance
+
+Required qualitative review queues a durable, deduplicated request per observed model.
+Run `mineval workflow maintain` in a separate process or user timer. Publication
+does not wait for compaction. Requests survive restarts; SQLite reservations serialize
+the oldest inputs and expire after interruption. Failed inference leaves observations
+active and does not require a benchmark rerun. Maintenance uses the invoking worker’s
+authentication file; credentials are never stored in the queue.
+
+Resource admission also checks available host/cgroup memory and CPU capacity. Configure
+`resources` budgets as described in [installation](installation.md). Optional
+`model_concurrency` maps individual model identifiers to provider limits; the general
+`concurrency.per_model` remains the fallback. Jobs that do not fit remain queued.

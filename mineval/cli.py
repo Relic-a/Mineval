@@ -11,11 +11,24 @@ from .sandbox import DockerSandbox, Limits, SandboxError, SandboxSpec
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .configuration import load
+    try:
+        saved = load()
+    except (OSError, ValueError, TypeError):
+        print("mineval: cannot read saved configuration; inspect ~/.config/mineval/config.json (or XDG_CONFIG_HOME)", file=sys.stderr)
+        return 125
     parser = argparse.ArgumentParser(prog="mineval")
     parser.add_argument("--context", help="Docker context (otherwise use Docker's current selection)")
-    parser.add_argument("--data", default=os.environ.get("MINEVAL_DATA", "mineval-data"))
+    parser.add_argument("--data")
+    parser.set_defaults(context=saved.get('context'))
+    parser.set_defaults(data=os.environ.get('MINEVAL_DATA', saved.get('data')))
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("doctor", help="verify rootless Docker and resource controller support")
+    models = commands.add_parser('models', help='discover available Codex models without inference')
+    models.add_argument('--auth-file')
+    setup = commands.add_parser('setup', help='save host settings and diagnose prerequisites; installs nothing')
+    setup.add_argument('--image')
+    setup.add_argument('--auth-file')
     cache = commands.add_parser('cache', help='inspect or prune reusable verified dependency downloads')
     caches = cache.add_subparsers(dest='cache_action', required=True)
     caches.add_parser('status')
@@ -169,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     flows = workflow.add_subparsers(dest='workflow_action', required=True)
     submit = flows.add_parser('submit', help='enqueue JSON {kind,selections,configurations,exclude}')
     submit.add_argument('definition')
+    flows.add_parser('maintain', help='process durable model memory compaction independently')
     flows.add_parser('list')
     flows.add_parser('work', help='process queued tasks; independent failures do not stop the queue')
     retry = flows.add_parser('retry')
@@ -202,8 +216,24 @@ def main(argv: list[str] | None = None) -> int:
         operation.add_argument('--model', default='gpt-6-luna')
         operation.add_argument('--auth-file')
     args = parser.parse_args(argv)
+    for name in ('image', 'auth_file'):
+        if hasattr(args, name) and getattr(args, name) is None:
+            setattr(args, name, saved.get(name))
+    if args.data is None:
+        from pathlib import Path
+        args.data = str(Path.home() / '.local/share/mineval') if args.action == 'setup' else 'mineval-data'
     sandbox = DockerSandbox(context=args.context)
     try:
+        if args.action == 'models':
+            from .codex_models import Catalog
+            result = Catalog(args.auth_file).get()
+            print(json.dumps(result))
+            return 125 if result.get('error') else 0
+        if args.action == 'setup':
+            from .configuration import setup
+            result = setup(args, sandbox)
+            print(json.dumps(result))
+            return 0 if result['ready'] else 125
         if args.action == 'cache':
             from pathlib import Path
             from .downloads import NpmCache
@@ -258,6 +288,9 @@ def main(argv: list[str] | None = None) -> int:
                 if args.workflow_action == 'submit':
                     definition = read_json(args.definition)
                     result = flow.enqueue(**definition)
+                elif args.workflow_action == 'maintain':
+                    flow.maintain()
+                    result = {'maintenance': 'completed'}
                 elif args.workflow_action == 'list':
                     result = flow.jobs()
                 elif args.workflow_action == 'retry':
@@ -440,9 +473,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             return (124 if result.get('timed_out') else result.get('exit_code', 0)) or 0
         if args.action == "doctor":
-            info = sandbox.check()
-            print(json.dumps({"ready": True, "server_version": info["ServerVersion"]}))
-            return 0
+            from .configuration import diagnose
+            result = diagnose(sandbox, saved)
+            print(json.dumps(result))
+            return 0 if result['ready'] else 125
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
         spec = SandboxSpec(args.image, tuple(command), Limits(
             cpus=args.cpus, memory_mb=args.memory_mb, pids=args.pids,

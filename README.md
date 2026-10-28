@@ -6,14 +6,25 @@ fresh containers, freezes cleaned starting trees, and privately preserves select
 future verification. It runs coding agents on frozen tasks and independently evaluates
 saved results with inspectable private checks. Discovery remains an external skill workflow.
 
-Python 3.11+, Git, and the Docker CLI are required. The Python runtime uses only the
-standard library. Install with `python -m pip install -e .`, or use
-`python -m mineval` from this checkout. Docker must use a **local rootless daemon**
-with cgroup v2, systemd, and delegated CPU/memory/swap/PID controllers:
+Historical benchmarks let you compare models on the same real starting state, with
+future regression checks kept private. Runs and evaluations retain immutable provenance.
+
+Start with [installation and setup](docs/installation.md). Standalone Linux release
+builds and a verified installer are provided in this repository; publication and clean
+host acceptance remain release gates. No public binary availability is assumed.
 
 ```sh
-mineval --context rootless doctor
+mineval --context mineval-rootless --data "$HOME/.local/share/mineval" setup \
+  --image YOUR_PRELOADED_PREPARATION_IMAGE --auth-file /absolute/model-only/auth.json
+mineval doctor
+mineval observe
 ```
+
+Git and a local rootless Docker daemon with cgroup v2 resource controllers are required.
+Coding agents can use [the Mineval skill](skills/mineval/SKILL.md) for the complete CLI
+workflow without opening the dashboard. The existing moment-selector skill remains the
+task discovery entrypoint. Python package and contributor instructions are in the
+[installation guide](docs/installation.md#python-distribution-and-development).
 
 Mineval checks these capabilities and fails closed. It never installs Docker,
 changes contexts, pulls images, forwards host credentials, or mounts a Docker socket.

@@ -607,6 +607,19 @@ class DependencyCache:
             self.maintain()
         return result
 
+    def _reuse_seed(self, seed):
+        receipt = read_json(seed / 'receipt.json')
+        local = self.root / ('.run-' + uuid4().hex)
+        copy_tree(seed / 'tree', local, expected_inventory=receipt['hashes'])
+        stats = receipt['stats']
+        stats['seed_reused'] = True
+        stats['seeded_packages'] = sum(a['available'] for a in stats['artifacts'])
+        stats['seeded_bytes'] = sum(v for v in receipt['sizes'])
+        stats['stored_packages'] = stats['missed_packages'] = 0
+        for a in stats['artifacts']:
+            a.update(cache_hit=a['available'], downloaded=False)
+        return local, stats
+
     def _prepare_seed(self, managers, *, network, cargo_cache_id):
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.cargo_cache_ids = CARGO_CACHE_IDS
@@ -617,21 +630,12 @@ class DependencyCache:
         source = digest(self.snapshot) if self.snapshot else {name: digest(safe_file(self.tree, name)) for name in self.manifests()}
         key = hashlib.sha256(json.dumps([3, source, sorted(managers), network, self.cargo_cache_ids], sort_keys=True).encode()).hexdigest()
         seed = self.root / 'seeds' / key
+        with lock(self.root / 'locks/seeds' / (key + '.lock'), wait=True, shared=True):
+            if seed.exists():
+                return self._reuse_seed(seed)
         with lock(self.root / 'locks/seeds' / (key + '.lock'), wait=True):
             if seed.exists():
-                receipt = read_json(seed / 'receipt.json')
-                if inventory(seed / 'tree') != receipt['hashes']:
-                    raise ValueError('Dependency seed integrity mismatch')
-                local = self.root / ('.run-' + uuid4().hex)
-                copy_tree(seed / 'tree', local)
-                stats = receipt['stats']
-                stats['seed_reused'] = True
-                stats['seeded_packages'] = sum(a['available'] for a in stats['artifacts'])
-                stats['seeded_bytes'] = sum(v for v in receipt['sizes'])
-                stats['stored_packages'] = stats['missed_packages'] = 0
-                for a in stats['artifacts']:
-                    a.update(cache_hit=a['available'], downloaded=False)
-                return local, stats
+                return self._reuse_seed(seed)
             if self.snapshot is None:
                 local, stats = self._prepare(managers, network=network)
             else:

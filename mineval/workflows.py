@@ -269,15 +269,55 @@ class Workflows:
                 raise ValueError('Saved output is usable; retry the remaining stages')
             # Interrupted evaluations remain immutable evidence, not reusable verdicts.
             evaluation_path = self.store.task(row['task']) / 'evaluations' / (p['evaluation_id'] + '.json')
-            if evaluation_path.exists() and self.store.inspect_evaluation(row['task'], p['evaluation_id']).get('error_kind') == 'interrupted':
+            incomplete = evaluation_path.exists() and not evaluation_path.with_suffix('.sha256').exists()
+            if incomplete or (evaluation_path.exists() and self.store.inspect_evaluation(row['task'], p['evaluation_id']).get('error_kind') == 'interrupted'):
                 p['phase'] = 'evaluation'
                 p['internal_evaluation_ids'] = p.get('internal_evaluation_ids', []) + [p['evaluation_id']]
                 p['evaluation_id'] = uuid4().hex
             elif not evaluation_path.exists():
+                p['internal_evaluation_ids'] = p.get('internal_evaluation_ids', []) + [p['evaluation_id']]
                 if p.get('phase') == 'review':
                     p['phase'] = 'evaluation'
                 p['evaluation_id'] = uuid4().hex
             db.execute("UPDATE jobs SET state='queued',detail='',payload=?,updated=? WHERE id=?", (encoded(p), time.time(), jid))
+
+    def schedule_compaction(self, model, options):
+        # One durable request per model. Authentication stays in the worker, never the DB.
+        safe = {k: v for k, v in options.items() if k != 'auth_file'}
+        with self.db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS maintenance(model TEXT PRIMARY KEY, options TEXT NOT NULL)")
+            db.execute("INSERT INTO maintenance VALUES(?,?) ON CONFLICT(model) DO UPDATE SET options=excluded.options",
+                       (model, encoded(safe)))
+
+    def maintain(self):
+        from .model_review import compact
+        from .memory import Memory
+        with lock(self.store.root / 'maintenance-worker.lock'):
+            with self.db() as db:
+                db.execute("CREATE TABLE IF NOT EXISTS maintenance(model TEXT PRIMARY KEY, options TEXT NOT NULL)")
+                requests = list(db.execute('SELECT * FROM maintenance'))
+            for request in requests:
+                options = json.loads(request['options']) | {'auth_file': self.auth_file}
+                while len(Memory(self.store).history(request['model'])) >= Memory.threshold:
+                    if compact(self.store, request['model'], **options) is None:
+                        break
+                # Keep requests: future appends and expired reservations need no re-enqueue.
+
+    def resource_request(self, job, phase):
+        resources = self.settings.get('resources', {})
+        cpus = float(resources.get('cpus_per_job', 2))
+        memory = int(resources.get('memory_mb_per_job', 2048))
+        config = job['payload'].get('evaluation_config', {}) if phase == 'evaluation' else {}
+        if phase == 'prepare':
+            draft_config = self.store.draft(job['task']) / 'control/verify.json'
+            if draft_config.exists():
+                config = read_json(draft_config)
+        if phase == 'benchmark':
+            config = read_json(self.store.task(job['task']) / 'versions' /
+                               job['payload']['revision']['version'] / 'verify-config.json')
+        limits = config.get('limits', {})
+        return max(cpus, limits.get('cpus', 2)), max(memory, sum(limits.get(k, default) for k, default in
+                     (('memory_mb', 1024), ('workspace_mb', 512), ('tmp_mb', 64))))
 
     def concurrency(self):
         values = {'prepare': 1, 'benchmark': 2, 'evaluation': 1, 'review': 1,
@@ -288,6 +328,9 @@ class Workflows:
         values.update(supplied)
         if any(type(v) is not int or not 1 <= v <= 64 for v in values.values()):
             raise ValueError('Concurrency limits must be integers between 1 and 64')
+        providers = self.settings.get('model_concurrency', {})
+        if not isinstance(providers, dict) or any(type(v) is not int or not 1 <= v <= 64 for v in providers.values()):
+            raise ValueError('Model concurrency limits must be integers between 1 and 64')
         return values
 
     def work(self, stop_event=None):
@@ -295,6 +338,8 @@ class Workflows:
         # recovery cannot mistake another live coordinator's jobs for crashed work.
         self.stop_event = stop_event or threading.Event()
         limits = self.concurrency()
+        from .resources import slots
+        slots(self.settings)  # Validate resource settings before claiming work.
         interrupted = False
         with lock(self.store.root / 'historical-worker.lock'):
             with self.db() as db:
@@ -308,6 +353,13 @@ class Workflows:
                                 if job['state'] != 'queued' or len(active) >= limits['total']:
                                     continue
                                 phase = 'prepare' if job['kind'] == 'prepare' else job['payload'].get('phase', 'benchmark')
+                                from .resources import capacity
+                                cpu_capacity, memory_capacity = capacity()
+                                cpu, memory = self.resource_request(job, phase)
+                                reserve = self.settings.get('resources', {}).get('reserve_memory_mb', 512)
+                                if (sum(c for p, m, c, r in active.values()) + cpu > cpu_capacity or
+                                        sum(r for p, m, c, r in active.values()) + memory + reserve > memory_capacity):
+                                    continue
                                 choices = job['payload'].get('model_settings', {})
                                 role = 'preparation' if phase == 'prepare' else 'evaluation'
                                 model = ((job['payload'].get('configuration') or {}).get('model') if phase == 'benchmark' else choices.get(role, {}).get('model'))
@@ -316,14 +368,14 @@ class Workflows:
                                 models = {model} if model else set()
                                 if phase == 'prepare' and self.settings.get('review_model'):
                                     models.add(self.settings['review_model'])
-                                if sum(p == phase for p, m in active.values()) >= limits[phase]:
+                                if sum(p == phase for p, m, c, r in active.values()) >= limits[phase]:
                                     continue
-                                if any(sum(model in m for p, m in active.values()) >= limits['per_model'] for model in models):
+                                if any(sum(model in m for p, m, c, r in active.values()) >= self.settings.get('model_concurrency', {}).get(model, limits['per_model']) for model in models):
                                     continue
                                 with self.db() as db:
                                     claimed = db.execute("UPDATE jobs SET state='running',updated=? WHERE id=? AND state='queued'", (time.time(), job['id'])).rowcount
                                 if claimed:
-                                    active[pool.submit(self._work_stage, job, phase)] = (phase, models)
+                                    active[pool.submit(self._work_stage, job, phase)] = (phase, models, cpu, memory)
                         if not active:
                             break
                         done, _ = wait(active, timeout=0.2, return_when=FIRST_COMPLETED)
@@ -500,7 +552,7 @@ class Workflows:
         from .memory import record_evaluation
         record_evaluation(self.store, task, assessed['evaluation_id'])
         if p['configuration']['adapter'] != 'fake' and self.settings.get('qualitative_review', True):
-            from .model_review import review_evaluation, compact
+            from .model_review import review_evaluation
             image = self.settings.get('review_image') or self.settings.get('preparation_image') or record.get('operation', {}).get('configured_image')
             if not image:
                 raise WorkflowFailure('Qualitative review failed; benchmark and evaluation results are preserved. Configure review_image or preparation_image, then retry the review.')
@@ -509,11 +561,7 @@ class Workflows:
                            effort=self.settings.get('review_effort', self.role_adapter('evaluation', p).effort))
             try:
                 review_evaluation(self.store, task, assessed['evaluation_id'], **options)
-                from .memory import Memory
-                while len(Memory(self.store).history(p['configuration']['model'])) >= Memory.threshold:
-                    self.stage(jid, 'review compaction')
-                    if compact(self.store, p['configuration']['model'], **options) is None:
-                        break
+                self.schedule_compaction(p['configuration']['model'], options)
             except Exception as exc:
                 raise WorkflowFailure('Qualitative review failed (' + type(exc).__name__ + '); benchmark and evaluation results are preserved. Check the trusted review image and configuration, then retry the review.') from exc
 

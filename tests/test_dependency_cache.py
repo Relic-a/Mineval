@@ -82,6 +82,27 @@ class DependencyCacheTests(unittest.TestCase):
         self.assertEqual(sum(s['stored_packages'] for _, s in results), 1)
         self.assertEqual(sum(s['seeded_packages'] for _, s in results), 1)
 
+    def test_warm_seed_clones_overlap_and_remain_isolated(self):
+        import threading
+        self.npm()
+        self.prepare()
+        original = DependencyCache._reuse_seed
+        rendezvous = threading.Barrier(2)
+        def reuse(cache, seed):
+            rendezvous.wait(timeout=5)
+            return original(cache, seed)
+        with patch.object(DependencyCache, '_reuse_seed', reuse), ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: DependencyCache(self.cache.root, self.tree).prepare(('npm',), network='bridge'), range(2)))
+        first, second = [r[0] for r in results]
+        for local, stats in results:
+            self.addCleanup(shutil.rmtree, local, True)
+            self.assertTrue(stats['seed_reused'])
+        file = next(p for p in first.rglob('*') if p.is_file())
+        other = second / file.relative_to(first)
+        original_bytes = other.read_bytes()
+        file.write_bytes(b'changed')
+        self.assertEqual(other.read_bytes(), original_bytes)
+
     def test_unrelated_acquisition_is_concurrent_and_seed_skips_discovery(self):
         import threading
         one = self.root / 'one'; one.mkdir()

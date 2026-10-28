@@ -597,3 +597,13 @@ class ModelReviewTests(HistoryFixture):
         with patch('mineval.model_review.infer', side_effect=AssertionError('duplicate review must not spend another inference')):
             duplicate = review_evaluation(self.store, 'example', 'second', image='local:test')
         self.assertEqual(result['id'], duplicate['id'])
+
+
+def setUpModule():
+    global resource_patch
+    resource_patch = patch('mineval.resources.capacity', return_value=(64, 131072))
+    resource_patch.start()
+
+
+def tearDownModule():
+    resource_patch.stop()
