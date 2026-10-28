@@ -97,6 +97,130 @@ Codex CLI; execution still requires Codex in the trusted preloaded Docker image
 and the explicit `--auth-file` when credentials are needed. The host catalog does
 not prove that an older image runtime supports every discovered model or effort.
 
+## Gretel preparation runtime
+
+`examples/Dockerfile.gretel` provides Node.js 24, npm, Python, Git, native addon
+build tools, the Mineval diagnostic client, and the standalone Codex binaries from
+the preloaded `mineval-agent:phase3-ready` image. It contains no credentials
+or Gretel source. Build from the repository root with a minimal context:
+
+```sh
+GRETEL_BUILD_CONTEXT=$(mktemp -d /tmp/mineval-gretel-build-XXXXXX)
+cp examples/Dockerfile.gretel "$GRETEL_BUILD_CONTEXT/Dockerfile"
+cp pyproject.toml "$GRETEL_BUILD_CONTEXT/"
+cp -r mineval "$GRETEL_BUILD_CONTEXT/"
+docker --context mineval-rootless build -t mineval-gretel:node24 "$GRETEL_BUILD_CONTEXT"
+rm -rf -- "$GRETEL_BUILD_CONTEXT"
+```
+
+Set `preparation_image` in `DATA/historical-settings.json` to this image (or its
+resolved image ID). Start the dashboard with `--context mineval-rootless` before
+`observe`, and `--auth-file /explicit/model-only/auth.json` after it. Runtime
+settings are loaded at startup, so restart an existing dashboard after changing
+them. Failed jobs remain failed until explicitly retried.
+
+## Reusable dependency downloads
+
+Historical preparation, diagnostics, review, benchmark runs and evaluation can
+reuse immutable upstream downloads under `DATA/download-cache/artifacts`. Images
+opt in to the managers they contain:
+
+```dockerfile
+LABEL io.mineval.dependency-cache="npm,pip,go,cargo"
+```
+
+The legacy `io.mineval.npm-cache="v1"` label still enables npm. Omit both labels to
+disable caching. Opting in does not install missing package managers into an image.
+Each container gets private writable copies of only its authorized dependencies;
+the host store is never mounted. Installed packages, virtual environments,
+node_modules, extracted Go modules, Cargo targets, credentials and build outputs
+are never shared. Codex's cleared environment preserves these cache locations,
+the image's tool PATH and its Rust toolchain location (`RUSTUP_HOME`).
+
+Authorization comes from historical manifests and lockfiles, including nested
+projects. Benchmark runs and evaluations use the receipt-checked, independently
+approved frozen snapshot, including approved dependency changes. Preparation
+uses the preserved historical base, so new agent-written dependencies are downloaded
+normally until approved. Symlinked files/directories and generated directories
+(`node_modules`, `vendor`, `target`, `.venv`, `venv`, `.git`) are excluded.
+
+| Manager | Supported inputs and upstream sources | Isolated installation |
+| --- | --- | --- |
+| npm | Root/nested `package-lock.json` (v1–v3), `npm-shrinkwrap.json`; public npm registry HTTPS tarballs with SHA-256 or SHA-512 SRI | Native npm content cache at `/mineval-npm-cache`; use `npm ci` |
+| pip | Pinned SHA-256 requirements, recursive `-r` includes, `uv.lock`, `poetry.lock`, `Pipfile.lock`, `pylock.toml`; PyPI wheels/source archives and hashed direct `files.pythonhosted.org` wheels | `PIP_FIND_LINKS=/mineval-dependency-cache/pip/packages`; pip installs into each task's own environment |
+| Go | Root/nested `go.mod` + `go.sum`; recursively follows checksum-verified required module metadata from `proxy.golang.org` | Private `GOMODCACHE`; native Go verifies h1 checksums and selects versions |
+| Cargo | Root/nested `Cargo.lock`; crates.io archives with locked SHA-256 checksums | Private native Cargo archive cache; an optional directory source supports offline setup; build targets stay private |
+
+Python lockfiles authorize all locked platform wheels; pip selects compatible
+Python/ABI/platform tags. Downloaded source distributions are reusable, but locally
+built wheels and build-backend dependencies are not shared. Use `pip install
+--require-hashes -r requirements.txt` with a complete exported requirements file;
+add `--no-index` for an intentionally offline installation. A lockfile is an
+acquisition input, not an instruction for pip to install it directly. uv/Poetry
+commands that ignore `PIP_FIND_LINKS` must explicitly use the staged find-links
+location or export requirements for pip. pip may still query index metadata.
+
+Go's graph is rooted in `go.mod`, never every old entry in `go.sum`. Unreachable
+sum entries do not authorize artifacts. Go modules use the standard h1 hash of
+module files, not a raw ZIP checksum. Module path case escaping and exact versions
+are preserved. Missing historical transitive checksums, replace/exclude directives,
+private proxies, local replacements and toolchain downloads fall back to normal
+Go resolution and are reported. Native Go remains responsible for version selection.
+
+Cargo seeds only `.crate` archives into its private native cache. Its mutable
+registry index is not shared and may still download. Known stable/legacy cache
+identities are supported; images using another Cargo layout should declare
+`LABEL io.mineval.cargo-cache-id="index.crates.io-1949cf8c6b5b557f"` with the actual
+registry/cache directory name produced by that image's Cargo version. This identity
+is recorded in receipts. A different, unrecognized layout may redownload archives.
+
+When the complete crates.io set can be staged safely, Mineval also generates an
+optional Cargo directory source with per-file checksums. For an explicitly offline
+setup command, use `cargo --config
+/mineval-dependency-cache/cargo/vendor-config.toml build --frozen`. This replacement
+is not activated automatically, so an agent can add dependencies and use normal
+Cargo resolution. Git/alternate registry dependencies are reported and use normal
+Cargo resolution. Incomplete or invalid crates.io sets omit the optional vendor
+configuration. Build scripts may download their own resources, subject to the
+existing sandbox network policy.
+
+Only explicitly allowlisted public HTTPS services are contacted; host proxies,
+credentials and cookies are not used. Host acquisition performs bounded HTTP
+requests and integrity checks, never executes package managers, build backends,
+project scripts or Git on the host. `network=none` prevents all host acquisition;
+cache misses remain misses. Bridge-enabled tasks may fetch missing authorized
+archives before container startup. Downloads and cleanup hold a host lock, so
+concurrent cold requests reuse the first successful download. Entries are verified
+again before reuse and published atomically; failures never publish partial data.
+
+Sandbox-written cache data is never imported into this store. Unsupported formats
+(such as Yarn and pnpm), unpinned dependencies, custom indexes, arbitrary URLs,
+Git/local sources and generated artifacts use existing package-manager behavior.
+They are reported as unsupported, rather than counted as hits. Cache availability
+does not grant additional sandbox network access. Deleting a private run directory
+waits for successful container removal; a failed removal leaves it quarantined.
+
+Diagnostics, agent results and evaluation execution receipts include
+`download_cache`: hits, misses, successful acquisition counts, availability, exact
+versions, integrity algorithms/hashes, manifest paths, registry and hashed source
+identity. A hit means an artifact was staged; it does not prove a command used it.
+Raw source URLs and download exceptions are omitted from receipts to avoid secrets.
+These records are included before existing artifact receipts are sealed.
+
+The shared archive store evicts least recently used artifacts above 2 GiB.
+Public index URL metadata has a separate 128 MiB cap.
+Private copies remain usable during pruning. Inspect or prune both this store and
+the legacy npm store with:
+
+```sh
+mineval --data DATA cache status
+mineval --data DATA cache prune --max-mb 512
+mineval --data DATA cache prune --max-mb 0
+```
+
+A zero budget also clears public PyPI URL metadata. Active/quarantined task copies
+are not treated as shared entries and are never deleted by pruning.
+
 ## Reusable settings
 
 Optional `DATA/historical-settings.json` is loaded by default. `--settings FILE`

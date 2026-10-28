@@ -16,6 +16,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data", default=os.environ.get("MINEVAL_DATA", "mineval-data"))
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("doctor", help="verify rootless Docker and resource controller support")
+    cache = commands.add_parser('cache', help='inspect or prune reusable verified dependency downloads')
+    caches = cache.add_subparsers(dest='cache_action', required=True)
+    caches.add_parser('status')
+    prune_cache = caches.add_parser('prune')
+    prune_cache.add_argument('--max-mb', type=int, default=2048)
     observe = commands.add_parser('observe', help='serve the private historical benchmarking dashboard')
     observe.add_argument('--port', type=int, default=0, help='loopback port (default: choose a free port)')
     observe.add_argument('--image', help='trusted preloaded default preparation image')
@@ -197,6 +202,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     sandbox = DockerSandbox(context=args.context)
     try:
+        if args.action == 'cache':
+            from pathlib import Path
+            from .downloads import NpmCache
+            from .dependency_cache import DependencyCache
+            cache = NpmCache(Path(args.data) / 'download-cache/npm')
+            if args.cache_action == 'prune' and args.max_mb < 0:
+                raise ValueError('Cache size must be nonnegative')
+            result = cache.status() if args.cache_action == 'status' else cache.prune(args.max_mb * 1024**2)
+            dependencies = DependencyCache(Path(args.data) / 'download-cache/artifacts')
+            shared = dependencies.status() if args.cache_action == 'status' else dependencies.prune(args.max_mb * 1024**2)
+            print(json.dumps({'npm': result, 'dependencies': shared}))
+            return 0
         if args.action == 'arena':
             from .arena import Arena
             from .artifacts import read_json

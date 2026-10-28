@@ -99,6 +99,8 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
     if stage not in ('review', 'extraction'):
         raise ValueError('Unknown private preparation stage')
     runner = sandbox or DockerSandbox(context=context)
+    from .downloads import cache_task
+    cache_task(runner, store, task_id)
     with store.operation(task_id), tempfile.TemporaryDirectory(dir=store.root) as temp:
         temp = Path(temp)
         task, draft = store.task(task_id), store.draft(task_id)
@@ -158,6 +160,9 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
                     'model': adapter.model if adapter else 'unspecified', 'image_id': container.image_id,
                     'instructions_sha256': digest(prompts / 'prompt.txt'),
                     'cleanup_id': cleanup['cleanup_id']}
+        cache_stats = getattr(container, 'cache_stats', None)
+        if isinstance(cache_stats, dict):
+            producer['download_cache'] = cache_stats
         if stage == 'extraction':
             plan = read_json(control / 'selection.json')
             validate_plan(plan)

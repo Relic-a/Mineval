@@ -69,6 +69,8 @@ def session(store, task_id, command=None, *, context=None, stage='cleanup', adap
     if stage not in ('cleanup', 'extraction'):
         raise ValueError('Unknown preparation stage')
     runner = DockerSandbox(context=context)
+    from .downloads import cache_task
+    cache_task(runner, store, task_id)
     with store.operation(task_id):
         draft = store.draft(task_id)
         config = load_config(draft / 'control' / 'verify.json')
@@ -156,9 +158,13 @@ def cleanup_session(store, task_id, command, *, runner, adapter=None, auth_file=
         # Discard untrusted Git without invoking host Git on agent-writable metadata.
         clean = temp / 'clean'
         copy_worktree(workspace, clean)
+        producer = ({'harness': adapter.name, 'model': adapter.model} if adapter else
+                    {'harness': 'explicit-command', 'model': 'unspecified'})
+        cache_stats = getattr(container, 'cache_stats', None)
+        if isinstance(cache_stats, dict):
+            producer['download_cache'] = cache_stats
         save_attempt(store, task_id, clean, control, result,
                      image_id=container.image_id, diagnostic_ids=diagnostic_ids,
-                     producer={'harness': adapter.name, 'model': adapter.model} if adapter else
-                     {'harness': 'explicit-command', 'model': 'unspecified'},
+                     producer=producer,
                      input_hashes=input_hashes, instructions_sha256=digest(inputs / 'prompt.txt'))
         return result

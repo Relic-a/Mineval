@@ -110,6 +110,9 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
         with runner.container(spec) as container:
             container.start()
             report.update(image_id=container.image_id, container_id=container.id)
+            cache_stats = getattr(container, 'cache_stats', None)
+            if isinstance(cache_stats, dict):
+                report['download_cache'] = cache_stats
             deadline = time.monotonic() + limits.timeout_seconds
             for step in config['commands']:
                 budget = min(step.get('timeout_seconds', limits.timeout_seconds), deadline - time.monotonic())
@@ -147,6 +150,8 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
     if auth_file and not isinstance(adapter, CodexAdapter):
         raise ValueError('Only Codex may receive authentication')
     runner = sandbox or DockerSandbox()
+    from .downloads import cache_task
+    cache_task(runner, store, task_id)
     evaluation_id = identifier(evaluation_id or uuid4().hex)
     config = load_config(config_path, evaluation=True)
     if not any(c['kind'] == 'tests' for c in config['commands']):
@@ -163,6 +168,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
         if run['schema_version'] != 2 or run['status'] in ('running', 'reserved'):
             raise ValueError('Evaluation requires a finished benchmark attempt')
         revision = store._inspect_revision(task_id, run['prepared_revision']['version'])
+        cache_task(runner, store, task_id, version=revision['version'])
         if revision != run['prepared_revision']:
             raise ValueError('Run revision identity mismatch')
         frozen = task / 'versions' / revision['version']

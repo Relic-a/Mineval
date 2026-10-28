@@ -14,6 +14,15 @@ the target behavior, simplify requirements, remove relevant failing tests, or ad
 meaningless tests. Do not inspect this project's future solution or verification.
 Use `mineval verify` for a fresh, consistent sandbox copy of the current workspace
 and /mineval-control/verify.json; `mineval verify report` reads its latest report.
+Wait for verification to finish, including polling a still-running shell tool; a
+pending verification is not evidence. Install dependencies through verification
+commands, not in the cleaned source tree. Keep node_modules and download caches
+out of the cleaned tree. Images labeled io.mineval.npm-cache=v1 receive a private
+npm cache at /mineval-npm-cache; preserve NPM_CONFIG_CACHE and do not override it.
+Images opting into io.mineval.dependency-cache also provide task-private pip,
+Go and Cargo inputs. Preserve PIP_FIND_LINKS, GOMODCACHE and CARGO_HOME. Use native
+package managers to install into fresh task environments. Report uncached sources
+and build dependencies in limitations; never assume every download is cached.
 The broker has only these capabilities, no host Docker API. Expected base test
 failures are allowed. Annotate a tests command's expected_failure with its reason;
 this is a producer claim, not proof that a failure is legitimate.

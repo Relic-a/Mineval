@@ -7,4 +7,5 @@ WORKDIR /opt/mineval
 COPY pyproject.toml ./
 COPY mineval ./mineval
 RUN pip install --no-cache-dir .
+LABEL io.mineval.dependency-cache="pip"
 WORKDIR /workspace

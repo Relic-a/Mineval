@@ -54,6 +54,8 @@ def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False,
              workspace=None, config_path=None, persist=True):
     """Pause the owning prep container only long enough to copy its current draft."""
     runner = sandbox or DockerSandbox()
+    from .downloads import cache_task
+    cache_task(runner, store, task_id)
     task, draft = store.task(task_id), store.draft(task_id)
     report = {'diagnostic_id': uuid4().hex, 'status': 'environment_error', 'commands': [],
               'warnings': ['Nonzero tests may be the historical task; this report does not accept or reject it.']}
@@ -78,6 +80,9 @@ def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False,
             with runner.container(spec) as container:
                 container.start()
                 report.update(container_id=container.id, image_id=container.image_id, status='completed')
+                cache_stats = getattr(container, 'cache_stats', None)
+                if isinstance(cache_stats, dict):
+                    report['download_cache'] = cache_stats
                 import time
                 deadline = time.monotonic() + limits.timeout_seconds
                 stopped = False

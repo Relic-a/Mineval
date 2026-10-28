@@ -82,6 +82,9 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
     if auth_file and not isinstance(adapter, CodexAdapter):
         raise ValueError('Only Codex may receive authentication')
     run_id = identifier(run_id or uuid4().hex)
+    from .downloads import cache_task
+    from .agents import DockerSandbox
+    sandbox = cache_task(sandbox or DockerSandbox(context=context), store, task_id, version=version)
     with store.operation(task_id):
         revision = store._inspect_revision(task_id, version)
         frozen = store.task(task_id) / 'versions' / version

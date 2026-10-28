@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
@@ -255,6 +256,8 @@ class Container:
 class DockerSandbox:
     def __init__(self, *, context: str | None = None):
         self._cli = DockerCLI(context)
+        self.npm_cache = None
+        self.dependency_cache = None
 
     def check(self) -> dict:
         """Fail closed if rootless isolation or resource enforcement is absent."""
@@ -274,6 +277,62 @@ class DockerSandbox:
 
     @contextmanager
     def container(self, spec: SandboxSpec) -> Iterator[Container]:
+        if self.dependency_cache is not None and spec.workspace is not None:
+            image = self._cli.json('image', 'inspect', spec.image)[0]
+            labels = image.get('Config', {}).get('Labels') or {}
+            managers = set(labels.get('io.mineval.dependency-cache', '').split(',')) & {'npm', 'pip', 'go', 'cargo'}
+            if labels.get('io.mineval.npm-cache') == 'v1':
+                managers.add('npm')
+            if managers:
+                self.check()
+                try:
+                    local, stats = self.dependency_cache.prepare(sorted(managers), network=spec.network,
+                        cargo_cache_id=labels.get('io.mineval.cargo-cache-id'))
+                except (OSError, ValueError) as exc:
+                    # An unavailable optional cache must not prevent normal setup.
+                    with self._container(spec) as container:
+                        container.cache_stats = {'error_kind': type(exc).__name__}
+                        yield container
+                    return
+                lifecycle = {'created': False, 'removed': False}
+                try:
+                    with self._container(spec, dependency_cache_path=local,
+                                         cache_managers=managers, lifecycle=lifecycle) as container:
+                        container.cache_stats = stats
+                        yield container
+                finally:
+                    if not lifecycle['created'] or lifecycle['removed']:
+                        shutil.rmtree(local)
+                return
+        if self.npm_cache is None or spec.workspace is None:
+            with self._container(spec) as container:
+                yield container
+            return
+        image = self._cli.json('image', 'inspect', spec.image)[0]
+        if (image.get('Config', {}).get('Labels') or {}).get('io.mineval.npm-cache') != 'v1':
+            with self._container(spec) as container:
+                yield container
+            return
+        local, stats = self.npm_cache.prepare()
+        lifecycle = {'created': False, 'removed': False}
+        try:
+            with self._container(spec, npm_cache_path=local, lifecycle=lifecycle) as container:
+                container.cache_stats = stats
+                yield container
+        finally:
+            # Never inspect or remove agent-writable files while a writer may remain.
+            if not lifecycle['created'] or lifecycle['removed']:
+                try:
+                    self.npm_cache.collect(local, stats)
+                except (OSError, ValueError) as exc:
+                    # Cache availability must not change a task's result.
+                    stats['error_kind'] = type(exc).__name__
+                finally:
+                    shutil.rmtree(local)
+
+    @contextmanager
+    def _container(self, spec: SandboxSpec, *, npm_cache_path=None, dependency_cache_path=None,
+                   cache_managers=(), lifecycle=None) -> Iterator[Container]:
         """Create, yield, and remove one container, including anonymous volumes.
 
         Tmpfs content exists only while running. A managed bind workspace persists
@@ -303,6 +362,26 @@ class DockerSandbox:
             position = args.index("--log-driver=local")
             args[position:position + 4] = ["--log-driver=none"]
         mounts = []
+        if dependency_cache_path is not None:
+            base = '/mineval-dependency-cache'
+            environment = []
+            if 'npm' in cache_managers:
+                npm_cache_path = dependency_cache_path / 'npm'
+            if 'pip' in cache_managers:
+                environment += [f'--env=PIP_FIND_LINKS={base}/pip/packages', '--env=PIP_CACHE_DIR=/tmp/pip-cache']
+            if 'go' in cache_managers:
+                environment += [f'--env=GOMODCACHE={base}/go', '--env=GOCACHE=/tmp/go-build']
+            if 'cargo' in cache_managers:
+                environment += [f'--env=CARGO_HOME={base}/cargo']
+            position = args.index('--entrypoint')
+            args[position:position] = environment
+            mounts += ['--mount', f'type=bind,src={dependency_cache_path},dst={base},bind-propagation=rprivate']
+        if npm_cache_path is not None:
+            position = args.index('--entrypoint')
+            args[position:position] = ['--env=NPM_CONFIG_CACHE=/mineval-npm-cache',
+                                      '--env=NPM_CONFIG_PREFER_OFFLINE=true',
+                                      '--env=NPM_CONFIG_AUDIT=false', '--env=NPM_CONFIG_FUND=false']
+            mounts += ['--mount', f'type=bind,src={npm_cache_path},dst=/mineval-npm-cache,bind-propagation=rprivate']
         if spec.workspace is None:
             mounts += ["--tmpfs", f"/workspace:rw,nosuid,nodev,size={limits.workspace_mb}m,mode=1777"]
         else:
@@ -317,6 +396,8 @@ class DockerSandbox:
         args[position:position] = mounts
         failure = None
         try:
+            if lifecycle is not None:
+                lifecycle['created'] = True
             output, _, _ = self._cli.call(*args)
             container_id = output.strip()
             if len(container_id) != 64 or any(c not in "0123456789abcdef" for c in container_id):
@@ -328,6 +409,8 @@ class DockerSandbox:
         finally:
             try:
                 self._cli.call("rm", "--force", "--volumes", name)
+                if lifecycle is not None:
+                    lifecycle['removed'] = True
             except BaseException as cleanup_error:
                 if failure is None:
                     raise

@@ -44,7 +44,21 @@ if [ -f /mineval-input/auth.json ]; then
   cp /mineval-input/auth.json /tmp/codex/auth.json
   chmod 600 /tmp/codex/auth.json
 fi
-exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp CODEX_HOME=/tmp/codex \
+npm_cache=/tmp/.npm
+if [ -d /mineval-npm-cache ]; then npm_cache=/mineval-npm-cache; fi
+dependency_env=''
+if [ -d /mineval-dependency-cache/pip ]; then
+  dependency_env="$dependency_env PIP_FIND_LINKS=/mineval-dependency-cache/pip/packages PIP_CACHE_DIR=/tmp/pip-cache"
+fi
+if [ -d /mineval-dependency-cache/go ]; then
+  dependency_env="$dependency_env GOMODCACHE=/mineval-dependency-cache/go GOCACHE=/tmp/go-build"
+fi
+if [ -d /mineval-dependency-cache/cargo ]; then
+  dependency_env="$dependency_env CARGO_HOME=/mineval-dependency-cache/cargo"
+fi
+exec env -i PATH="$PATH" HOME=/tmp CODEX_HOME=/tmp/codex RUSTUP_HOME="${RUSTUP_HOME:-/tmp/.rustup}" \
+  $dependency_env \
+  NPM_CONFIG_CACHE="$npm_cache" NPM_CONFIG_PREFER_OFFLINE=true NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false \
   codex exec --ignore-user-config --ignore-rules --ephemeral \
   --dangerously-bypass-approvals-and-sandbox --cd /workspace \
   --model "$1" --output-schema /mineval-input/schema.json \
@@ -210,6 +224,9 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
                       'instructions_sha256': digest(inputs / 'prompt.txt'),
                       'workspace_sha256': digest(destination / 'workspace.tar.gz'),
                       'completion': report, 'solution_lookup_evidence': 'self-reported'}
+            cache_stats = getattr(container, 'cache_stats', None) if 'container' in locals() else None
+            if isinstance(cache_stats, dict):
+                result['download_cache'] = cache_stats
             write_json(destination / 'result.json', result)
         except BaseException:
             shutil.rmtree(destination)
