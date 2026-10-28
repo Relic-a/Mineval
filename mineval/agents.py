@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
+import os
 import tempfile
 import time
 
@@ -60,7 +61,7 @@ exec env -i PATH="$PATH" HOME=/tmp CODEX_HOME=/tmp/codex RUSTUP_HOME="${RUSTUP_H
   $dependency_env \
   NPM_CONFIG_CACHE="$npm_cache" NPM_CONFIG_PREFER_OFFLINE=true NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false \
   codex exec --ignore-user-config --ignore-rules --ephemeral \
-  --dangerously-bypass-approvals-and-sandbox --cd /workspace \
+  --yolo --cd /workspace \
   --model "$1" --output-schema /mineval-input/schema.json \
   --output-last-message /mineval-control/final.json - \
   < /mineval-input/prompt.txt > /dev/null 2>&1
@@ -136,7 +137,7 @@ def completion(path):
 
 
 def run_agent(workspace, instructions, destination, *, image, adapter=None,
-              context=None, limits=None, auth_file=None, sandbox=None, capture_interrupt=False):
+              context=None, limits=None, auth_file=None, sandbox=None, capture_interrupt=False, disposable=False, history_receipt=None):
     """Input is read-only to the host runner. Only disposable copies are mounted.
 
     Input must be a materialized historical workspace, never a modern clone.
@@ -156,11 +157,14 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
     limits = limits or Limits()
     runner = sandbox or DockerSandbox(context=context)
     # Private store and input source directories are never mounted.
-    with tempfile.TemporaryDirectory(prefix='mineval-agent-') as temp:
+    with tempfile.TemporaryDirectory(prefix='mineval-agent-', dir=workspace.parent if disposable else None) as temp:
         temp = Path(temp)
         project, inputs, control = temp / 'workspace', temp / 'inputs', temp / 'control'
         inputs.mkdir(); control.mkdir()
-        copy_tree(workspace, project, allow_git=True)
+        if disposable:
+            os.rename(workspace, project)
+        else:
+            copy_tree(workspace, project, allow_git=True)
         # Reject external links and tampered metadata before invoking host Git.
         metadata = project / '.git'
         permitted = {'HEAD', 'config', 'description', 'index', 'objects', 'refs', 'logs', 'branches'}
@@ -175,8 +179,14 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
             raise ValueError('Unexpected input Git configuration')
         if (metadata / 'objects' / 'info').exists() and any((metadata / 'objects' / 'info').iterdir()):
             raise ValueError('External Git object storage is forbidden')
-        base = git(project, 'rev-parse', 'HEAD').decode().strip()
-        validate(project, base)
+        if history_receipt is not None:
+            # Internal callers may supply the receipt from a provenance-checked
+            # materialized template. Ordinary agent-run inputs still get full fsck.
+            if inventory(metadata, allow_git=True) != history_receipt:
+                raise ValueError('Prepared history receipt mismatch')
+        else:
+            base = git(project, 'rev-parse', 'HEAD').decode().strip()
+            validate(project, base)
         (inputs / 'prompt.txt').write_text(POLICY + '\nTask:\n' + instructions)
         if auth_file:
             provision_auth(auth_file, inputs / 'auth.json')

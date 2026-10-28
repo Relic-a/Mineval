@@ -195,8 +195,10 @@ to adversarial interpreter manipulation or guarantee that the chosen commands te
 the right behavior. Inspect the retained evidence and command selection.
 
 Optionally supply `--command EXECUTABLE ...` or `--adapter codex --model MODEL`
-(and, if needed, `--auth-file FILE`) to invoke a separate evaluator in the trusted
-image. It sees the saved candidate, frozen task statement, extraction plan/source
+(and, if needed, `--auth-file FILE`) to enable a separate evaluator in the trusted
+image. Passing private checks skip it. Only declared behavioral failures or
+inconclusive outcomes invoke it; infrastructure failures retain their error
+classification. `--effort` defaults to medium and `--evaluator-timeout` to 180 seconds. It sees the saved candidate, frozen task statement, extraction plan/source
 bytes, configuration and **original execution results**. It writes
 `/mineval-control/assessment.json`:
 
@@ -221,9 +223,10 @@ pass incorrect code. Unjustifiable/flaky evidence gets `inconclusive_reason`;
 execution problems get optional `error_reason`. Adaptations execute once in another
 fresh copy of the **original saved candidate**, so evaluator edits to production
 code or state from the baseline test execution cannot affect it. Infrastructure
-errors cannot be promoted to pass/fail by an evaluator. A test command's ordinary
-execution error (for example, an import mismatch) may receive an evidence-backed
-adaptation; only the fresh execution can establish a new verdict. Startup/setup
+errors cannot be promoted to pass/fail by an evaluator. A test interface mismatch
+may receive an adaptation when its exit code is declared behavioral/inconclusive
+(for example, `inconclusive_exit_codes: [2, 3]` for a runner's collection errors).
+Unknown exit codes remain errors. Only fresh execution can establish a new verdict. Startup/setup
 failures, missing executables, timeout and OOM remain errors. Original and adapted
 outcomes remain inspectable; provenance/shape are validated mechanically, behavioral
 equivalence requires evaluator judgment and human inspection. No transcripts,
@@ -303,7 +306,7 @@ verdict. Ctrl-C and CLI SIGTERM remove the container and retain a safe partial t
 when possible. CLI exit codes are 0 for completed, 124 for timeout, 130 for cancellation,
 and 125 for run errors/crashes. After SIGKILL or host failure an identity can remain
 `running`; explicitly seal it with `bench recover TASK RUN` after checking the runner
-has exited. Recovery takes the task lock, records `unclean_host_exit`, and never reruns
+has exited. Recovery takes exclusive ownership of that run, records `unclean_host_exit`, and never reruns
 an agent or claims a task failure. Forced host termination can leave an orphan container
 or disposable staging directory; inspect managed Docker resources before recovery.
 
@@ -632,8 +635,10 @@ copy at `/workspace`. The agent process runs entirely inside rootless Docker;
 there is no host execution fallback.
 
 New Git intake retains exactly the objects reachable from the task base, including
-merge parents. A fresh Git repository is reconstructed and every stored object is
-checked against that closure. Future refs/tags, dangling objects, reflogs, remotes,
+merge parents. A clean Git repository is reconstructed and every stored object is
+checked against that closure. Verified starting trees/history are then cached by
+frozen artifact receipt and privately cloned, using filesystem copy-on-write where
+available. Ordinary external agent inputs still receive full Git validation. Future refs/tags, dangling objects, reflogs, remotes,
 hooks, configuration and alternates are not copied. Shallow sources fail closed.
 Pre-base content/messages remain visible unchanged. Preparation drafts and tree-only
 archives retain the existing codec; materialization attaches history separately,
@@ -719,3 +724,10 @@ rm -rf -- "$TASK_IMAGE_CONTEXT"
 The context above includes binaries only. Authentication is provisioned at run time,
 never during image building. The native recipe checks Bash, Git, Python and Codex at
 build time; project-specific runtimes still need to be added explicitly.
+
+
+Incremental preparation, bounded workflow concurrency, conditional evaluation,
+review-gated publication and cache budgets are described in
+[Historical workflows](docs/historical-workflows.md). Reproducible local rootless
+measurements and remaining reuse limits are in
+[Incremental pipeline validation](docs/incremental-pipeline.md).

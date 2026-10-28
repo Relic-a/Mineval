@@ -118,6 +118,13 @@ class Memory:
             self.event(db, 'claim', {'id': rid, 'inputs': ids, 'model': model})
             return {'reservation_id': rid, 'model': model, 'inputs': [self.decode(r) for r in rows[:2]]}
 
+    def release(self, rid):
+        """A failed inference releases its inputs immediately for an explicit retry."""
+        with self.transaction() as db:
+            changed = db.execute("UPDATE reservations SET state='failed' WHERE id=? AND state='claimed'", (rid,)).rowcount
+            if changed:
+                self.event(db, 'release', {'id': rid})
+
     def inspect_claim(self, rid):
         with self.connect() as db:
             r = db.execute('SELECT * FROM reservations WHERE id=?', (rid,)).fetchone()

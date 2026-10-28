@@ -61,6 +61,31 @@ class SandboxTests(unittest.TestCase):
         name = create[create.index("--name") + 1]
         self.cli.call.assert_called_with("rm", "--force", "--volumes", name)
 
+    def test_image_digest_is_reused_but_tags_and_daemon_checks_are_fresh(self):
+        for reference in ('example:tag', IMAGE_ID, 'example:tag'):
+            with self.sandbox.container(SandboxSpec(reference, ('true',))):
+                pass
+        calls = self.cli.json.call_args_list
+        self.assertEqual(sum(c.args[0] == 'info' for c in calls), 3)
+        self.assertEqual(sum(c.args[0] == 'image' for c in calls), 2)
+
+    def test_cooperative_cancellation_kills_waiting_container(self):
+        import threading
+        cancelled, killed = threading.Event(), threading.Event()
+        cli = Mock()
+        def call(*argv, **kwargs):
+            if argv[0] == 'wait':
+                self.assertTrue(killed.wait(2))
+            elif argv[0] == 'kill':
+                killed.set()
+            return ('', '', False)
+        cli.call.side_effect = call
+        cancelled.set()
+        container = Container(cli, CONTAINER_ID, IMAGE_ID, cancel_event=cancelled)
+        with self.assertRaises(KeyboardInterrupt):
+            container.wait(5)
+        cli.call.assert_any_call('kill', CONTAINER_ID)
+
     def test_protected_checks_keep_container_cleanup_identity(self):
         from pathlib import Path
         import tempfile

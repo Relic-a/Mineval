@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 
 from .agents import CodexAdapter, provision_auth
-from .artifacts import read_json, write_json
+from .artifacts import lock, read_json, write_json
 from .memory import Memory, evaluation_source
 from .sandbox import DockerSandbox, Limits, SandboxSpec
 
@@ -41,6 +41,12 @@ def infer(store, value, *, image, model='gpt-6-luna', effort='medium', context=N
 
 
 def review_evaluation(store, task, evaluation_id, **options):
+    from .preparation import identifier
+    with lock(store.root / 'locks/qualitative' / identifier(task) / (identifier(evaluation_id) + '.lock'), wait=True):
+        return _review_evaluation(store, task, evaluation_id, **options)
+
+
+def _review_evaluation(store, task, evaluation_id, **options):
     model, source, evidence = evaluation_source(store, task, evaluation_id)
     memory = Memory(store)
     prior = memory.history(model)
@@ -79,5 +85,9 @@ def compact(store, model, **options):
     claim = memory.claim(model)
     if not claim:
         return None
-    body = infer(store, {'mode': 'compaction', **claim}, **options)
-    return memory.commit(claim['reservation_id'], body)
+    try:
+        body = infer(store, {'mode': 'compaction', **claim}, **options)
+        return memory.commit(claim['reservation_id'], body)
+    except BaseException:
+        memory.release(claim['reservation_id'])
+        raise

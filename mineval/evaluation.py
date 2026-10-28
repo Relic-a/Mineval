@@ -6,7 +6,7 @@ import tempfile
 import time
 from uuid import uuid4
 
-from .artifacts import copy_tree, digest, inventory, read_json, relative, unpack, write_json
+from .artifacts import lock, copy_tree, digest, inventory, read_json, relative, unpack, write_json
 from .benchmark import inspect_attempt, now, output_path
 from .preparation import identifier
 from .review import checked, seal, strings
@@ -15,8 +15,13 @@ from .verification import load_config
 
 POLICY = 'behavior-preserving-private-checks-v1'
 PROMPT = """You are an independent evaluator of a saved candidate, not its coding agent.
-Read /mineval-input/task.json, verification/extraction-manifest.json, config.json and baseline-results.json,
-and inspect the candidate workspace. Preserve the original behavioral requirements.
+Start with /mineval-input/baseline-results.json and task.json. Inspect only failing
+checks and the candidate code they exercise; consult verification/extraction-manifest.json
+for original evidence. Decide promptly whether behavior is wrong or only the private
+check interface differs. For incorrect behavior, report no adaptations. Do not search
+for unrelated improvements, rerun successful checks, install tools or fix production.
+For a legitimate alternative, propose the smallest interface change preserving every
+behavioral assertion. Stop when evidence supports that decision.
 Write only /mineval-control/assessment.json with exactly:
 {adaptations: [{path, content, reason, evidence: [{commit, path}]}],
  limitations: [string], inconclusive_reason: string|null, error_reason?: string|null}.
@@ -142,7 +147,7 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
 
 
 def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox=None,
-             command=None, adapter=None, auth_file=None):
+             command=None, adapter=None, auth_file=None, evaluator_timeout=180):
     """Config is an explicit trusted operator selection; evaluator proposes adaptations."""
     from .agents import CodexAdapter, provision_auth
     if adapter and (command or not isinstance(adapter, CodexAdapter)):
@@ -158,7 +163,10 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
         raise ValueError('Evaluation requires at least one private tests command')
     if any(c.get('expected_failure') for c in config['commands']):
         raise ValueError('Evaluation cannot exempt expected failures')
-    with store.operation(task_id, allow_rejected=True), tempfile.TemporaryDirectory(dir=store.root) as temp:
+    with (lock(store.root / 'locks/evaluations' / identifier(task_id) / (identifier(run_id) + '.lock')),
+          lock(store.root / 'locks/evaluation-records' / identifier(task_id) / (evaluation_id + '.lock')),
+          store.operation(task_id, allow_rejected=True, shared=True),
+          tempfile.TemporaryDirectory(dir=store.root) as temp):
         temp = Path(temp)
         task = store.task(task_id)
         record_path = task / 'evaluations' / (evaluation_id + '.json')
@@ -179,7 +187,11 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
         paths = [str(relative(a['path'])) for a in artifacts]
         if len(set(paths)) != len(paths):
             raise ValueError('Evaluation needs one authoritative source per destination path')
-        previous = [store._inspect_record(task_id, 'evaluations', p.stem) for p in (task / 'evaluations').glob('*.json')]
+        # Other runs may be between atomic record and receipt publication. Only
+        # this run's records affect its version, and its run lock excludes writers.
+        previous = [store._inspect_record(task_id, 'evaluations', p.stem)
+                    for p in (task / 'evaluations').glob('*.json')
+                    if read_json(p)['run_id'] == run_id]
         version = 1 + max((r.get('evaluation_version', 0) for r in previous if r['run_id'] == run_id), default=0)
         staged = temp / 'evidence'; staged.mkdir()
         write_json(staged / 'config.json', config)
@@ -193,7 +205,8 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
             image = pinned
         try:
             if not run.get('output_available'):
-                report.update(verdict='inconclusive', explanation='Run has no saved candidate workspace.')
+                report.update(verdict='error', error_kind=run.get('failure_kind') or 'missing_output',
+                    explanation='Run has no saved candidate workspace; execution infrastructure failed.')
             else:
                 archive = output_path(store, task_id, run_id) / 'agent/workspace.tar.gz'
                 unpack(archive, temp / 'candidate')
@@ -201,7 +214,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                     verification, artifacts, [], config, image, runner)
                 report.update(baseline)
                 assessment = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None}
-                if command or adapter:
+                if (command or adapter) and baseline['verdict'] in ('fail', 'inconclusive'):
                     # Agent sees copies and proposes a bounded report; never edits executed tree.
                     copy_tree(temp / 'candidate', temp / 'agent')
                     control = temp / 'control'; control.mkdir()
@@ -215,7 +228,8 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                         command = adapter.stage(inputs)
                     if auth_file:
                         provision_auth(auth_file, inputs / 'auth.json')
-                    spec = SandboxSpec(image, tuple(command), Limits(**config.get('limits', {})),
+                    agent_limits = config.get('limits', {}) | {'timeout_seconds': evaluator_timeout}
+                    spec = SandboxSpec(image, tuple(command), Limits(**agent_limits),
                         workspace=temp / 'agent', control=control, inputs=inputs, network='bridge', retain_logs=False)
                     with runner.container(spec) as container:
                         container.start()
@@ -230,16 +244,9 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                 report['adaptations'] = assessment['adaptations']
                 report['limitations'].extend(assessment['limitations'])
                 write_json(staged / 'assessment.json', assessment)
-                # An interface/collection error in a test can be repaired by a
-                # justified adaptation. Startup, setup, timeout, OOM and missing
-                # executable failures must remain infrastructure errors.
-                last_check = baseline['commands'][-1] if baseline['commands'] else {}
-                can_adapt = baseline['verdict'] != 'error' or (
-                    last_check.get('kind') == 'tests'
-                    and last_check.get('status') == 'error'
-                    and isinstance(last_check.get('exit_code'), int)
-                    and 0 < last_check['exit_code'] < 125
-                    and not last_check.get('timed_out') and not last_check.get('oom_killed'))
+                # Only declared behavioral/inconclusive outcomes may be adapted.
+                # Unknown exit codes and infrastructure errors never invoke AI.
+                can_adapt = baseline['verdict'] in ('fail', 'inconclusive')
                 if assessment.get('error_reason'):
                     report.update(verdict='error', explanation=assessment['error_reason'])
                 elif assessment['inconclusive_reason'] and baseline['verdict'] != 'error':
@@ -289,6 +296,9 @@ def compare(store, definition):
             if not isinstance(ref, dict) or set(ref) != {'task_id', 'evaluation_id'}:
                 raise ValueError('Select task_id and evaluation_id explicitly')
             record = store.inspect_evaluation(**ref)
+            from .publication import published
+            if not published(store, ref['task_id'], record['run_id'], record['evaluation_id']):
+                raise ValueError('Required evaluation and review are not complete for this assessment')
             if record['schema_version'] != 2:
                 raise ValueError('Comparison requires executed evaluations')
             key = (ref['task_id'], record['prepared_revision']['version'])

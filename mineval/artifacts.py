@@ -1,6 +1,7 @@
 """Bounded, link-free artifact operations. Never follow imported filesystem links."""
 from contextlib import contextmanager
 import fcntl
+from functools import lru_cache
 import hashlib
 import gzip
 import json
@@ -15,12 +16,37 @@ MAX_BYTES = 512 * 1024 * 1024
 MAX_FILES = 100_000
 
 
-def digest(path):
+@lru_cache(maxsize=32768)
+def _digest(path, identity):
     h = hashlib.sha256()
     with Path(path).open('rb') as f:
         for block in iter(lambda: f.read(1024 * 1024), b''):
             h.update(block)
+    if _identity(Path(path).stat()) != identity:
+        raise ValueError('Artifact changed while hashing')
     return h.hexdigest()
+
+
+def _identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def digest(path):
+    # Cache bytes, not trust decisions: every call re-stats, every inventory still
+    # checks membership, type and executable bits. ctime detects restored mtimes.
+    path = Path(path).absolute()
+    return _digest(str(path), _identity(path.stat()))
+
+
+def clone_file(source, target):
+    """Private inode, using filesystem CoW where available; never hardlink."""
+    with open(source, 'rb') as src, open(target, 'wb') as dst:
+        try:
+            fcntl.ioctl(dst.fileno(), 0x40049409, src.fileno())  # FICLONE
+        except OSError:
+            shutil.copyfileobj(src, dst)
+    shutil.copymode(source, target)
+    return str(target)
 
 
 def write_json(path, value):
@@ -85,7 +111,7 @@ def inventory(root, *, allow_git=False, skip_root_git=False):
 def copy_tree(source, target, *, allow_git=False):
     # The owner must quiesce writers. Detect accidental external changes as well.
     before = inventory(source, allow_git=allow_git)
-    shutil.copytree(source, target)
+    shutil.copytree(source, target, copy_function=clone_file)
     if inventory(source, allow_git=allow_git) != before or inventory(target, allow_git=allow_git) != before:
         raise ValueError('Source changed during copy; stop external writers and retry')
     return before
@@ -95,7 +121,7 @@ def copy_worktree(source, target):
     """Copy an agent tree without reading or trusting its top-level Git metadata."""
     source = Path(source)
     before = inventory(source, skip_root_git=True)
-    shutil.copytree(source, target, ignore=lambda directory, names:
+    shutil.copytree(source, target, copy_function=clone_file, ignore=lambda directory, names:
                     {'.git'} if Path(directory) == source else set())
     if inventory(source, skip_root_git=True) != before or inventory(target) != before:
         raise ValueError('Source changed during copy; stop external writers and retry')
@@ -148,12 +174,12 @@ def pack(source, target):
 
 
 @contextmanager
-def lock(path):
+def lock(path, *, wait=False, shared=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a') as f:
         try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(f, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError as exc:
             raise ValueError('Task is busy in another preparation operation') from exc
         try:

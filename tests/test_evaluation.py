@@ -105,6 +105,14 @@ class EvaluationTests(HistoryFixture):
         self.assertEqual(failed['verdict'], 'fail')
         self.assertIn('AssertionError', failed['commands'][0]['stderr'])
 
+    def test_passing_checks_do_not_launch_evaluator(self):
+        self.saved()
+        runner = EvaluationRunner({'deliberately': 'invalid'})
+        result = self.assess(runner=runner, command=['must-not-run'])
+        self.assertEqual(result['verdict'], 'pass')
+        self.assertIsNone(result['evaluator'])
+        self.assertEqual(len(runner.specs), 1)
+
     def test_alternative_interface_adaptation_preserves_assertion_and_records_evidence(self):
         self.saved(code='def result(): return 42\n')
         assessment = {'adaptations': [{'path': 'tests/test_answer.py',
@@ -130,6 +138,7 @@ class EvaluationTests(HistoryFixture):
         cfg['commands'][0]['argv'] = ['python3', '-c',
             "import runpy, sys\ntry:\n runpy.run_path('tests/test_answer.py')\n"
             "except ImportError:\n sys.exit(3)\nexcept AssertionError:\n sys.exit(1)"]
+        cfg['commands'][0]['inconclusive_exit_codes'] = [2, 3]
         write_json(self.config, cfg)
         assessment = {'adaptations': [{'path': 'tests/test_answer.py',
             'content': 'from app import result\nassert result() == 42\n',
@@ -140,20 +149,20 @@ class EvaluationTests(HistoryFixture):
             self.saved(run_id, code=f'def result(): return {answer}\n')
             runner = EvaluationRunner(assessment)
             result = self.assess(run_id, runner=runner, command=['fixture-evaluator'])
-            self.assertEqual(runner.baseline['verdict'], 'error')
+            self.assertEqual(runner.baseline['verdict'], 'inconclusive')
             self.assertEqual(runner.baseline['commands'][0]['exit_code'], 3)
             self.assertEqual(result['verdict'], expected, result)
             self.assertNotIn('error_kind', result)
             self.assertEqual(len(runner.specs), 3)
             self.assertNotEqual(runner.specs[0].workspace, runner.specs[2].workspace)
             evidence = self.store.task('example') / 'evaluation-evidence' / result['evaluation_id']
-            self.assertEqual(read_json(evidence / 'baseline/execution.json')['verdict'], 'error')
+            self.assertEqual(read_json(evidence / 'baseline/execution.json')['verdict'], 'inconclusive')
             self.assertEqual(read_json(evidence / 'adapted/execution.json')['verdict'], expected)
 
-        # A proposed adaptation that still cannot import its interface stays error.
+        # An adaptation that still cannot import its interface stays inconclusive.
         assessment['adaptations'][0]['content'] = 'from app import missing\nassert missing() == 42\n'
         self.assertEqual(self.assess('correct-interface', runner=EvaluationRunner(assessment),
-                                    command=['fixture-evaluator'])['verdict'], 'error')
+                                    command=['fixture-evaluator'])['verdict'], 'inconclusive')
 
     def test_adaptations_cannot_override_infrastructure_failure(self):
         self.saved()
@@ -165,28 +174,31 @@ class EvaluationTests(HistoryFixture):
         for mode in ('command-error', 'timeout', 'oom'):
             runner = EvaluationRunner(assessment, mode=mode)
             self.assertEqual(self.assess(runner=runner, command=['fixture-evaluator'])['verdict'], 'error')
-            self.assertEqual(len(runner.specs), 2)
+            self.assertEqual(len(runner.specs), 1)
         cfg = read_json(self.config)
         cfg['commands'].insert(0, {'name': 'setup', 'kind': 'setup', 'argv': ['sh', '-c', 'exit 3']})
         write_json(self.config, cfg)
         runner = EvaluationRunner(assessment)
         self.assertEqual(self.assess(runner=runner, command=['fixture-evaluator'])['verdict'], 'error')
-        self.assertEqual(len(runner.specs), 2)
+        self.assertEqual(len(runner.specs), 1)
 
     def test_inconclusive_and_infrastructure_error_are_not_task_failure(self):
         self.saved()
         assessment = {'adaptations': [], 'limitations': ['Cannot reproduce intermittent source requirement'],
                       'inconclusive_reason': 'Original evidence is flaky and cannot establish the behavior.'}
+        cfg = read_json(self.config)
+        cfg['commands'][0]['argv'] = ['sh', '-c', 'exit 2']
+        write_json(self.config, cfg)
         result = self.assess(runner=EvaluationRunner(assessment), command=['fixture-evaluator'])
         self.assertEqual(result['verdict'], 'inconclusive')
-        self.assertEqual(result['commands'][0]['status'], 'passed')
+        self.assertEqual(result['commands'][0]['status'], 'inconclusive')
         for mode in ('startup-error', 'command-error', 'timeout'):
             result = self.assess(runner=EvaluationRunner(mode=mode))
             self.assertEqual(result['verdict'], 'error', result)
             self.assertNotIn('private error text', json.dumps(result))
         benchmark.run(self.store, 'example', self.version, run_id='no-output',
                       sandbox=EvaluationRunner(mode='startup-error'))
-        self.assertEqual(self.assess('no-output')['verdict'], 'inconclusive')
+        self.assertEqual(self.assess('no-output')['verdict'], 'error')
 
     def test_command_outcome_contract_and_evaluator_execution_error(self):
         self.saved()

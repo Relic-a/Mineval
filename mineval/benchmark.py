@@ -1,4 +1,4 @@
-"""Sequential benchmark attempts; immutable identities and separately sealed results.
+"""Isolated benchmark attempts; immutable identities and separately sealed results.
 
 Only materialized historical workspaces cross the agent boundary. Results describe
 harness execution, never whether the coding task was solved (evaluation is separate).
@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 from .agents import CodexAdapter, FakeAdapter, POLICY, run_agent
-from .artifacts import digest, inventory, read_json, unpack, write_json
+from .artifacts import lock, digest, inventory, read_json, unpack, write_json
 from .preparation import identifier
 from .sandbox import Limits
 
@@ -28,7 +28,7 @@ def output_path(store, task_id, run_id):
 
 
 def inspect_attempt(store, task_id, run_id):
-    """Caller holds task lock. Old reserved identities remain readable unchanged."""
+    """Caller holds shared task ownership. Old reserved identities remain readable unchanged."""
     identity = store._inspect_record(task_id, 'runs', run_id)
     target = output_path(store, task_id, run_id)
     if not target.exists():
@@ -85,7 +85,7 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
     from .downloads import cache_task
     from .agents import DockerSandbox
     sandbox = cache_task(sandbox or DockerSandbox(context=context), store, task_id, version=version)
-    with store.operation(task_id):
+    with lock(store.root / 'locks/runs' / identifier(task_id) / (run_id + '.lock')), store.operation(task_id, shared=True):
         revision = store._inspect_revision(task_id, version)
         frozen = store.task(task_id) / 'versions' / version
         config = read_json(frozen / 'verify-config.json')
@@ -127,10 +127,11 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
             terminal = {'status': 'error', 'failure_kind': 'infrastructure', 'output_available': False}
             try:
                 # materialize verifies all frozen receipts, but exports only tree/history.
-                store._materialize(task_id, version, temp / 'historical')
+                starting = store._materialize(task_id, version, temp / 'historical')
                 result = run_agent(temp / 'historical', instructions, temp / 'agent-output',
                     image=image, adapter=adapter, context=context, limits=limits,
-                    auth_file=auth_file, sandbox=sandbox, capture_interrupt=True)
+                    auth_file=auth_file, sandbox=sandbox, capture_interrupt=True,
+                    disposable=True, history_receipt=starting.get('history_receipt'))
                 shutil.move(temp / 'agent-output', staged / 'agent')
                 status = result['status']
                 invalid_completion = status == 'error' and result['exit_code'] == 0
@@ -175,7 +176,7 @@ def recover(store, task_id, run_id):
     The task lock excludes an active runner. This never asserts task failure or
     reruns work, and cannot recover an uncollected workspace after SIGKILL.
     """
-    with store.operation(task_id, allow_rejected=True):
+    with lock(store.root / 'locks/runs' / identifier(task_id) / (identifier(run_id) + '.lock')), store.operation(task_id, allow_rejected=True, shared=True):
         record = inspect_attempt(store, task_id, run_id)
         if record['status'] != 'running':
             raise ValueError('Only an unfinished benchmark attempt can be recovered')
@@ -189,7 +190,7 @@ def list_runs(store, task_id=None):
     task_ids = [identifier(task_id)] if task_id else [t['task_id'] for t in store.list_tasks()]
     result = []
     for task in task_ids:
-        with store.operation(task, allow_rejected=True):
+        with store.operation(task, allow_rejected=True, shared=True):
             for path in sorted((store.task(task) / 'runs').glob('*.json')):
                 result.append(inspect_attempt(store, task, path.stem))
     return result
@@ -220,6 +221,9 @@ def compare(store, definition):
         for ref in refs:
             if not isinstance(ref, dict) or set(ref) != {'task_id', 'run_id'}:
                 raise ValueError('Run selection requires task_id and run_id')
+            from .publication import published
+            if not published(store, ref['task_id'], ref['run_id']):
+                raise ValueError('Required evaluation and review are not complete')
             record = store.inspect_run(ref['task_id'], ref['run_id'])
             if record['schema_version'] != 2 or record['status'] in ('running', 'reserved'):
                 raise ValueError('Comparison requires finished benchmark attempts')

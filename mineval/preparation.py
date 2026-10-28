@@ -111,7 +111,7 @@ class Store:
             return []
         result = []
         for task in sorted(pool.iterdir()):
-            with lock(self.root / 'locks' / (identifier(task.name) + '.lock')):
+            with lock(self.root / 'locks' / (identifier(task.name) + '.lock'), shared=True):
                 metadata = read_json(task / 'metadata.json')
                 result.append({key: metadata[key] for key in ('task_id', 'repository', 'task_summary')} |
                               {'category': category_for(metadata),
@@ -121,7 +121,7 @@ class Store:
     def inspect_task(self, task_id):
         # Rejected tasks remain inspectable; operation() intentionally blocks mutation.
         task = self.task(task_id)
-        with lock(self.root / 'locks' / (identifier(task_id) + '.lock')):
+        with lock(self.root / 'locks' / (identifier(task_id) + '.lock'), shared=True):
             if not task.is_dir():
                 raise ValueError('Task is not registered')
             return {'metadata': read_json(task / 'metadata.json'),
@@ -136,7 +136,7 @@ class Store:
                     'evaluations': sorted(p.name for p in (task / 'evaluations').glob('*.json'))}
 
     def inspect_revision(self, task_id, version):
-        with self.operation(task_id, allow_rejected=True):
+        with self.operation(task_id, allow_rejected=True, shared=True):
             return self._inspect_revision(task_id, version)
 
     def list_suites(self):
@@ -186,12 +186,12 @@ class Store:
         return read_json(path)
 
     def inspect_run(self, task_id, run_id):
-        with self.operation(task_id, allow_rejected=True):
+        with self.operation(task_id, allow_rejected=True, shared=True):
             from .benchmark import inspect_attempt
             return inspect_attempt(self, task_id, run_id)
 
     def inspect_evaluation(self, task_id, evaluation_id):
-        with self.operation(task_id, allow_rejected=True):
+        with self.operation(task_id, allow_rejected=True, shared=True):
             from .evaluation import inspect
             return inspect(self, task_id, evaluation_id)
 
@@ -256,8 +256,8 @@ class Store:
         return read_json(target / 'suite.json')
 
     @contextmanager
-    def operation(self, task_id, *, allow_rejected=False):
-        with lock(self.root / 'locks' / (identifier(task_id) + '.lock')):
+    def operation(self, task_id, *, allow_rejected=False, shared=False):
+        with lock(self.root / 'locks' / (identifier(task_id) + '.lock'), shared=shared):
             if not self.task(task_id).is_dir():
                 raise ValueError('Task is not registered')
             if not allow_rejected and read_json(self.task(task_id) / 'status.json')['status'] == 'rejected':
@@ -474,18 +474,18 @@ class Store:
             return {'version': version, 'snapshot_sha256': sha}
 
     def materialize(self, task_id, version, destination):
-        with self.operation(task_id):
+        with self.operation(task_id, shared=True):
             return self._materialize(task_id, version, destination)
 
     def _materialize(self, task_id, version, destination):
         destination = Path(destination).resolve()
-        for reserved in ('tasks', 'drafts', 'locks', 'suites'):
+        for reserved in ('tasks', 'drafts', 'locks', 'suites', 'materialized', 'download-cache'):
             protected = (self.root / reserved).resolve()
             if destination == protected or protected in destination.parents:
                 raise ValueError('Workspace destination must be outside protected preparation artifacts')
         version = identifier(version)
         frozen = self.task(task_id) / 'versions' / version
-        self._inspect_revision(task_id, version)
+        revision = self._inspect_revision(task_id, version)
         # Legacy revisions have the same tree-only format without a descriptor.
         # Future history formats must be explicitly supported, never silently dropped.
         descriptor = frozen / 'workspace-format.json'
@@ -500,20 +500,59 @@ class Store:
         if fmt != {'schema_version': 1,
                    'tree': {'format': 'tar', 'path': 'snapshot.tar.gz'}, 'git_history': allowed}:
             raise ValueError('Unsupported workspace format; upgrade Mineval to materialize this revision')
-        if digest(frozen / 'snapshot.tar.gz') != (frozen / 'snapshot.sha256').read_text().strip():
-            raise ValueError('Snapshot hash mismatch')
-        unpack(frozen / 'snapshot.tar.gz', destination)
-        if inventory(destination) != read_json(frozen / 'tree-hashes.json'):
-            shutil.rmtree(destination)
-            raise ValueError('Extracted tree hash mismatch')
-        if history_format.get('format') == 'base-pack-v1':
-            from .history import restore
+        key = revision['artifact_manifest_sha256']
+        cached = self.root / 'materialized' / key
+        built = False
+        with lock(self.root / 'locks/materialized' / (key + '.lock'), wait=True):
+            if not cached.exists():
+                built = True
+                with tempfile.TemporaryDirectory(dir=self.root) as temp:
+                    tree = Path(temp) / 'tree'
+                    unpack(frozen / 'snapshot.tar.gz', tree)
+                    if inventory(tree) != read_json(frozen / 'tree-hashes.json'):
+                        raise ValueError('Extracted tree hash mismatch')
+                    if history_format.get('format') == 'base-pack-v1':
+                        from .history import restore
+                        restore(frozen / 'history.pack', history_format['base_commit'], tree)
+                    write_json(Path(temp) / 'hashes.json', inventory(tree, allow_git=True))
+                    cached.parent.mkdir(exist_ok=True)
+                    # Atomically publish the complete tree and its receipt together.
+                    os.rename(temp, cached)
+            if inventory(cached / 'tree', allow_git=True) != read_json(cached / 'hashes.json'):
+                raise ValueError('Materialized starting state hash mismatch')
+            copy_tree(cached / 'tree', destination, allow_git=True)
+            os.utime(cached, None)
+        if built:
             try:
-                restore(frozen / 'history.pack', history_format['base_commit'], destination)
-            except BaseException:
-                shutil.rmtree(destination)
-                raise
-        return {'workspace': str(Path(destination).absolute()), 'version': version}
+                self.starting_cache(max_bytes=2 * 1024**3)
+            except ValueError:
+                pass  # Another maintenance operation owns eviction.
+        return {'workspace': str(Path(destination).absolute()), 'version': version,
+                'history_receipt': inventory(destination / '.git', allow_git=True) if (destination / '.git').exists() else None}
+
+    def starting_cache(self, *, max_bytes=None):
+        """Inspect/evict derived templates; never remove frozen source evidence."""
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+            raise ValueError('Cache budget must be a nonnegative integer')
+        with lock(self.root / 'locks/materialized-prune.lock'):
+            entries = []
+            for path in (self.root / 'materialized').glob('*'):
+                if re.fullmatch(r'[0-9a-f]{64}', path.name) and path.is_dir() and not path.is_symlink():
+                    length = sum(p.stat().st_size for p in path.rglob('*') if p.is_file() and not p.is_symlink())
+                    entries.append((path.stat().st_mtime, length, path))
+            size = sum(n for _, n, _ in entries)
+            count = len(entries)
+            for _, length, path in sorted(entries):
+                if max_bytes is None or size <= max_bytes:
+                    break
+                try:
+                    with lock(self.root / 'locks/materialized' / (path.name + '.lock')):
+                        shutil.rmtree(path)
+                        size -= length
+                        count -= 1
+                except ValueError:
+                    continue  # A template being built/cloned is still in use.
+            return {'states': count, 'bytes': size}
 
     def extract(self, task_id, selections):
         """Save explicitly selected evidence. Never apply it to a starting tree."""

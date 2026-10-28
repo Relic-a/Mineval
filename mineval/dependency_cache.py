@@ -1,7 +1,7 @@
 """Host-owned, pinned download store and task-private package-manager inputs.
 
-No package manager or project code is executed on the host. Only immutable,
-public upstream archives are persisted. Native tools install into fresh task
+No package manager or project code is executed on the host. Only verified public upstream archives and host-derived installation inputs
+are persisted. Native tools install into fresh task
 workspaces; the shared store is never mounted and sandbox output is never imported.
 """
 from dataclasses import dataclass
@@ -15,16 +15,20 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import shlex
 import stat
 import tarfile
 import tempfile
 import tomllib
+import time
 from urllib.parse import unquote, urlsplit
 from urllib.request import build_opener, HTTPRedirectHandler, ProxyHandler, Request
 import zipfile
 import zlib
+from uuid import uuid4
 
 from .downloads import synchronized
+from .artifacts import lock, inventory, digest, copy_tree, read_json, write_json
 
 HOSTS = {'registry.npmjs.org', 'files.pythonhosted.org', 'pypi.org',
          'proxy.golang.org', 'static.crates.io'}
@@ -153,8 +157,9 @@ class DependencyCache:
     """Small format adapters around npm cacache, pip find-links, Go and Cargo.
 
     The historical tree must be host-owned. Do not pass an agent's live workspace.
-    Acquisition is serialized with cleanup: concurrent cold requests download each
-    pinned artifact once. Offline runs never initiate a host request.
+    Per-artifact acquisition locks deduplicate cold downloads without serializing
+    unrelated work. Seeds and offline wheel environments have separate keyed locks.
+    Offline runs never initiate a host request.
     """
     max_bytes = 2 * 1024**3
 
@@ -360,6 +365,11 @@ class DependencyCache:
                           {h[7:] for h in package.get('hashes', []) if h.startswith('sha256:')})
 
     def pypi(self, manifest, name, version, hashes):
+        key = hashlib.sha256((str(name) + '/' + str(version)).encode()).hexdigest()
+        with lock(self.root / 'locks/metadata' / (key + '.lock'), wait=True):
+            return self._pypi(manifest, name, version, hashes)
+
+    def _pypi(self, manifest, name, version, hashes):
         if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or not re.fullmatch(r'[A-Za-z0-9_.+!-]+', version):
             self.issue('pip', manifest, 'unsupported Python requirement')
             return
@@ -551,6 +561,11 @@ class DependencyCache:
         return None
 
     def acquire(self, artifact):
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with lock(self.root / 'locks/objects' / (artifact.key + '.lock'), wait=True):
+            return self._acquire(artifact)
+
+    def _acquire(self, artifact):
         if artifact.key in self.acquired:
             hit, downloaded, error = self.acquired[artifact.key]
             return self.stored(artifact), hit, downloaded, error
@@ -579,24 +594,66 @@ class DependencyCache:
         self.acquired[artifact.key] = (hit, downloaded, error)
         return data, hit, downloaded, error
 
-    @synchronized
+    def maintain(self):
+        try:
+            with lock(self.root / '.lock'):
+                self._prune()
+        except ValueError:
+            pass  # Acquisition never waits for another pruner.
+
     def prepare(self, managers=('npm', 'pip', 'go', 'cargo'), *, network='none', cargo_cache_id=None):
+        result = self._prepare_seed(managers, network=network, cargo_cache_id=cargo_cache_id)
+        if not result[1].get('seed_reused'):
+            self.maintain()
+        return result
+
+    def _prepare_seed(self, managers, *, network, cargo_cache_id):
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.cargo_cache_ids = CARGO_CACHE_IDS
         if cargo_cache_id and re.fullmatch(r'[A-Za-z0-9_.-]+-[0-9a-f]{16}', cargo_cache_id):
             self.cargo_cache_ids = (cargo_cache_id,)
-        if self.snapshot is None:
-            return self._prepare(managers, network=network)
-        from .artifacts import unpack
-        # A frozen, receipt-checked preparation revision may authorize different
-        # dependencies from the original base. Never use an active agent tree.
-        with tempfile.TemporaryDirectory(prefix='.snapshot-', dir=self.root) as temp:
-            original = self.tree
-            self.tree = Path(temp) / 'tree'
-            try:
-                unpack(self.snapshot, self.tree)
-                return self._prepare(managers, network=network)
-            finally:
-                self.tree = original
+        # A seed is produced solely from verified upstream bytes and host-owned
+        # manifests. It is never mounted. Each consumer gets independent inodes.
+        source = digest(self.snapshot) if self.snapshot else {name: digest(safe_file(self.tree, name)) for name in self.manifests()}
+        key = hashlib.sha256(json.dumps([3, source, sorted(managers), network, self.cargo_cache_ids], sort_keys=True).encode()).hexdigest()
+        seed = self.root / 'seeds' / key
+        with lock(self.root / 'locks/seeds' / (key + '.lock'), wait=True):
+            if seed.exists():
+                receipt = read_json(seed / 'receipt.json')
+                if inventory(seed / 'tree') != receipt['hashes']:
+                    raise ValueError('Dependency seed integrity mismatch')
+                local = self.root / ('.run-' + uuid4().hex)
+                copy_tree(seed / 'tree', local)
+                stats = receipt['stats']
+                stats['seed_reused'] = True
+                stats['seeded_packages'] = sum(a['available'] for a in stats['artifacts'])
+                stats['seeded_bytes'] = sum(v for v in receipt['sizes'])
+                stats['stored_packages'] = stats['missed_packages'] = 0
+                for a in stats['artifacts']:
+                    a.update(cache_hit=a['available'], downloaded=False)
+                return local, stats
+            if self.snapshot is None:
+                local, stats = self._prepare(managers, network=network)
+            else:
+                from .artifacts import unpack
+                with tempfile.TemporaryDirectory(prefix='.snapshot-', dir=self.root) as temp:
+                    original = self.tree
+                    self.tree = Path(temp) / 'tree'
+                    try:
+                        unpack(self.snapshot, self.tree)
+                        local, stats = self._prepare(managers, network=network)
+                    finally:
+                        self.tree = original
+            # Never persist misses: a later online start must retry acquisition.
+            if all(a['available'] for a in stats['artifacts']):
+                with tempfile.TemporaryDirectory(prefix='.seed-', dir=self.root) as temp:
+                    temp = Path(temp)
+                    copy_tree(local, temp / 'tree')
+                    write_json(temp / 'receipt.json', {'hashes': inventory(temp / 'tree'), 'stats': stats,
+                        'sizes': [a.get('bytes', 0) for a in stats['artifacts']]})
+                    seed.parent.mkdir(exist_ok=True)
+                    os.rename(temp, seed)
+            return local, stats
 
     def _prepare(self, managers, *, network):
         self.online = network == 'bridge'
@@ -631,6 +688,7 @@ class DependencyCache:
                 if data is None:
                     continue
                 entry['available'] = True
+                entry['bytes'] = len(data)
                 path = local / artifact.destination
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
@@ -644,16 +702,35 @@ class DependencyCache:
                 if artifact.algorithm == 'go-zip':
                     path.with_suffix('.ziphash').write_text(artifact.checksum)
                     path.with_suffix('.info').write_text(json.dumps({'Version': artifact.version}))
+                    prefix = artifact.name + '@' + artifact.version + '/'
+                    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                        for member in archive.infolist():
+                            if not member.is_dir():
+                                target = local / 'go' / member.filename
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                target.write_bytes(archive.read(member))
+                                if (member.external_attr >> 16) & 0o111:
+                                    target.chmod(0o755)
                 if hit:
-                    os.utime(self.root / 'objects' / artifact.key, None)
+                    try:
+                        os.utime(self.root / 'objects' / artifact.key, None)
+                    except FileNotFoundError:
+                        pass  # A concurrent prune cannot affect private staged bytes.
                     stats['seeded_packages'] += 1
                     stats['seeded_bytes'] += len(data)
             for manager in managers:
                 (local / manager).mkdir(exist_ok=True)
             if 'pip' in managers:
                 (local / 'pip/packages').mkdir(parents=True, exist_ok=True)
+            if 'pip' in managers and safe_file(self.tree, 'requirements.txt'):
+                # Preserve includes and markers. Installation runs only in a fresh
+                # offline sandbox, with --only-binary and --require-hashes.
+                for manifest in self.manifests():
+                    if Path(manifest).suffix in ('.txt', '.in'):
+                        target = local / 'pip/requirements' / manifest
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(self.text(manifest))
             self.vendor(local, artifacts, stats)
-            self._prune()
             return local, stats
         except BaseException:
             shutil.rmtree(local)
@@ -662,7 +739,7 @@ class DependencyCache:
     def vendor(self, local, artifacts, stats):
         """Cargo's directory-source mechanism avoids sharing its mutable indexes.
 
-        Extract only validated crates, never persist extracted sources/build output.
+        Extract only validated crates. Persist immutable sources, never build output.
         Generate optional replacement only for a complete locked crates.io set.
         Never force it: agents may legitimately add dependencies after setup.
         """
@@ -713,6 +790,150 @@ class DependencyCache:
             shutil.rmtree(vendor, ignore_errors=True)
             self.issue('cargo', '', 'crate cannot be safely staged; Cargo downloads normally')
 
+    @staticmethod
+    def wheel_requirements(root, manifest='requirements.txt', seen=None):
+        """Only pinned hashed names and bounded local includes; no direct builds."""
+        seen = set() if seen is None else seen
+        if manifest in seen:
+            return True
+        if len(seen) >= 128:
+            return False
+        seen.add(manifest)
+        path = safe_file(root, manifest)
+        if path is None or path.stat().st_size > MAX_METADATA:
+            return False
+        for raw in path.read_text().replace('\\\n', ' ').splitlines():
+            line = raw.split(' #', 1)[0].strip()
+            if not line or line.startswith('#') or line == '--require-hashes':
+                continue
+            include = re.fullmatch(r'(?:-r\s*|--requirement(?:=|\s+))([^\s]+)', line)
+            if include:
+                nested = os.path.normpath(str(Path(manifest).parent / include[1]))
+                if (Path(nested).is_absolute() or '..' in Path(nested).parts
+                        or not DependencyCache.wheel_requirements(root, nested, seen)):
+                    return False
+                continue
+            parts = re.split(r'\s+--hash(?:=|\s+)', line)
+            if (len(parts) < 2 or re.search(r'(?:^|\s)-', parts[0]) or not all(re.fullmatch(r'sha256:[0-9a-f]{64}', p.strip()) for p in parts[1:])
+                    or not re.fullmatch(r'[A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_,.-]+\])?==[A-Za-z0-9_.+!-]+(?:\s*;[^\n]+)?', parts[0])):
+                return False
+        return True
+
+    @staticmethod
+    def activate_python(local, executable):
+        # Scope packages to the exact interpreter selected by the immutable image.
+        # Other Python versions and explicit virtualenv executables retain their
+        # normal imports. Console entry points use the same isolated prefix.
+        if not isinstance(executable, str) or not executable.startswith('/') or '\x00' in executable:
+            raise ValueError('Invalid installed environment interpreter')
+        binpath = local / 'pip/bin'
+        binpath.mkdir()
+        commands = {'python3': executable}
+        scripts = local / 'pip/site-packages/bin'
+        if scripts.is_dir():
+            commands.update({p.name: '/mineval-dependency-cache/pip/site-packages/bin/' + p.name
+                             for p in scripts.iterdir() if p.is_file() and p.stat().st_mode & 0o111 and p.name != 'python3'})
+        for name, command in commands.items():
+            target = binpath / name
+            target.write_text('#!/bin/sh\n'
+                'PYTHONPATH="/mineval-dependency-cache/pip/site-packages${PYTHONPATH:+:$PYTHONPATH}"\n'
+                'export PYTHONPATH\nexec ' + shlex.quote(command) + ' "$@"\n')
+            target.chmod(0o755)
+
+    def pip_environment(self, runner, image, local, stats, limits, *, workspace=None):
+        self._pip_environment(runner, image, local, stats, limits, workspace=workspace)
+        if stats.get('installed_environment') in ('built', 'unsupported') and not stats.get('environment_reused'):
+            self.maintain()
+
+    def _pip_environment(self, runner, image, local, stats, limits, *, workspace=None):
+        """Install only hashed wheels in an offline, credential-free native sandbox.
+
+        The builder has no project source, direct URLs, sdists, dependency hooks or
+        agent state. Native pip validates markers, wheel tags and Requires-Python.
+        """
+        requirements = local / 'pip/requirements'
+        selected = set()
+        if not self.wheel_requirements(requirements, seen=selected) or not list((local / 'pip/packages').glob('*.whl')):
+            return
+        if workspace is not None and any(safe_file(workspace, name) is None
+                or digest(safe_file(workspace, name)) != digest(safe_file(requirements, name)) for name in selected):
+            return  # Changed/unsupported candidate inputs need native setup.
+        from .sandbox import SandboxError, SandboxSpec
+        key = hashlib.sha256(json.dumps([2, image['Id'], inventory(local / 'pip')], sort_keys=True).encode()).hexdigest()
+        target = self.root / 'environments' / key
+        with lock(self.root / 'locks/environments' / (key + '.lock'), wait=True):
+            installed = local / 'pip/site-packages'
+            if (target / 'unsupported.json').exists():
+                if time.time() - read_json(target / 'unsupported.json')['created'] < 300:
+                    stats.update(installed_environment='unsupported', environment_reused=True)
+                    return
+                shutil.rmtree(target)
+            if target.exists():
+                receipt = read_json(target / 'hashes.json')
+                if (inventory(target / 'tree') != receipt['tree']
+                        or digest(target / 'runtime.json') != receipt['runtime']):
+                    raise ValueError('Installed dependency environment integrity mismatch')
+                copy_tree(target / 'tree', installed)
+                self.activate_python(local, read_json(target / 'runtime.json')['executable'])
+                stats.update(installed_environment='reused', environment_reused=True)
+                return
+            temp = Path(tempfile.mkdtemp(prefix='.installer-', dir=self.root))
+            lifecycle = {'created': False, 'removed': False}
+            def unsupported():
+                staged = temp / 'unsupported'; staged.mkdir()
+                write_json(staged / 'unsupported.json', {'created': time.time()})
+                target.parent.mkdir(exist_ok=True)
+                os.rename(staged, target)
+                stats['installed_environment'] = 'unsupported'
+            try:
+                workspace = temp / 'workspace'
+                copy_tree(requirements, workspace)
+                spec = SandboxSpec(image['Id'], ('/bin/sh', '-c', 'while :; do sleep 1; done'),
+                    limits, workspace=workspace, network='none')
+                with runner._container(spec, image=image, dependency_cache_path=local, cache_managers=('pip',), lifecycle=lifecycle) as container:
+                    container.start()
+                    result = container.exec(['python3', '-m', 'pip', '--isolated', 'install', '--no-index',
+                        '--only-binary=:all:', '--require-hashes', '--ignore-installed', '--no-compile', '--no-deps',
+                        '--find-links=/mineval-dependency-cache/pip/packages',
+                        '--target=/mineval-dependency-cache/pip/site-packages', '-r', 'requirements.txt'],
+                        timeout=min(120, limits.timeout_seconds))
+                    runtime = (container.exec(['python3', '-c', 'import sys; print(sys.executable)'], timeout=10)
+                               if result['exit_code'] == 0 else None)
+                if (result['timed_out'] or result['oom_killed']
+                        or runtime and (runtime.get('timed_out') or runtime.get('oom_killed'))):
+                    stats['installed_environment'] = 'unavailable'
+                    return
+                if result['exit_code'] or not runtime or runtime['exit_code']:
+                    unsupported()
+                    return
+                if not installed.is_dir():
+                    unsupported()
+                    return
+                hashes = inventory(installed)
+                # PYTHONPATH does not process .pth files. Let normal setup handle
+                # such distributions instead of advertising an incomplete install.
+                if any(p.endswith('.pth') for p in hashes):
+                    unsupported()
+                    return
+                executable = runtime['stdout'].strip()
+                self.activate_python(local, executable)
+                staged = temp / 'environment'
+                copy_tree(installed, staged / 'tree')
+                write_json(staged / 'runtime.json', {'executable': executable})
+                write_json(staged / 'hashes.json', {'tree': hashes, 'runtime': digest(staged / 'runtime.json')})
+                target.parent.mkdir(exist_ok=True)
+                os.rename(staged, target)
+                stats['installed_environment'] = 'built'
+            except BaseException as exc:
+                if lifecycle['created'] and not lifecycle['removed']:
+                    raise SandboxError('Dependency installer cleanup failed; mounts quarantined') from exc
+                raise
+            finally:
+                if not lifecycle['created'] or lifecycle['removed']:
+                    if not (target / 'tree').exists():
+                        shutil.rmtree(installed, ignore_errors=True)
+                    shutil.rmtree(temp)
+
     def files(self):
         return [p for p in (self.root / 'objects').glob('*')
                 if re.fullmatch(r'[0-9a-f]{64}', p.name) and p.is_file() and not p.is_symlink()]
@@ -721,7 +942,9 @@ class DependencyCache:
         files = self.files()
         metadata = [p for p in (self.root / 'metadata').glob('*') if p.is_file() and not p.is_symlink()]
         return {'packages': len(files), 'bytes': sum(p.stat().st_size for p in files),
-                'metadata_bytes': sum(p.stat().st_size for p in metadata), 'max_bytes': self.max_bytes}
+                'metadata_bytes': sum(p.stat().st_size for p in metadata), 'max_bytes': self.max_bytes,
+                **{name + '_bytes': sum(p.stat().st_size for p in (self.root / name).rglob('*') if p.is_file())
+                   for name in ('seeds', 'environments')}}
 
     @synchronized
     def status(self):
@@ -737,9 +960,26 @@ class DependencyCache:
         for _, length, path in files:
             if size <= budget:
                 break
-            path.unlink(missing_ok=True)
-            size -= length
-            removed += 1
+            try:
+                with lock(self.root / 'locks/objects' / (path.name + '.lock')):
+                    path.unlink(missing_ok=True)
+                    size -= length
+                    removed += 1
+            except ValueError:
+                continue
+        for folder in ('seeds', 'environments'):
+            entries = sorted((p.stat().st_mtime, p) for p in (self.root / folder).glob('*') if p.is_dir())
+            total = sum(sum(f.stat().st_size for f in p.rglob('*') if f.is_file()) for _, p in entries)
+            for _, path in entries:
+                if total <= budget:
+                    break
+                try:
+                    with lock(self.root / 'locks' / folder / (path.name + '.lock')):
+                        length = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+                        shutil.rmtree(path)
+                        total -= length
+                except ValueError:
+                    continue
         if budget == 0:
             shutil.rmtree(self.root / 'metadata', ignore_errors=True)
         else:

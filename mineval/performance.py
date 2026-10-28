@@ -5,6 +5,7 @@ from .artifacts import read_json
 from .categories import CATEGORIES, LEGACY
 from .memory import encoded
 from .workflows import tasks
+from .publication import published
 
 VERDICTS = ('pass', 'fail', 'inconclusive', 'error')
 
@@ -38,7 +39,7 @@ def summaries(store):
         for path in (store.task(tid) / 'evaluations').glob('*.json'):
             try:
                 ev = store.inspect_evaluation(tid, path.stem)
-                if ev.get('schema_version') != 2:
+                if ev.get('schema_version') != 2 or not published(store, tid, ev['run_id'], ev['evaluation_id']):
                     continue
                 run = store.inspect_run(tid, ev['run_id'])
                 entries.append((run.get('started_at', ''), ev.get('evaluation_version', 0), ev['evaluation_id'], run, ev))

@@ -132,9 +132,11 @@ LABEL io.mineval.dependency-cache="npm,pip,go,cargo"
 The legacy `io.mineval.npm-cache="v1"` label still enables npm. Omit both labels to
 disable caching. Opting in does not install missing package managers into an image.
 Each container gets private writable copies of only its authorized dependencies;
-the host store is never mounted. Installed packages, virtual environments,
-node_modules, extracted Go modules, Cargo targets, credentials and build outputs
-are never shared. Codex's cleared environment preserves these cache locations,
+the shared store is never mounted. Verified immutable staging seeds, extracted Go
+modules, Cargo vendor sources and eligible wheel installations are reusable, but
+no writable inode or agent output is shared between tasks. Virtual environments,
+node_modules, Cargo targets and task build outputs remain isolated. Codex's cleared
+environment preserves these cache locations,
 the image's tool PATH and its Rust toolchain location (`RUSTUP_HOME`).
 
 Authorization comes from historical manifests and lockfiles, including nested
@@ -147,8 +149,8 @@ normally until approved. Symlinked files/directories and generated directories
 | Manager | Supported inputs and upstream sources | Isolated installation |
 | --- | --- | --- |
 | npm | Root/nested `package-lock.json` (v1–v3), `npm-shrinkwrap.json`; public npm registry HTTPS tarballs with SHA-256 or SHA-512 SRI | Native npm content cache at `/mineval-npm-cache`; use `npm ci` |
-| pip | Pinned SHA-256 requirements, recursive `-r` includes, `uv.lock`, `poetry.lock`, `Pipfile.lock`, `pylock.toml`; PyPI wheels/source archives and hashed direct `files.pythonhosted.org` wheels | `PIP_FIND_LINKS=/mineval-dependency-cache/pip/packages`; pip installs into each task's own environment |
-| Go | Root/nested `go.mod` + `go.sum`; recursively follows checksum-verified required module metadata from `proxy.golang.org` | Private `GOMODCACHE`; native Go verifies h1 checksums and selects versions |
+| pip | Pinned SHA-256 requirements, recursive `-r` includes, `uv.lock`, `poetry.lock`, `Pipfile.lock`, `pylock.toml`; PyPI wheels/source archives and hashed direct `files.pythonhosted.org` wheels | `PIP_FIND_LINKS=/mineval-dependency-cache/pip/packages`; eligible hashed wheel environments are cloned privately; other installs use native pip |
+| Go | Root/nested `go.mod` + `go.sum`; recursively follows checksum-verified required module metadata from `proxy.golang.org` | Private `GOMODCACHE`, including verified pre-extracted modules; native Go selects versions |
 | Cargo | Root/nested `Cargo.lock`; crates.io archives with locked SHA-256 checksums | Private native Cargo archive cache; an optional directory source supports offline setup; build targets stay private |
 
 Python lockfiles authorize all locked platform wheels; pip selects compatible
@@ -167,7 +169,7 @@ are preserved. Missing historical transitive checksums, replace/exclude directiv
 private proxies, local replacements and toolchain downloads fall back to normal
 Go resolution and are reported. Native Go remains responsible for version selection.
 
-Cargo seeds only `.crate` archives into its private native cache. Its mutable
+Cargo seeds `.crate` archives into its private native cache. Its mutable
 registry index is not shared and may still download. Known stable/legacy cache
 identities are supported; images using another Cargo layout should declare
 `LABEL io.mineval.cargo-cache-id="index.crates.io-1949cf8c6b5b557f"` with the actual
@@ -189,11 +191,28 @@ credentials and cookies are not used. Host acquisition performs bounded HTTP
 requests and integrity checks, never executes package managers, build backends,
 project scripts or Git on the host. `network=none` prevents all host acquisition;
 cache misses remain misses. Bridge-enabled tasks may fetch missing authorized
-archives before container startup. Downloads and cleanup hold a host lock, so
-concurrent cold requests reuse the first successful download. Entries are verified
-again before reuse and published atomically; failures never publish partial data.
+archives before container startup. Acquisition uses a lock per artifact; identical
+cold requests fetch once while unrelated artifacts can download concurrently.
+Manifest parsing, snapshot extraction, source expansion and staging are reused
+through receipt-checked immutable seeds. Cache misses are not persisted as successes.
+Entries are verified before reuse and published atomically; failures never publish
+partial data.
 
-Sandbox-written cache data is never imported into this store. Unsupported formats
+Agent-written cache data is never imported into this store. The only installation
+output accepted is from Mineval's separate offline, credential-free wheel installer.
+It accepts pinned hashed requirements and local includes, installs only wheels with
+`--no-deps`, and has no task source, direct URLs or build hooks. Its key includes the
+immutable image ID, wheel bytes and requirements; native pip checks Python/ABI tags
+and markers. Complete exported `requirements.txt` files provide the best coverage.
+
+Eligible installations are cloned into a private prefix. A private PATH launcher
+exposes them to the image's exact default `python3` and installed console scripts;
+`python3 -m pip install --require-hashes -r requirements.txt` then sees satisfied
+requirements. Other Python versions, explicit virtualenv executables and native
+`pip` commands keep their normal behavior. A changed candidate requirement disables
+this optimization. `.pth` distributions, sdists, direct references and unsupported
+setups fall back to normal installation. Unsupported installer outcomes are
+remembered for at most five minutes; timeouts/OOM are not cached as installations. Unsupported formats
 (such as Yarn and pnpm), unpinned dependencies, custom indexes, arbitrary URLs,
 Git/local sources and generated artifacts use existing package-manager behavior.
 They are reported as unsupported, rather than counted as hits. Cache availability
@@ -207,8 +226,11 @@ identity. A hit means an artifact was staged; it does not prove a command used i
 Raw source URLs and download exceptions are omitted from receipts to avoid secrets.
 These records are included before existing artifact receipts are sealed.
 
-The shared archive store evicts least recently used artifacts above 2 GiB.
-Public index URL metadata has a separate 128 MiB cap.
+The archive store, staging seeds and wheel environments each have a 2 GiB
+maintenance budget. Public index URL metadata has a separate 128 MiB cap.
+Verified materialized starting states have a separate 2 GiB budget. Maintenance
+skips entries currently being acquired, built or cloned; active use can temporarily
+exceed a budget. Status reports derived-cache sizes separately.
 Private copies remain usable during pruning. Inspect or prune both this store and
 the legacy npm store with:
 
@@ -218,7 +240,7 @@ mineval --data DATA cache prune --max-mb 512
 mineval --data DATA cache prune --max-mb 0
 ```
 
-A zero budget also clears public PyPI URL metadata. Active/quarantined task copies
+A zero budget also clears public PyPI URL metadata and idle materialized starting states. Active/quarantined task copies
 are not treated as shared entries and are never deleted by pruning.
 
 ## Reusable settings
@@ -234,7 +256,9 @@ selects another trusted host JSON file. Example:
   "review_model": "gpt-6-luna",
   "review_image": "mineval-review:local",
   "evaluation_model": "gpt-6-luna",
-  "evaluation_effort": "high",
+  "evaluation_effort": "medium",
+  "evaluator_timeout_seconds": 180,
+  "concurrency": {"total": 4, "prepare": 1, "benchmark": 2, "evaluation": 1, "review": 1, "per_model": 2},
   "models": [
     {"model": "gpt-6-luna", "effort": "medium", "adapter": "codex"},
     {"model": "gpt-6-luna", "effort": "high", "adapter": "codex"}
@@ -266,11 +290,32 @@ free-text extraction instructions as a shell command or guess arbitrary test sem
 Commands execute only inside disposable rootless sandboxes. Queuing snapshots the
 validated config; later settings edits do not change that queued evaluation.
 
+Automatic evaluation runs private checks first. Passing checks skip AI. Declared
+behavioral failures and inconclusive outcomes may invoke the evaluator for a minimal,
+evidence-backed interface adaptation; incorrect behavior gets no adaptation.
+Infrastructure errors retain their classification and never invoke AI. If a test
+runner reports collection/import incompatibility with a special code, declare that
+code in `inconclusive_exit_codes`; unknown exit codes remain infrastructure errors.
+The evaluator defaults to a separate 180-second deadline and the queued evaluation
+model/effort. The CLI exposes `evaluate --effort` and `--evaluator-timeout` too.
+
 ## Queue, exclusion and interruption
 
-`historical-jobs.sqlite3` stores the queue and stage checkpoints, with WAL and full
-synchronous commits. One worker holds a local filesystem execution lock; inference
-does not hold a database transaction. Failed tasks do not stop unrelated tasks.
+`historical-jobs.sqlite3` stores the queue and execution phases, with WAL and full
+synchronous commits. One coordinator owns crash recovery and schedules bounded
+stage workers. Benchmark execution, evaluation, and qualitative review/compaction
+have separate configurable limits and return to the queue between phases. Inference
+does not hold a database transaction. Multiple models can run the same prepared task
+concurrently; per-run ownership excludes duplicate launches and unsafe recovery.
+Task mutation remains exclusive, while immutable run/evaluation readers share task
+ownership. Failed tasks do not stop unrelated tasks.
+
+`concurrency` accepts positive integers from 1 through 64. Defaults are preparation
+1, benchmark 2, evaluation 1, review 1, per-model 2, and total `min(4, max(1, CPU
+count // 2))`. Total bounds all active stages; per-model also reserves the configured
+independent preparation reviewer. Set these limits to fit container memory/CPU
+budgets and provider quotas. Preparation sessions retain their own bounded worker
+slots. The low-level explicit suite runner remains sequential.
 The UI's **Activity** page shows queued/running/failed/interrupted/completed state, current
 stage and links to saved run and assessment IDs. Refresh to update. A server polls
 for queued work; a standalone CLI worker drains the queue once.
@@ -293,13 +338,24 @@ using existing `bench recover`, then the job reports that a new explicit rerun i
 needed. Attempts without collected output cannot be retried toward evaluation.
 Activity exposes “Start new benchmark attempt” for these jobs, allocating fresh run
 and assessment IDs while preserving the old evidence; ordinary retries are rejected.
-Partial evidence and immutable launches are never overwritten. Preparation
-retries use fresh sessions/approvals; an already frozen revision is checked and reused.
+Partial evidence and immutable launches are never overwritten. Interrupted
+assessments remain internal evidence after a replacement assessment completes;
+they never become an earlier published score.
+
+`TASK/preparation-progress.json` records completed cleanup, diagnostics, extraction,
+base/future validation and approval checkpoints. Reuse checks exact current source,
+draft, configuration, model/prompt, resolved runtime and sealed output receipts.
+Cleanup changes bind their resulting draft. A producer's exact current diagnostic
+is reusable. Failed/incomplete stages are not checkpoints; changing inputs reruns
+affected stages and invalidates downstream work. Approval must still satisfy
+`review.approved` immediately before freezing. An already frozen revision is checked
+and reused.
 
 Normal sandbox cleanup remains in force. A hard process kill/host loss can still
 leave labeled Docker containers, as documented in the existing sandbox contract.
-Closing the web server normally waits for its current bounded sandbox stage to
-finish and clean up, then leaves the job interrupted before the next stage. A forced
+Closing the web server or interrupting the coordinator signals active sandboxes,
+kills waiting workloads, waits for lifecycle cleanup and leaves unfinished jobs
+interrupted. Work that has already sealed its output can resume from the next phase. A forced
 kill while waiting can still leave labeled containers; inspect exact leftovers
 before starting more work. The queue is durable, not a container supervisor across
 host failure.
@@ -341,6 +397,13 @@ uncategorized. Old change-type labels such as feature and bugfix remain importab
 and display as uncategorized; arbitrary labels in existing records are retained
 without pretending they belong to the new taxonomy. No historical metadata or receipt is rewritten or inferred from a title.
 
+Workflow runs stay out of summaries and explicit comparisons until required
+evaluation and qualitative review/compaction finish. Failed reviews keep their
+benchmark/evaluation evidence for retry without publishing a final result. Raw
+evidence and progress remain inspectable. Legacy and standalone CLI assessments
+retain their existing publication behavior. Qualitative observations cannot change
+a behavioral verdict.
+
 Models and results shows each model/effort/harness configuration's all-evidence
 performance and category average. Each dedicated model profile shows pass/fail/inconclusive/error,
 pass rates, decided counts, denominators, task coverage, exact assessment selections,
@@ -377,7 +440,8 @@ it. Textual observations cannot change an independent verdict.
 At 24 active observations the worker folds the oldest two into one summary until
 the active list is below 24. A separate review model does this outside a transaction.
 The summary takes their oldest position, unions source references and records parent
-IDs. Originals never disappear; The model profile exposes the full archive and CLI can
+IDs. A failed inference releases its reservation immediately so retry need not wait
+for expiration. Originals never disappear; The model profile exposes the full archive and CLI can
 retrieve it. Reservations last 15 minutes by default, with a maximum of one hour.
 
 The CLI is also a compaction protocol for independent review agents:
@@ -420,5 +484,7 @@ Tests use real temporary Git history, actual immutable artifact publication, HTT
 SQLite concurrency and simulated isolated agents. They do not prove that any chosen
 image, installed Codex version, credentials, model identifier, effort setting, project
 dependency or extraction command works in a live runtime. No paid model calls are
-made by the tests; no live-model smoke test was performed for this change. Existing
+made by the tests. Rootless Docker cold/warm and batch measurements are documented
+in [Incremental pipeline validation](incremental-pipeline.md); no live-model smoke
+test was performed for this change. Existing
 opt-in rootless runtime tests remain available.

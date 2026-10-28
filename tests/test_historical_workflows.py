@@ -66,6 +66,17 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(set(sources), {str(x) for x in range(33)})
         self.assertEqual(len(sources), 33)
 
+    def test_failed_compaction_releases_claim_without_losing_observations(self):
+        from mineval.model_review import compact
+        for n in range(24):
+            self.append(n)
+        before = self.memory.history('model/a')
+        with patch('mineval.model_review.infer', side_effect=ValueError('fixture failure')):
+            with self.assertRaises(ValueError):
+                compact(self.store, 'model/a', image='local:test')
+        self.assertEqual(self.memory.history('model/a'), before)
+        self.assertIsNotNone(self.memory.claim('model/a'))
+
     def test_expired_claim_cannot_commit_reclaimed_inputs_and_duplicates_are_idempotent(self):
         for n in range(24):
             self.append(n)
@@ -503,6 +514,20 @@ class PreparationWorkflowTests(HistoryFixture):
         self.assertFalse((frozen / 'tests/test_answer.py').exists())
         self.assertTrue((frozen / 'private/verification/extraction-manifest.json').exists())
         self.assertEqual(flow.eval_config('example', state['version'])['commands'][0]['name'], 'private')
+        failed = next(j for j in flow.jobs() if j['task'] == 'rejected-task')
+        flow.retry(failed['id'])
+        def approved(store, tid, **kwargs):
+            self.assertEqual(kwargs['stage'], 'review')
+            kwargs['sandbox'] = ReportAgent('review.json', report(self.review))
+            return original_session(store, tid, **kwargs)
+        with patch('mineval.workflows.service.session', side_effect=AssertionError('cleanup repeated')), \
+             patch('mineval.workflows.verification.diagnose', side_effect=AssertionError('diagnostics repeated')), \
+             patch('mineval.workflows.review.validate', side_effect=AssertionError('validation repeated')), \
+             patch('mineval.workflows.review.session', side_effect=approved), \
+             patch('mineval.workflows.DockerSandbox', return_value=FakeRunner([step()])):
+            flow.work()
+        self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
+
 
     def test_invalid_new_category_rejected_and_missing_legacy_category_preserved(self):
         with self.assertRaisesRegex(ValueError, 'category'):

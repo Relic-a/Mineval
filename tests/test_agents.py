@@ -165,7 +165,7 @@ class PhaseThreeTests(HistoryFixture):
         inputs = self.root / 'inputs'; inputs.mkdir()
         command = CodexAdapter().stage(inputs)
         self.assertEqual(command[-1], 'gpt-6-luna')
-        for flag in ['--ephemeral', '--ignore-user-config', '--ignore-rules', '--cd /workspace',
+        for flag in ['--yolo', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--cd /workspace',
                      '--output-schema', '> /dev/null 2>&1']:
             self.assertIn(flag, command[2])
         auth = self.root / 'auth.json'

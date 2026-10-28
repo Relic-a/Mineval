@@ -82,6 +82,50 @@ class DependencyCacheTests(unittest.TestCase):
         self.assertEqual(sum(s['stored_packages'] for _, s in results), 1)
         self.assertEqual(sum(s['seeded_packages'] for _, s in results), 1)
 
+    def test_unrelated_acquisition_is_concurrent_and_seed_skips_discovery(self):
+        import threading
+        one = self.root / 'one'; one.mkdir()
+        url1 = self.npm('one')
+        (one / 'package-lock.json').write_bytes((self.tree / 'package-lock.json').read_bytes())
+        url2 = self.npm('two')
+        rendezvous = threading.Barrier(2)
+        def fetch(url, *args):
+            rendezvous.wait(timeout=5)
+            return self.downloads[url]
+        def prepare(tree):
+            return DependencyCache(self.cache.root, tree).prepare(('npm',), network='bridge')
+        with patch('mineval.dependency_cache.download', side_effect=fetch):
+            with ThreadPoolExecutor(2) as pool:
+                results = list(pool.map(prepare, [one, self.tree]))
+        for local, _ in results:
+            self.addCleanup(shutil.rmtree, local, True)
+        with patch.object(self.cache, 'discover', side_effect=AssertionError('warm rediscovery')):
+            local, stats = self.prepare()
+        self.assertTrue(stats['seed_reused'])
+
+    @unittest.skipUnless(shutil.which('npm'), 'npm required')
+    def test_native_npm_ci_uses_verified_tarballs_without_registry(self):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+            for name, content in [('package/package.json', b'{"name":"one","version":"1.0.0","main":"index.js"}'),
+                                  ('package/index.js', b'module.exports = 42;')]:
+                info = tarfile.TarInfo(name); info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+        self.npm('one', stream.getvalue())
+        self.write('package.json', '{"name":"fixture","version":"1.0.0","dependencies":{"one":"1.0.0"}}')
+        for name in ('first', 'second'):
+            local, stats = self.prepare()
+            workspace = self.root / name; workspace.mkdir()
+            for manifest in ('package.json', 'package-lock.json'):
+                shutil.copyfile(self.tree / manifest, workspace / manifest)
+            result = subprocess.run(['npm', 'ci', '--offline', '--ignore-scripts', '--no-audit', '--no-fund',
+                '--cache', str(local / 'npm')], cwd=workspace, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('added 1 package', result.stdout)
+            self.assertEqual((workspace / 'node_modules/one/index.js').read_text(), 'module.exports = 42;')
+        self.assertEqual(self.fetch.call_count, 1)
+        self.assertTrue(stats['seed_reused'])
+
     def test_installation_paths_do_not_duplicate_npm_artifact_identity(self):
         self.npm()
         lock = json.loads((self.tree / 'package-lock.json').read_text())
@@ -112,6 +156,10 @@ class DependencyCacheTests(unittest.TestCase):
         stored = self.cache.files()[0]
         stored.chmod(0o600)
         stored.write_bytes(b'corruption')
+        # A verified derived seed remains usable even if its source object is damaged.
+        _, reused = self.prepare()
+        self.assertTrue(reused['seed_reused'])
+        shutil.rmtree(self.cache.root / 'seeds')
         _, repaired = self.prepare()
         self.assertEqual(repaired['stored_packages'], 1)
         self.assertFalse(repaired['artifacts'][0]['cache_hit'])
@@ -202,6 +250,139 @@ wheels = [{{ url = "{url}", hash = "sha256:{checksum}" }}]
         self.assertEqual(second['seeded_packages'], 1)
         self.assertEqual(len(list((local / 'pip/packages').iterdir())), 1)
 
+    def test_installed_pip_environment_is_private_and_image_pinned(self):
+        from contextlib import contextmanager
+        from mineval.sandbox import Limits
+        _, checksum = self.python_lock()
+        self.write('requirements.txt', f'demo==1.0 --hash=sha256:{checksum}\n')
+        built = []
+        @contextmanager
+        def builder(spec, **options):
+            self.assertEqual(spec.network, 'none')
+            self.assertIsNone(spec.inputs)
+            self.assertIsNone(spec.control)
+            built.append(spec.image)
+            lifecycle = options['lifecycle']; lifecycle['created'] = True
+            container = Mock()
+            def install(argv, **kwargs):
+                if argv[:2] == ['python3', '-c']:
+                    return {'exit_code': 0, 'stdout': '/usr/bin/python3\n'}
+                self.assertIn('--no-deps', argv)
+                self.assertIn('--only-binary=:all:', argv)
+                self.assertIn('--require-hashes', argv)
+                self.assertIn('--no-index', argv)
+                target = options['dependency_cache_path'] / 'pip/site-packages'
+                target.mkdir()
+                (target / 'demo.py').write_text('ANSWER = 42')
+                return {'exit_code': 0, 'timed_out': False, 'oom_killed': False}
+            container.exec.side_effect = install
+            try:
+                yield container
+            finally:
+                lifecycle['removed'] = True
+        runner = Mock(); runner._container.side_effect = builder
+        image = {'Id': IMAGE_ID}
+        first, stats = self.prepare(('pip',))
+        self.cache.pip_environment(runner, image, first, stats, Limits())
+        self.assertEqual(stats['installed_environment'], 'built')
+        (first / 'pip/site-packages/demo.py').write_text('poison from task')
+        second, stats = self.prepare(('pip',))
+        self.cache.pip_environment(runner, image, second, stats, Limits())
+        self.assertEqual(stats['installed_environment'], 'reused')
+        self.assertEqual((second / 'pip/site-packages/demo.py').read_text(), 'ANSWER = 42')
+        self.assertEqual(len(built), 1)
+        third, stats = self.prepare(('pip',))
+        self.cache.pip_environment(runner, {'Id': 'sha256:' + 'b' * 64}, third, stats, Limits())
+        self.assertEqual(stats['installed_environment'], 'built')
+        self.assertEqual(len(built), 2)
+        self.cache.prune(0)
+        self.assertEqual(self.cache.status()['environments_bytes'], 0)
+        self.assertEqual((second / 'pip/site-packages/demo.py').read_text(), 'ANSWER = 42')
+
+    def test_wheel_environment_rejects_builds_urls_and_option_injection(self):
+        checksum = 'a' * 64
+        for requirement in ('demo @ https://files.pythonhosted.org/demo.whl', './local', '-e .',
+                            'demo==1; python_version > "3" --no-binary=:all:',
+                            'demo==1; python_version > "3" -e .', '--index-url https://pypi.org/simple'):
+            self.write('requirements.txt', requirement + ' --hash=sha256:' + checksum + '\n')
+            self.assertFalse(self.cache.wheel_requirements(self.tree), requirement)
+        self.write('requirements.txt', '-r nested/pinned.txt\n')
+        self.write('nested/pinned.txt', 'demo==1; python_version > "3" --hash=sha256:' + checksum + '\n')
+        self.assertTrue(self.cache.wheel_requirements(self.tree))
+        self.write('nested/pinned.txt', '-r /etc/passwd\n')
+        self.assertFalse(self.cache.wheel_requirements(self.tree))
+
+    def test_installer_resource_failures_never_publish_or_negative_cache(self):
+        from contextlib import contextmanager
+        from mineval.sandbox import Limits
+        _, checksum = self.python_lock()
+        self.write('requirements.txt', f'demo==1.0 --hash=sha256:{checksum}\n')
+        for phase in ('install', 'runtime'):
+            for failure in ('timed_out', 'oom_killed'):
+                with self.subTest(phase=phase, failure=failure):
+                    local, stats = self.prepare(('pip',))
+                    @contextmanager
+                    def builder(spec, **options):
+                        lifecycle = options['lifecycle']; lifecycle['created'] = True
+                        container = Mock()
+                        def execute(argv, **kwargs):
+                            result = {'exit_code': 0, 'timed_out': False, 'oom_killed': False,
+                                      'stdout': '/usr/bin/python3\n'}
+                            current = 'runtime' if argv[:2] == ['python3', '-c'] else 'install'
+                            if current == 'install':
+                                installed = local / 'pip/site-packages'; installed.mkdir()
+                                (installed / 'partial.py').write_text('partial')
+                            if current == phase:
+                                result[failure] = True
+                            return result
+                        container.exec.side_effect = execute
+                        try:
+                            yield container
+                        finally:
+                            lifecycle['removed'] = True
+                    runner = Mock(); runner._container.side_effect = builder
+                    self.cache.pip_environment(runner, {'Id': IMAGE_ID}, local, stats, Limits())
+                    self.assertEqual(stats['installed_environment'], 'unavailable')
+                    self.assertFalse(list((self.cache.root / 'environments').glob('*')))
+                    self.assertFalse((local / 'pip/site-packages').exists())
+                    self.assertFalse((local / 'pip/bin').exists())
+
+    def test_installer_cleanup_failure_quarantines_all_mounts(self):
+        from contextlib import contextmanager
+        from mineval.sandbox import Limits, SandboxError
+        _, checksum = self.python_lock()
+        self.write('requirements.txt', f'demo==1.0 --hash=sha256:{checksum}\n')
+        local, stats = self.prepare(('pip',))
+        workspaces = []
+        @contextmanager
+        def builder(spec, **options):
+            options['lifecycle']['created'] = True
+            workspaces.append(spec.workspace)
+            try:
+                yield Mock()
+            finally:
+                raise OSError('daemon removal failed')
+        runner = Mock(); runner._container.side_effect = builder
+        with self.assertRaisesRegex(SandboxError, 'mounts quarantined'):
+            self.cache.pip_environment(runner, {'Id': IMAGE_ID}, local, stats, Limits())
+        self.cache.prune(0)
+        self.assertTrue(local.exists())
+        self.assertTrue(workspaces[0].exists())
+        self.assertFalse(list((self.cache.root / 'environments').glob('*')))
+
+    def test_changed_candidate_requirements_skip_installed_environment(self):
+        _, checksum = self.python_lock()
+        self.write('requirements.txt', f'demo==1.0 --hash=sha256:{checksum}\n')
+        local, stats = self.prepare(('pip',))
+        candidate = self.root / 'candidate'; candidate.mkdir()
+        (candidate / 'requirements.txt').write_text('demo==2.0\n')
+        runner = Mock()
+        from mineval.sandbox import Limits
+        self.cache.pip_environment(runner, {'Id': IMAGE_ID}, local, stats, Limits(), workspace=candidate)
+        runner._container.assert_not_called()
+        self.assertFalse((local / 'pip/site-packages').exists())
+        self.assertFalse((local / 'pip/bin').exists())
+
     def test_uv_and_pylock_direct_archives_and_markers(self):
         url, checksum = self.python_lock()
         self.write('requirements.txt', f'demo @ {url}#sha256={checksum} ; python_version > "3"\n')
@@ -234,7 +415,7 @@ files = [{{ file = "demo-1.0-py3-none-any.whl", hash = "sha256:{checksum}" }}]
         metadata.chmod(0o600); metadata.write_bytes(b'broken metadata')
         _, stats = self.prepare(('pip',))
         self.assertEqual(stats['seeded_packages'], 1)
-        self.assertEqual(self.fetch.call_count, 3)  # repair metadata, keep verified wheel
+        self.assertEqual(self.fetch.call_count, 2)  # verified seed needs no index metadata
 
     def test_native_pip_installs_hashed_wheel_into_independent_environments_offline(self):
         # Build a pure wheel fixture without executing a build backend.

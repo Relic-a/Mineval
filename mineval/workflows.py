@@ -1,10 +1,14 @@
 """Historical workflow queue, shared by CLI and private human dashboard.
 
-A single local worker lock spans execution. Durable checkpoints precede side effects;
+A coordinator owns crash recovery; bounded stage workers execute independent jobs.
+Durable checkpoints precede side effects;
 uncertain work is interrupted, never automatically relaunched. Explicit retries keep
 finished immutable artifacts and use new IDs for uncertain preparation/evaluation.
 """
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import os
+import threading
 import hashlib
 import json
 from pathlib import Path
@@ -95,6 +99,8 @@ class Workflows:
               payload TEXT NOT NULL, state TEXT NOT NULL, stage TEXT NOT NULL,
               detail TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL,
               dedup TEXT NOT NULL);
+              CREATE INDEX IF NOT EXISTS queued_job ON jobs(state,created);
+              CREATE INDEX IF NOT EXISTS run_job ON jobs(task,kind,json_extract(payload,'$.run_id'));
               CREATE UNIQUE INDEX IF NOT EXISTS active_job ON jobs(dedup)
                 WHERE state IN ('queued','running','interrupted');''')
 
@@ -142,9 +148,10 @@ class Workflows:
         with self.db() as db:
             db.execute('DELETE FROM submissions WHERE id=?', (request_id,))
 
-    def jobs(self):
+    def jobs(self, *, state=None):
         with self.db() as db:
-            return [dict(r) | {'payload': json.loads(r['payload'])} for r in db.execute('SELECT * FROM jobs ORDER BY created DESC')]
+            query = 'SELECT * FROM jobs' + (' WHERE state=?' if state else '') + ' ORDER BY created DESC'
+            return [dict(r) | {'payload': json.loads(r['payload'])} for r in db.execute(query, (state,) if state else ())]
 
     def update(self, jid, **changes):
         changes['updated'] = time.time()
@@ -255,43 +262,114 @@ class Workflows:
                     benchmark.recover(self.store, row['task'], p['run_id'])
                 if not new_attempt:
                     raise ValueError('This attempt has no usable saved output; start a new benchmark attempt')
+                p['phase'] = 'benchmark'
                 p['run_id'] = uuid4().hex
                 p['evaluation_id'] = uuid4().hex
             elif new_attempt:
                 raise ValueError('Saved output is usable; retry the remaining stages')
-            # Saved runs are reused; uncertain evaluator IDs are never overwritten.
-            if not (self.store.task(row['task']) / 'evaluations' / (p['evaluation_id'] + '.json')).exists():
+            # Interrupted evaluations remain immutable evidence, not reusable verdicts.
+            evaluation_path = self.store.task(row['task']) / 'evaluations' / (p['evaluation_id'] + '.json')
+            if evaluation_path.exists() and self.store.inspect_evaluation(row['task'], p['evaluation_id']).get('error_kind') == 'interrupted':
+                p['phase'] = 'evaluation'
+                p['internal_evaluation_ids'] = p.get('internal_evaluation_ids', []) + [p['evaluation_id']]
+                p['evaluation_id'] = uuid4().hex
+            elif not evaluation_path.exists():
+                if p.get('phase') == 'review':
+                    p['phase'] = 'evaluation'
                 p['evaluation_id'] = uuid4().hex
             db.execute("UPDATE jobs SET state='queued',detail='',payload=?,updated=? WHERE id=?", (encoded(p), time.time(), jid))
 
+    def concurrency(self):
+        values = {'prepare': 1, 'benchmark': 2, 'evaluation': 1, 'review': 1,
+                  'total': min(4, max(1, (os.cpu_count() or 2) // 2)), 'per_model': 2}
+        supplied = self.settings.get('concurrency', {})
+        if not isinstance(supplied, dict) or set(supplied) - values.keys():
+            raise ValueError('Unknown concurrency setting')
+        values.update(supplied)
+        if any(type(v) is not int or not 1 <= v <= 64 for v in values.values()):
+            raise ValueError('Concurrency limits must be integers between 1 and 64')
+        return values
+
     def work(self, stop_event=None):
-        self.stop_event = stop_event
+        # One coordinator may own a store. This lock is never used by task work;
+        # recovery cannot mistake another live coordinator's jobs for crashed work.
+        self.stop_event = stop_event or threading.Event()
+        limits = self.concurrency()
+        interrupted = False
         with lock(self.store.root / 'historical-worker.lock'):
             with self.db() as db:
                 db.execute("UPDATE jobs SET state='interrupted',detail='Worker stopped during this stage. Inspect saved evidence, then retry explicitly.' WHERE state='running'")
-            while True:
-                if stop_event is not None and stop_event.is_set():
-                    break
-                with self.db() as db:
-                    row = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created LIMIT 1").fetchone()
-                if row is None:
-                    break
-                jid = row['id']; p = json.loads(row['payload'])
-                self.update(jid, state='running')
+            with ThreadPoolExecutor(max_workers=limits['total'], thread_name_prefix='mineval') as pool:
+                active = {}
                 try:
-                    if row['kind'] == 'prepare':
-                        self.prepare(jid, row['task'], p)
-                    else:
-                        self.benchmark(jid, row['task'], p)
-                    self.update(jid, state='completed', stage='completed', detail='Finished; follow task links for immutable evidence')
+                    while True:
+                        if not self.stop_event.is_set():
+                            for job in reversed(self.jobs(state='queued')):
+                                if job['state'] != 'queued' or len(active) >= limits['total']:
+                                    continue
+                                phase = 'prepare' if job['kind'] == 'prepare' else job['payload'].get('phase', 'benchmark')
+                                choices = job['payload'].get('model_settings', {})
+                                role = 'preparation' if phase == 'prepare' else 'evaluation'
+                                model = ((job['payload'].get('configuration') or {}).get('model') if phase == 'benchmark' else choices.get(role, {}).get('model'))
+                                if phase == 'review':
+                                    model = self.settings.get('review_model', model)
+                                models = {model} if model else set()
+                                if phase == 'prepare' and self.settings.get('review_model'):
+                                    models.add(self.settings['review_model'])
+                                if sum(p == phase for p, m in active.values()) >= limits[phase]:
+                                    continue
+                                if any(sum(model in m for p, m in active.values()) >= limits['per_model'] for model in models):
+                                    continue
+                                with self.db() as db:
+                                    claimed = db.execute("UPDATE jobs SET state='running',updated=? WHERE id=? AND state='queued'", (time.time(), job['id'])).rowcount
+                                if claimed:
+                                    active[pool.submit(self._work_stage, job, phase)] = (phase, models)
+                        if not active:
+                            break
+                        done, _ = wait(active, timeout=0.2, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            del active[future]
+                            try:
+                                future.result()
+                            except KeyboardInterrupt:
+                                interrupted = True
+                                self.stop_event.set()
                 except KeyboardInterrupt:
-                    self.update(jid, state='interrupted', detail='Interrupted; retry explicitly')
-                    raise
-                except Exception as exc:
-                    # Raw agent/Docker exceptions may contain secrets. Only deliberate
-                    # workflow guidance is exposed, never subprocess output.
-                    detail = str(exc) if isinstance(exc, WorkflowFailure) else 'Stage failed (' + type(exc).__name__ + '). Inspect task evidence and trusted CLI configuration, then retry.'
-                    self.update(jid, state='failed', detail=detail)
+                    interrupted = True
+                    self.stop_event.set()
+                # Running containers own their cleanup. Do not release coordinator
+                # ownership until their bounded lifecycles have ended.
+                for future in active:
+                    try:
+                        future.result()
+                    except KeyboardInterrupt:
+                        interrupted = True
+            if interrupted:
+                raise KeyboardInterrupt()
+
+    def _work_stage(self, job, phase):
+        jid, task, p = job['id'], job['task'], job['payload']
+        from .sandbox import DockerSandbox as Runtime
+        Runtime._cancellation.event = self.stop_event
+        try:
+            if phase == 'prepare':
+                self.prepare(jid, task, p)
+            else:
+                self.benchmark(jid, task, p, phase=phase)
+                following = {'benchmark': 'evaluation', 'evaluation': 'review'}.get(phase)
+                if following:
+                    self.stage(jid, following)
+                    self.update(jid, state='queued', payload=p | {'phase': following})
+                    return
+            self.update(jid, state='completed', stage='completed', detail='Finished; follow task links for immutable evidence')
+        except KeyboardInterrupt:
+            self.update(jid, state='interrupted', detail='Interrupted; retry explicitly')
+            raise
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, WorkflowFailure) else 'Stage failed (' + type(exc).__name__ + '). Inspect task evidence and trusted CLI configuration, then retry.'
+            self.update(jid, state='failed', detail=detail)
+        finally:
+            Runtime._cancellation.event = None
 
     def stage(self, jid, name):
         event = getattr(self, 'stop_event', None)
@@ -319,18 +397,29 @@ class Workflows:
         self.stage(jid, 'cleanup')
         prep_adapter = self.role_adapter('preparation', p)
         options = dict(adapter=prep_adapter, auth_file=self.auth_file, context=self.context)
-        result = service.session(self.store, task, **options)
-        cleanup = read_json(self.store.task(task) / 'cleanup-latest.json')
+        from .checkpoints import PreparationCheckpoints
+        runtime = DockerSandbox(context=self.context)
+        progress = PreparationCheckpoints(self.store, task,
+            lambda image: runtime.image(image)['Id'] if hasattr(runtime, 'image') else image)
+        def cleanup_key():
+            from .cleanup import INSTRUCTIONS
+            return [progress.state(), p.get('model_settings', {}).get('preparation'), INSTRUCTIONS]
+        def clean():
+            service.session(self.store, task, **options)
+            return read_json(self.store.task(task) / 'cleanup-latest.json')
+        cleanup = progress.run('cleanup', cleanup_key(), clean, progress.cleanup, post_inputs=cleanup_key)
         if cleanup.get('disposition') != 'ready-for-review':
             raise WorkflowFailure('Cleanup needs review. Inspect cleanup findings; correct prerequisites before retrying.')
         if all(c['name'] == 'bootstrap-runtime' for c in verification.load_config(config_path)['commands']):
             raise WorkflowFailure('Cleanup did not replace bootstrap diagnostics with repository checks; inspect cleanup and retry.')
         self.stage(jid, 'diagnostics')
-        diagnostic = verification.diagnose(self.store, task, sandbox=DockerSandbox(context=self.context))
+        diagnostic = progress.run('diagnostics', progress.state(),
+            lambda: progress.current_diagnostic() or verification.diagnose(self.store, task, sandbox=DockerSandbox(context=self.context)), progress.diagnostic)
         if diagnostic.get('status') not in ('completed', 'checks_failed'):
             raise WorkflowFailure('Fresh diagnostics found an environment failure; inspect diagnostics and prerequisites.')
         self.stage(jid, 'private extraction')
-        extraction = review.session(self.store, task, stage='extraction', **options)
+        extraction = progress.run('extraction', [progress.state(), cleanup, diagnostic, p.get('model_settings', {}).get('preparation'), review.EXTRACTION],
+            lambda: review.session(self.store, task, stage='extraction', **options), progress.extraction)
         extraction_id = extraction.get('extraction_id')
         if not extraction_id:
             raise WorkflowFailure('No credible private verification was extracted; inspect extraction findings.')
@@ -344,53 +433,69 @@ class Workflows:
             with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
                 path = Path(temp) / 'config.json'
                 write_json(path, self.checked_config(verification.load_config(selected, evaluation=True) if selected else config))
-                review.validate(self.store, task, extraction_id, path, sandbox=DockerSandbox(context=self.context))
+                validation_key = [progress.state(), extraction_id, review.checked(self.store.task(task) / 'private/extractions' / extraction_id), read_json(path), progress.runtime(read_json(path)['image'])]
+                progress.run('validation-base', validation_key,
+                    lambda: review.validate(self.store, task, extraction_id, path, sandbox=DockerSandbox(context=self.context)), progress.validation)
                 metadata = read_json(self.store.task(task) / 'metadata.json')
                 future = metadata.get('head_commit')
                 if future:
-                    review.validate(self.store, task, extraction_id, path, future_commit=future, sandbox=DockerSandbox(context=self.context))
+                    progress.run('validation-future', [validation_key, future],
+                        lambda: review.validate(self.store, task, extraction_id, path, future_commit=future, sandbox=DockerSandbox(context=self.context)), progress.validation)
         self.stage(jid, 'independent review')
-        approval = review.session(self.store, task, stage='review', extraction_id=extraction_id,
-            **(options | {'adapter': CodexAdapter(self.settings['review_model'], effort=self.settings.get('review_effort')) if self.settings.get('review_model') else prep_adapter}))
+        approval = progress.run('review', [review.inputs(self.store, task, extraction_id), progress.state(),
+            p.get('model_settings', {}).get('preparation'), self.settings.get('review_model'), self.settings.get('review_effort'), review.REVIEW],
+            lambda: review.session(self.store, task, stage='review', extraction_id=extraction_id,
+                **(options | {'adapter': CodexAdapter(self.settings['review_model'], effort=self.settings.get('review_effort')) if self.settings.get('review_model') else prep_adapter})), progress.approval)
         if approval['verdict'] != 'approve':
             raise WorkflowFailure('Independent review: ' + approval['verdict'] + '. ' + '; '.join(approval['reasons']))
         self.stage(jid, 'freezing')
         frozen = self.store.finalize(task, review_id=approval['review_id'])
         self.update(jid, payload=p | {'frozen': frozen})
 
-    def benchmark(self, jid, task, p):
-        self.stage(jid, 'benchmark')
-        path = self.store.task(task) / 'runs' / (p['run_id'] + '.json')
-        if path.exists():
-            record = self.store.inspect_run(task, p['run_id'])
-            if not matches(record, p['revision'], p['configuration']):
-                raise WorkflowFailure('Saved run identity does not match queued work')
-            if record['status'] == 'running':
-                benchmark.recover(self.store, task, p['run_id'])
-                raise WorkflowFailure('Interrupted attempt sealed as an infrastructure error. Explicitly rerun for a new attempt; its evidence is preserved.')
-        else:
-            record = benchmark.run(self.store, task, p['selection']['version'], run_id=p['run_id'],
-                adapter=adapter(p['configuration']), context=self.context,
-                auth_file=self.auth_file if p['configuration']['adapter'] == 'codex' else None)
-            if record['status'] == 'cancelled':
-                raise KeyboardInterrupt()
-        if not record.get('output_available', False):
-            raise WorkflowFailure('Attempt has no usable saved output. Start a new benchmark attempt; its evidence is preserved.')
-        self.stage(jid, 'evaluation')
-        ep = self.store.task(task) / 'evaluations' / (p['evaluation_id'] + '.json')
-        if ep.exists():
-            assessed = self.store.inspect_evaluation(task, p['evaluation_id'])
-        else:
-            import tempfile
-            from .artifacts import write_json
-            with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
-                config = Path(temp) / 'config.json'; write_json(config, p['evaluation_config'])
-                assessed = evaluation.evaluate(self.store, task, p['run_id'], config,
-                    evaluation_id=p['evaluation_id'], sandbox=DockerSandbox(context=self.context),
-                    adapter=self.role_adapter('evaluation', p) if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None,
-                    auth_file=self.auth_file if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None)
-                if assessed.get('error_kind') == 'interrupted':
+    def benchmark(self, jid, task, p, *, phase=None):
+        if phase in (None, 'benchmark'):
+            self.stage(jid, 'benchmark')
+            path = self.store.task(task) / 'runs' / (p['run_id'] + '.json')
+            if path.exists():
+                record = self.store.inspect_run(task, p['run_id'])
+                if not matches(record, p['revision'], p['configuration']):
+                    raise WorkflowFailure('Saved run identity does not match queued work')
+                if record['status'] == 'running':
+                    benchmark.recover(self.store, task, p['run_id'])
+                    raise WorkflowFailure('Interrupted attempt sealed as an infrastructure error. Explicitly rerun for a new attempt; its evidence is preserved.')
+            else:
+                record = benchmark.run(self.store, task, p['selection']['version'], run_id=p['run_id'],
+                    adapter=adapter(p['configuration']), context=self.context,
+                    auth_file=self.auth_file if p['configuration']['adapter'] == 'codex' else None)
+                if record['status'] == 'cancelled':
                     raise KeyboardInterrupt()
+            if not record.get('output_available', False):
+                raise WorkflowFailure('Attempt has no usable saved output. Start a new benchmark attempt; its evidence is preserved.')
+            if phase == 'benchmark':
+                return
+        else:
+            record = self.store.inspect_run(task, p['run_id'])
+        if phase in (None, 'evaluation'):
+            self.stage(jid, 'evaluation')
+            ep = self.store.task(task) / 'evaluations' / (p['evaluation_id'] + '.json')
+            if ep.exists():
+                assessed = self.store.inspect_evaluation(task, p['evaluation_id'])
+            else:
+                import tempfile
+                from .artifacts import write_json
+                with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
+                    config = Path(temp) / 'config.json'; write_json(config, p['evaluation_config'])
+                    assessed = evaluation.evaluate(self.store, task, p['run_id'], config,
+                        evaluation_id=p['evaluation_id'], sandbox=DockerSandbox(context=self.context),
+                        adapter=self.role_adapter('evaluation', p) if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None,
+                        auth_file=self.auth_file if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None,
+                        evaluator_timeout=self.settings.get('evaluator_timeout_seconds', 180))
+            if assessed.get('error_kind') == 'interrupted':
+                raise KeyboardInterrupt()
+            if phase == 'evaluation':
+                return
+        else:
+            assessed = self.store.inspect_evaluation(task, p['evaluation_id'])
         self.stage(jid, 'model review')
         from .memory import record_evaluation
         record_evaluation(self.store, task, assessed['evaluation_id'])
