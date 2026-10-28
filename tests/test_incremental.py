@@ -187,6 +187,13 @@ class IncrementalTests(HistoryFixture):
         path.unlink(); path.write_text('end')
         self.assertNotEqual(digest(path), before)
 
+    def test_hash_rechecks_bytes_when_metadata_identity_is_unchanged(self):
+        path = self.root / 'coarse-clock'; path.write_text('old')
+        with patch('mineval.artifacts._identity', return_value=('unchanged',)):
+            before = digest(path)
+            path.write_text('new')
+            self.assertNotEqual(digest(path), before)
+
     def test_preparation_checkpoints_revalidate_and_invalidate_downstream(self):
         progress = PreparationCheckpoints(self.store, 'example', lambda image: image)
         cleanup = read_json(self.store.task('example') / 'cleanup-latest.json')

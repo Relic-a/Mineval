@@ -1,7 +1,6 @@
 """Bounded, link-free artifact operations. Never follow imported filesystem links."""
 from contextlib import contextmanager
 import fcntl
-from functools import lru_cache
 import hashlib
 import gzip
 import json
@@ -16,7 +15,6 @@ MAX_BYTES = 512 * 1024 * 1024
 MAX_FILES = 100_000
 
 
-@lru_cache(maxsize=32768)
 def _digest(path, identity):
     h = hashlib.sha256()
     with Path(path).open('rb') as f:
@@ -32,8 +30,8 @@ def _identity(info):
 
 
 def digest(path):
-    # Cache bytes, not trust decisions: every call re-stats, every inventory still
-    # checks membership, type and executable bits. ctime detects restored mtimes.
+    # Metadata can remain unchanged across writes on coarse-clock filesystems.
+    # Re-read bytes for every integrity check instead of trusting cached metadata.
     path = Path(path).absolute()
     return _digest(str(path), _identity(path.stat()))
 
