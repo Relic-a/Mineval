@@ -55,3 +55,42 @@ class InstallationTests(unittest.TestCase):
                 Workflows(store).maintain()
             self.assertEqual(len(memory.history('model')), 23)
             self.assertEqual({source['evaluation_id'] for item in memory.history('model') for source in item['sources']}, {str(i) for i in range(24)})
+
+
+class SavedConfigurationCLITests(unittest.TestCase):
+    def invoke(self, argv, **settings):
+        import contextlib
+        import io
+        from mineval.cli import main
+        with patch('mineval.configuration.load', return_value={
+                'data': '/saved/store', 'auth_file': '/saved/auth.json', **settings}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return main(argv)
+
+    def test_saved_auth_only_defaults_to_codex_adapter(self):
+        with patch('mineval.agents.run_agent', return_value={'status': 'completed'}) as run, \
+                patch('pathlib.Path.read_text', return_value='Task'):
+            for adapter in ('fake', 'codex'):
+                self.assertEqual(self.invoke(['agent-run', '/workspace', '--instructions', '/task',
+                    '--output', '/output', '--image', 'local', '--adapter', adapter]), 0)
+                self.assertEqual(run.call_args.kwargs['auth_file'],
+                                 '/saved/auth.json' if adapter == 'codex' else None)
+            self.invoke(['agent-run', '/workspace', '--instructions', '/task', '--output',
+                         '/output', '--image', 'local', '--auth-file', '/explicit/auth.json'])
+            self.assertEqual(run.call_args.kwargs['auth_file'], '/explicit/auth.json')
+
+    def test_saved_auth_does_not_reach_command_or_plain_evaluation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch('mineval.evaluation.evaluate', return_value={'verdict': 'pass'}) as evaluate:
+                self.assertEqual(self.invoke(['evaluate', 'run', '--task', 'task', '--config', 'checks',
+                                               '--command', 'python3', 'review.py'], data=tmp), 0)
+                self.assertIsNone(evaluate.call_args.kwargs['auth_file'])
+                self.assertEqual(self.invoke(['evaluate', 'run', '--task', 'task', '--config', 'checks'], data=tmp), 0)
+                self.assertIsNone(evaluate.call_args.kwargs['auth_file'])
+
+    def test_doctor_uses_explicit_data_and_context(self):
+        with patch('mineval.configuration.diagnose', return_value={'ready': False}) as diagnose:
+            self.assertEqual(self.invoke(['--data', '/requested/store', '--context', 'requested', 'doctor']), 125)
+            sandbox, settings = diagnose.call_args.args
+            self.assertEqual(settings['data'], '/requested/store')
+            self.assertEqual(settings['context'], 'requested')

@@ -10,7 +10,7 @@ Historical benchmarks let you compare models on the same real starting state, wi
 future regression checks kept private. Runs and evaluations retain immutable provenance.
 
 Start with [installation and setup](docs/installation.md). The
-[0.1.0a1 alpha release](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a1)
+[0.1.0a2 alpha release](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a2)
 provides Python wheel and source packages. Standalone executable publication is blocked
 by GitHub's attestation restriction for user-owned private repositories. This is an early
 testing release; fresh-host acceptance and a paid end-to-end benchmark remain unverified.

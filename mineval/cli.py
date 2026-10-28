@@ -218,6 +218,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     for name in ('image', 'auth_file'):
         if hasattr(args, name) and getattr(args, name) is None:
+            # Saved credentials are defaults for model operations, not for fake
+            # adapters, explicit commands or evaluation without an AI evaluator.
+            if name == 'auth_file' and not (
+                    getattr(args, 'adapter', None) == 'codex'
+                    or args.action in ('setup', 'models', 'observe', 'workflow', 'model-review')
+                    or (args.action == 'arena' and args.arena_action == 'serve')):
+                continue
             setattr(args, name, saved.get(name))
     if args.data is None:
         from pathlib import Path
@@ -474,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
             return (124 if result.get('timed_out') else result.get('exit_code', 0)) or 0
         if args.action == "doctor":
             from .configuration import diagnose
-            result = diagnose(sandbox, saved)
+            result = diagnose(sandbox, saved | {'data': args.data, 'context': args.context})
             print(json.dumps(result))
             return 0 if result['ready'] else 125
         command = args.command[1:] if args.command[:1] == ["--"] else args.command

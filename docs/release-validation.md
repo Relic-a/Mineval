@@ -46,3 +46,36 @@ paid benchmark with explicit authorization. Verify target glibc compatibility.
 Build dependencies are version/hash locked; byte-identical executable reproducibility
 has not been established. Authorize release upload and PyPI publication separately.
 No packages, public images or releases were published by this work.
+
+## 0.1.0a2 local installation acceptance
+
+Downloaded the published 0.1.0a1 wheel and sdist with authenticated GitHub CLI and
+verified both against the release SHA256SUMS. Installed the wheel into a dedicated
+user-local virtual environment, exposed `~/.local/bin/mineval`, and ran outside the
+checkout. Saved setup uses the existing `mineval-rootless` context, preloaded
+`mineval-agent:phase3-native` image and the explicit model-only Codex authentication
+file. Setup and doctor reported ready; model discovery returned the available catalog.
+No provider inference was performed.
+
+The documented fake historical demo failed after setup because saved credentials
+were passed to non-Codex adapters. Fixed credential defaults to apply only to model
+operations; explicit credential arguments still reach validation. Also reproduced
+`doctor --data` reporting the saved store's readiness for a missing requested store;
+doctor now checks the effective CLI/environment/saved selection.
+
+Built 0.1.0a2 wheel and sdist, upgraded the local installation, and ran the complete
+historical demo using the installed package outside the checkout with preloaded
+`mineval-fixture:phase4`. Import, cleanup/broker diagnostics, private extraction,
+base/future checks, review, freeze, suite run, independent evaluation, retirement,
+receipt preservation and eight HTTP routes passed. The deliberately unsolved fake
+run correctly received a fail verdict. The installed `observe` command also served
+HTTP 200 and shut down cleanly. The corrected doctor returned not-ready for an
+explicit nonexistent data directory.
+
+This validates the existing Linux host and preloaded images, not a fresh-host
+Docker installation, starter image build or paid-model benchmark. Standalone
+publication remains blocked by the existing attestation policy.
+
+The full suite with live historical/rootless and Arena integration enabled passed:
+214 tests, 6 skipped (optional toolchains/capture). The installed Arena CLI also
+created a brief and generated a ready fixture result with saved authentication present.

@@ -7,13 +7,13 @@ trusted OS/Docker instructions; Mineval never installs services or changes conte
 
 ## Alpha release
 
-The [0.1.0a1 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a1)
+The [0.1.0a2 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a2)
 contains Python wheel and source packages. Python 3.11+ is required. With GitHub CLI
 authenticated to an account that can read this private repository:
 
 ```sh
-gh release download v0.1.0a1 --repo Relic-a/Mineval --pattern '*.whl'
-pipx install ./mineval-0.1.0a1-py3-none-any.whl
+gh release download v0.1.0a2 --repo Relic-a/Mineval --pattern '*.whl'
+pipx install ./mineval-0.1.0a2-py3-none-any.whl
 ```
 
 This alpha is intended for early testing; fresh-host acceptance and a paid end-to-end
