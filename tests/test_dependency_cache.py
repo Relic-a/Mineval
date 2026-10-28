@@ -558,8 +558,15 @@ checksum = "{checksum}"
         config = local / 'cargo/vendor-config.toml'
         config.write_text(config.read_text().replace('/mineval-dependency-cache', str(local)))
         self.assertFalse((local / 'cargo/config.toml').exists())
-        result = subprocess.run(['cargo', '--config', str(config), 'run', '--offline', '--locked', '--quiet'], cwd=self.tree,
-            env={**os.environ, 'CARGO_HOME': str(local / 'cargo'), 'CARGO_TARGET_DIR': str(self.root / 'build')},
+        cargo = shutil.which('cargo')
+        env = {**os.environ, 'CARGO_HOME': str(local / 'cargo'), 'CARGO_TARGET_DIR': str(self.root / 'build')}
+        if shutil.which('rustup'):
+            # Resolve installed tools before isolating CARGO_HOME. Rustup proxies can
+            # otherwise try to sync a toolchain during this offline cache fixture.
+            cargo = subprocess.check_output(['rustup', 'which', 'cargo'], text=True, timeout=30).strip()
+            env['RUSTC'] = subprocess.check_output(['rustup', 'which', 'rustc'], text=True, timeout=30).strip()
+        result = subprocess.run([cargo, '--config', str(config), 'run', '--offline', '--locked', '--quiet'], cwd=self.tree,
+            env=env,
             capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.cache.root / 'target').exists())
