@@ -9,9 +9,10 @@ saved results with inspectable private checks. Discovery remains an external ski
 Historical benchmarks let you compare models on the same real starting state, with
 future regression checks kept private. Runs and evaluations retain immutable provenance.
 
-Start with [installation and setup](docs/installation.md). Standalone Linux release
-builds and a verified installer are provided in this repository; publication and clean
-host acceptance remain release gates. No public binary availability is assumed.
+Start with [installation and setup](docs/installation.md). The
+[0.1.0a1 alpha release](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a1)
+provides a standalone Linux executable and a verified installer. This is an early
+testing release; fresh-host acceptance and a paid end-to-end benchmark remain unverified.
 
 ```sh
 mineval --context mineval-rootless --data "$HOME/.local/share/mineval" setup \

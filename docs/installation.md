@@ -5,14 +5,17 @@ with delegated CPU, memory, swap and PID controllers. Docker Desktop, remote Doc
 macOS and Windows are not supported execution hosts. Install Git and Docker using
 trusted OS/Docker instructions; Mineval never installs services or changes contexts.
 
-## Standalone release candidates
+## Standalone alpha release
 
-The repository contains build automation and a verified installer. Public availability
-is not assumed: a maintainer must test and publish a versioned release first.
-Once a release exists, download `scripts/install.sh` from that reviewed release's source
-and run `sh install.sh v0.1.0`. It requires curl, sha256sum and GitHub CLI `gh` for
+Download `install.sh` from the
+[0.1.0a1 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a1), review it,
+and run `sh install.sh v0.1.0a1`. This alpha is intended for early testing; fresh-host
+acceptance and a paid end-to-end benchmark remain unverified.
+The installer requires sha256sum and GitHub CLI `gh` for authenticated downloads and
 cryptographic GitHub artifact provenance verification. No Python is needed. Downloads
 are versioned; verification fails closed. The default destination is `~/.local/bin`.
+For private repository access, first authenticate with `gh auth login` using an account
+that can read this repository.
 Add that directory to PATH yourself if needed; the installer edits no shell files.
 Repeat with another version to upgrade; `sh install.sh uninstall` removes only the
 managed CLI and retains settings and evidence. Never remove your data store to upgrade.

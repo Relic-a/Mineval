@@ -12,25 +12,26 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); tools = root / 'tools'; tools.mkdir()
             binary = root / 'binary'; binary.write_text('#!/bin/sh\necho mineval\n')
-            curl = tools / 'curl'
-            curl.write_text('''#!/bin/sh
-for arg do
- case "$arg" in https:*) url=$arg;; esac
- last=$arg
-done
-case "$url" in *.sha256) printf '%s  mineval-v0.1.0-linux-x86_64\\n' "$TEST_HASH" > "$last";; *) cp "$TEST_BINARY" "$last";; esac
+            gh = tools / 'gh'
+            gh.write_text('''#!/bin/sh
+if [ "$1 $2" = "release download" ]; then
+ for arg do destination=$arg; done
+ cp "$TEST_BINARY" "$destination/mineval-v0.1.0a1-linux-x86_64"
+ printf '%s  mineval-v0.1.0a1-linux-x86_64\\n' "$TEST_HASH" > "$destination/mineval-v0.1.0a1-linux-x86_64.sha256"
+else
+ exit "${TEST_VERIFY_FAIL:-0}"
+fi
 ''')
-            gh = tools / 'gh'; gh.write_text('#!/bin/sh\nexit "${TEST_VERIFY_FAIL:-0}"\n')
-            for tool in (curl, gh): tool.chmod(0o755)
+            gh.chmod(0o755)
             env = os.environ | {'PATH': str(tools) + ':' + os.environ['PATH'],
                 'MINEVAL_BIN_DIR': str(root / 'bin'), 'TEST_BINARY': str(binary),
                 'TEST_HASH': hashlib.sha256(binary.read_bytes()).hexdigest()}
             def run(version, fail=False):
                 return subprocess.run(['sh', str(script), version], env=env | {'TEST_VERIFY_FAIL': '1' if fail else '0'}, capture_output=True)
-            self.assertNotEqual(run('v0.1.0', True).returncode, 0)
+            self.assertNotEqual(run('v0.1.0a1', True).returncode, 0)
             self.assertFalse((root / 'bin/mineval').exists())
-            self.assertEqual(run('v0.1.0').returncode, 0)
-            self.assertEqual(run('v0.1.0').returncode, 0)
+            self.assertEqual(run('v0.1.0a1').returncode, 0)
+            self.assertEqual(run('v0.1.0a1').returncode, 0)
             self.assertEqual((root / 'bin/mineval').read_bytes(), binary.read_bytes())
             self.assertEqual(run('uninstall').returncode, 0)
             self.assertFalse((root / 'bin/mineval').exists())
