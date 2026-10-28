@@ -5,12 +5,26 @@ with delegated CPU, memory, swap and PID controllers. Docker Desktop, remote Doc
 macOS and Windows are not supported execution hosts. Install Git and Docker using
 trusted OS/Docker instructions; Mineval never installs services or changes contexts.
 
-## Standalone alpha release
+## Alpha release
 
-Download `install.sh` from the
-[0.1.0a1 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a1), review it,
-and run `sh install.sh v0.1.0a1`. This alpha is intended for early testing; fresh-host
-acceptance and a paid end-to-end benchmark remain unverified.
+The [0.1.0a1 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a1)
+contains Python wheel and source packages. Python 3.11+ is required. With GitHub CLI
+authenticated to an account that can read this private repository:
+
+```sh
+gh release download v0.1.0a1 --repo Relic-a/Mineval --pattern '*.whl'
+pipx install ./mineval-0.1.0a1-py3-none-any.whl
+```
+
+This alpha is intended for early testing; fresh-host acceptance and a paid end-to-end
+benchmark remain unverified. Standalone builds pass CI smoke checks, but GitHub does
+not support provenance attestations for user-owned private repositories. No standalone
+binary or installer asset is published in this alpha; use the Python package above.
+
+## Standalone release candidates
+
+The repository includes a standalone build workflow and the following installer for
+future attested releases. Its verification requirement remains mandatory.
 The installer requires sha256sum and GitHub CLI `gh` for authenticated downloads and
 cryptographic GitHub artifact provenance verification. No Python is needed. Downloads
 are versioned; verification fails closed. The default destination is `~/.local/bin`.

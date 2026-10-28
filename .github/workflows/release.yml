@@ -29,11 +29,23 @@ jobs:
           cp dist/mineval "dist/mineval-$VERSION-linux-x86_64"
           cd dist
           sha256sum "mineval-$VERSION-linux-x86_64" > "mineval-$VERSION-linux-x86_64.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
       - uses: actions/attest-build-provenance@v2
+        id: provenance
+        if: github.event.repository.owner.type != 'User' || !github.event.repository.private
         with:
           subject-path: dist/mineval-v*-linux-x86_64
       - uses: actions/upload-artifact@v4
+        if: steps.provenance.outcome == 'success'
         with:
           name: release-candidates
           path: dist/
+      - name: Explain standalone publication restriction
+        if: steps.provenance.outcome == 'skipped'
+        run: echo 'Standalone builds passed smoke checks, but publication requires attestations unavailable for user-owned private repositories. Only Python distributions are eligible for this release.' >> "$GITHUB_STEP_SUMMARY"
 # Publication is intentionally manual and requires authorization.
