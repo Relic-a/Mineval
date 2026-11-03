@@ -7,13 +7,13 @@ trusted OS/Docker instructions; Mineval never installs services or changes conte
 
 ## Alpha release
 
-The [0.1.0a2 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a2)
+The [0.1.0a3 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a3)
 contains Python wheel and source packages. Python 3.11+ is required. With GitHub CLI
 authenticated to an account that can read this private repository:
 
 ```sh
-gh release download v0.1.0a2 --repo Relic-a/Mineval --pattern '*.whl'
-pipx install ./mineval-0.1.0a2-py3-none-any.whl
+gh release download v0.1.0a3 --repo Relic-a/Mineval --pattern '*.whl'
+pipx install ./mineval-0.1.0a3-py3-none-any.whl
 ```
 
 This alpha is intended for early testing; fresh-host acceptance and a paid end-to-end
@@ -71,11 +71,46 @@ are not moved. `MINEVAL_DATA` and explicit `--data` override saved data selectio
 without setup the legacy relative `mineval-data` default remains.
 
 See [historical workflows](historical-workflows.md) for evaluation configurations and
-end-to-end CLI requests. Default admission budgets reserve 2 CPUs and 2 GiB per job,
-plus 512 MiB headroom, increased for declared container limits. `resources` in historical
-settings accepts `cpus_per_job`, `memory_mb_per_job`, `reserve_memory_mb`. Stage, total
-and per-model concurrency limits still apply. Insufficient resources leave work queued;
-run the worker again when capacity is available. Provider limits are operator configured.
+end-to-end CLI requests. Admission estimates are separate from Docker's enforced
+CPU, RAM, swap, PID and tmpfs limits; changing admission never changes frozen limits.
+Tmpfs is charged inside container RAM, not added to it. Stage, total and per-model
+concurrency limits still apply. The worker starts one job at a time, observes a fresh
+interval, then rechecks available RAM, CPU capacity and Linux pressure before adding
+another. Preparation reserves space for both the paused agent and broker verifier.
+
+The optional `resources` object in historical settings accepts:
+
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `cpus_per_job` | 2 | CPU admission estimate, independent of Docker quota |
+| `memory_mb_per_job` | 2048 | RAM estimate per container, MiB |
+| `reserve_memory_mb` | 512 | Host headroom kept free |
+| `admission_interval_seconds` | 1 | Minimum time between starts |
+| `memory_spike_mb` | 256 | Additional growth allowance per live container |
+| `memory_spike_factor` | 1.5 | Growth multiplier on current container RAM |
+| `cpu_pressure_percent` | 50 | Pause admission at this PSI some avg10 CPU percentage |
+| `memory_pressure_percent` | 1 | Pause admission at this PSI some avg10 memory percentage |
+
+Available RAM already excludes live allocations. For each active container the worker
+reserves the greatest of its estimate, observed peak, or current RAM times the growth
+multiplier plus the spike allowance, subtracting only measured anonymous/tmpfs allocations already
+charged to the host. Reclaimable file cache receives no credit. Unreadable, remote or
+stale measurements retain the full estimate. Enclosing cgroup quotas and memory
+budgets also constrain admission. This is a conservative heuristic, not a guarantee
+that every job can grow to its hard limit simultaneously. Increase estimates or host
+headroom for unusually spiky workloads; reduce estimates only with measured evidence.
+
+Normal runs read local cgroup counters about once a second. Results include peak RAM
+(kernel `memory.peak` when available), cumulative CPU seconds, OOM kills and observed
+contention. Stage observations are also saved under `<data>/resource-usage/`, outside
+benchmark receipts. Measurements are best effort: short-lived or inaccessible cgroups
+can be missed, and sampled peaks are lower bounds if the kernel peak is unavailable.
+There are no profiling runs or automatic tuning. OOMs and failed execution observed
+under heavy contention are infrastructure errors, not behavioral/model failures;
+successful checks still stand. Missing telemetry never changes a workload result.
+
+Insufficient resources leave work queued; run the worker again when capacity is
+available. Provider limits are operator configured.
 Run `mineval workflow maintain` in a separate process for background compaction.
 
 ## Python distribution and development

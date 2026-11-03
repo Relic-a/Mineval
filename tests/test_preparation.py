@@ -235,6 +235,14 @@ class DiagnosticsAcceptanceTests(HistoryFixture):
         self.assertFalse((self.workspace / 'diagnostic-only').exists())
         self.assertEqual(read_json(self.store.task('example') / 'status.json')['status'], 'draft')
 
+    def test_failed_check_under_contention_is_environment_failure(self):
+        self.configure()
+        runner = FakeRunner([step(), step(1) | {'resources': {'contended': True}}])
+        report = diagnose(self.store, 'example', sandbox=runner)
+        self.assertEqual(report['status'], 'environment_error')
+        self.assertEqual(report['commands'][1]['interpretation'], 'environment_failure')
+        self.assertEqual(report['commands'][2]['status'], 'skipped')
+
     def test_timeout_skips_later_steps_and_environment_failure_is_distinct(self):
         self.configure()
         report = diagnose(self.store, 'example', sandbox=FakeRunner([step(timeout=True)]))

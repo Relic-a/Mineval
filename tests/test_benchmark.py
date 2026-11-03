@@ -83,6 +83,30 @@ class BenchmarkTests(HistoryFixture):
             benchmark.export(reopened, 'example', 'attempt-1', self.root / 'bad')
         self.assertFalse((self.root / 'bad').exists())
 
+    def test_resource_failures_are_not_model_crashes(self):
+        version = self.frozen()
+        for oom, missing_completion in ((False, False), (True, False), (False, True)):
+            class ResourceFailure(SimulatedDocker):
+                @contextmanager
+                def container(inner, spec):
+                    with super().container(spec) as container:
+                        original = container.inspect.side_effect
+                        container.inspect.side_effect = lambda: original() | {'OOMKilled': oom}
+                        container.resources = {'contended': not oom, 'oom_events': int(oom)}
+                        if missing_completion:
+                            original_start = container.start.side_effect
+                            def start():
+                                original_start()
+                                (spec.control / 'final.json').unlink()
+                            container.start.side_effect = start
+                        yield container
+            record = self.run_fake(version, 'resource-' + str(oom) + str(missing_completion),
+                                   adapter=FakeAdapter('success' if missing_completion else 'error'), sandbox=ResourceFailure())
+            self.assertEqual(record['status'], 'error')
+            self.assertEqual(record['failure_kind'], 'resource_exhaustion' if oom else 'resource_contention')
+            self.assertTrue(record['output_available'])
+            self.assertIsNone(record['task_verdict'])
+
     def test_timeout_crash_cancel_and_invalid_output_are_run_failures(self):
         version = self.frozen()
         for outcome, status in [('error', 'crashed'), ('timeout', 'timeout')]:

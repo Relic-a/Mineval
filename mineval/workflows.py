@@ -304,20 +304,12 @@ class Workflows:
                 # Keep requests: future appends and expired reservations need no re-enqueue.
 
     def resource_request(self, job, phase):
-        resources = self.settings.get('resources', {})
-        cpus = float(resources.get('cpus_per_job', 2))
-        memory = int(resources.get('memory_mb_per_job', 2048))
-        config = job['payload'].get('evaluation_config', {}) if phase == 'evaluation' else {}
-        if phase == 'prepare':
-            draft_config = self.store.draft(job['task']) / 'control/verify.json'
-            if draft_config.exists():
-                config = read_json(draft_config)
-        if phase == 'benchmark':
-            config = read_json(self.store.task(job['task']) / 'versions' /
-                               job['payload']['revision']['version'] / 'verify-config.json')
-        limits = config.get('limits', {})
-        return max(cpus, limits.get('cpus', 2)), max(memory, sum(limits.get(k, default) for k, default in
-                     (('memory_mb', 1024), ('workspace_mb', 512), ('tmp_mb', 64))))
+        from .resources import options
+        values = options(self.settings)
+        # Estimates are independent of Docker ceilings, including tmpfs (which is
+        # charged inside the container's memory limit).
+        count = 2 if phase == 'prepare' else 1  # Agent plus broker verification.
+        return values['cpus_per_job'], count * values['memory_mb_per_job']
 
     def concurrency(self):
         values = {'prepare': 1, 'benchmark': 2, 'evaluation': 1, 'review': 1,
@@ -338,14 +330,15 @@ class Workflows:
         # recovery cannot mistake another live coordinator's jobs for crashed work.
         self.stop_event = stop_event or threading.Event()
         limits = self.concurrency()
-        from .resources import slots
-        slots(self.settings)  # Validate resource settings before claiming work.
+        from .resources import options, admits, Usage
+        options(self.settings)  # Validate resource settings before claiming work.
         interrupted = False
         with lock(self.store.root / 'historical-worker.lock'):
             with self.db() as db:
                 db.execute("UPDATE jobs SET state='interrupted',detail='Worker stopped during this stage. Inspect saved evidence, then retry explicitly.' WHERE state='running'")
             with ThreadPoolExecutor(max_workers=limits['total'], thread_name_prefix='mineval') as pool:
                 active = {}
+                last_start = float("-inf")
                 try:
                     while True:
                         if not self.stop_event.is_set():
@@ -353,12 +346,9 @@ class Workflows:
                                 if job['state'] != 'queued' or len(active) >= limits['total']:
                                     continue
                                 phase = 'prepare' if job['kind'] == 'prepare' else job['payload'].get('phase', 'benchmark')
-                                from .resources import capacity
-                                cpu_capacity, memory_capacity = capacity()
                                 cpu, memory = self.resource_request(job, phase)
-                                reserve = self.settings.get('resources', {}).get('reserve_memory_mb', 512)
-                                if (sum(c for p, m, c, r in active.values()) + cpu > cpu_capacity or
-                                        sum(r for p, m, c, r in active.values()) + memory + reserve > memory_capacity):
+                                if not admits(self.settings, [(c, r, usage) for p, m, c, r, usage in active.values()],
+                                              (cpu, memory), now=time.monotonic(), last_start=last_start):
                                     continue
                                 choices = job['payload'].get('model_settings', {})
                                 role = 'preparation' if phase == 'prepare' else 'evaluation'
@@ -368,17 +358,25 @@ class Workflows:
                                 models = {model} if model else set()
                                 if phase == 'prepare' and self.settings.get('review_model'):
                                     models.add(self.settings['review_model'])
-                                if sum(p == phase for p, m, c, r in active.values()) >= limits[phase]:
+                                if sum(p == phase for p, m, c, r, usage in active.values()) >= limits[phase]:
                                     continue
-                                if any(sum(model in m for p, m, c, r in active.values()) >= self.settings.get('model_concurrency', {}).get(model, limits['per_model']) for model in models):
+                                if any(sum(model in m for p, m, c, r, usage in active.values()) >= self.settings.get('model_concurrency', {}).get(model, limits['per_model']) for model in models):
                                     continue
                                 with self.db() as db:
                                     claimed = db.execute("UPDATE jobs SET state='running',updated=? WHERE id=? AND state='queued'", (time.time(), job['id'])).rowcount
                                 if claimed:
-                                    active[pool.submit(self._work_stage, job, phase)] = (phase, models, cpu, memory)
+                                    usage = Usage(expected_containers=2 if phase == 'prepare' else 1, values=options(self.settings))
+                                    active[pool.submit(self._measured_stage, job, phase, usage)] = (phase, models, cpu, memory, usage)
+                                    last_start = time.monotonic()
+                                    break  # Observe a fresh interval before another admission.
                         if not active:
+                            delay = options(self.settings)['admission_interval_seconds'] - (time.monotonic() - last_start)
+                            if delay > 0 and not self.stop_event.is_set() and self.jobs(state='queued'):
+                                self.stop_event.wait(min(delay, 0.2))
+                                continue
                             break
-                        done, _ = wait(active, timeout=0.2, return_when=FIRST_COMPLETED)
+                        delay = options(self.settings)['admission_interval_seconds'] - (time.monotonic() - last_start)
+                        done, _ = wait(active, timeout=min(0.2, delay) if delay > 0 else 0.2, return_when=FIRST_COMPLETED)
                         for future in done:
                             del active[future]
                             try:
@@ -398,6 +396,25 @@ class Workflows:
                         interrupted = True
             if interrupted:
                 raise KeyboardInterrupt()
+
+    def _measured_stage(self, job, phase, usage):
+        from .resources import Usage
+        Usage.local.current = usage
+        started = time.monotonic()
+        try:
+            return self._work_stage(job, phase)
+        finally:
+            Usage.local.current = None
+            # Operational observations stay outside immutable benchmark receipts.
+            # A telemetry filesystem failure must not replace the stage outcome.
+            try:
+                directory = self.store.root / 'resource-usage'
+                directory.mkdir(exist_ok=True)
+                write_json(directory / (job['id'] + '-' + phase + '-' + uuid4().hex + '.json'),
+                           {'job_id': job['id'], 'phase': phase, 'duration_seconds': time.monotonic() - started,
+                            'containers': usage.snapshot()})
+            except OSError:
+                pass
 
     def _work_stage(self, job, phase):
         jid, task, p = job['id'], job['task'], job['payload']

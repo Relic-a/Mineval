@@ -96,6 +96,7 @@ class RunResult:
     stderr: str
     logs_truncated: bool
     duration_seconds: float
+    resources: dict = field(default_factory=dict)
 
 
 class DockerCLI:
@@ -135,15 +136,19 @@ class DockerCLI:
 class Container:
     """Valid only inside DockerSandbox.container(); removal belongs to its owner."""
 
-    def __init__(self, cli: DockerCLI, container_id: str, image_id: str, workspace: Path | None = None, cancel_event=None):
+    def __init__(self, cli: DockerCLI, container_id: str, image_id: str, workspace: Path | None = None, cancel_event=None, usage=None):
         self._cli = cli
         self.id = container_id
         self.image_id = image_id
         self.workspace = workspace
         self.cancel_event = cancel_event
+        from .resources import Measurement
+        self.measurement = Measurement(self, usage)
+        self.resources = self.measurement.metrics
 
     def start(self) -> None:
         self._cli.call("start", self.id)
+        self.measurement.start()
 
     def wait(self, timeout: float) -> bool:
         """Return True on deadline, killing the entire container before returning."""
@@ -206,7 +211,9 @@ class Container:
         return {"path": str(destination), "sha256": digest(destination)}
 
     def inspect(self) -> dict:
-        return self._cli.json("inspect", "--format", "{{json .State}}", self.id)
+        state = self._cli.json("inspect", "--format", "{{json .State}}", self.id)
+        self.resources['oom_events'] = max(self.resources['oom_events'], int(bool(state.get('OOMKilled'))))
+        return state
 
     def pause(self):
         self._cli.call("pause", self.id)
@@ -272,19 +279,21 @@ class Container:
                 raise SandboxError("Docker exec output streams did not close")
         stdout, stderr = buffers
         state = self.inspect()
-        return {"exit_code": code, "timed_out": timed_out, "oom_killed": state.get("OOMKilled", False),
+        self.measurement.sample()
+        return {"resources": dict(self.resources), "exit_code": code, "timed_out": timed_out, "oom_killed": bool(state.get("OOMKilled") or self.resources["oom_events"]),
                 "stdout": stdout.decode(errors="replace"),
                 "stderr": stderr.decode(errors="replace"),
                 "logs_truncated": any(truncated),
                 "duration_seconds": time.monotonic() - started}
 
     def result(self, *, timed_out: bool, duration_seconds: float) -> RunResult:
-        state = self._cli.json("inspect", "--format", "{{json .State}}", self.id)
+        state = self.inspect()
+        self.measurement.sample()
         if state["Running"]:
             raise SandboxError("Cannot collect a result while the workload is running")
         stdout, stderr, truncated = self._cli.call("logs", self.id)
         return RunResult(self.id, self.image_id, state["ExitCode"], timed_out,
-                         state["OOMKilled"], stdout, stderr, truncated, duration_seconds)
+                         bool(state["OOMKilled"] or self.resources["oom_events"]), stdout, stderr, truncated, duration_seconds, dict(self.resources))
 
 
 class DockerSandbox:
@@ -293,6 +302,8 @@ class DockerSandbox:
     def __init__(self, *, context: str | None = None):
         self._cli = DockerCLI(context)
         self.cancel_event = getattr(self._cancellation, 'event', None)
+        from .resources import Usage
+        self.usage = getattr(Usage.local, 'current', None)
         self.npm_cache = None
         self.dependency_cache = None
 
@@ -451,6 +462,7 @@ class DockerSandbox:
         position = args.index("--entrypoint")
         args[position:position] = mounts
         failure = None
+        container = None
         try:
             if lifecycle is not None:
                 lifecycle['created'] = True
@@ -458,11 +470,14 @@ class DockerSandbox:
             container_id = output.strip()
             if len(container_id) != 64 or any(c not in "0123456789abcdef" for c in container_id):
                 raise SandboxError("Docker create did not return a valid container ID")
-            yield Container(self._cli, container_id, image_id, spec.workspace, self.cancel_event)
+            container = Container(self._cli, container_id, image_id, spec.workspace, self.cancel_event, self.usage)
+            yield container
         except BaseException as exc:
             failure = exc
             raise
         finally:
+            if container is not None:
+                container.measurement.close()
             try:
                 self._cli.call("rm", "--force", "--volumes", name)
                 if lifecycle is not None:

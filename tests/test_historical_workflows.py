@@ -600,10 +600,13 @@ class ModelReviewTests(HistoryFixture):
 
 
 def setUpModule():
-    global resource_patch
+    global resource_patch, pressure_patch
     resource_patch = patch('mineval.resources.capacity', return_value=(64, 131072))
     resource_patch.start()
+    pressure_patch = patch('mineval.resources.pressure', return_value={})
+    pressure_patch.start()
 
 
 def tearDownModule():
     resource_patch.stop()
+    pressure_patch.stop()

@@ -40,8 +40,8 @@ class EvaluationRunner:
         def execute(argv, **kwargs):
             process = subprocess.run(argv, cwd=spec.workspace, capture_output=True, text=True,
                                      env={'PATH': os.environ['PATH'], 'PYTHONPATH': str(spec.workspace)})
-            code = 127 if self.mode == 'command-error' else process.returncode
-            return {'exit_code': code, 'timed_out': self.mode == 'timeout', 'oom_killed': self.mode == 'oom',
+            code = 127 if self.mode == 'command-error' else 1 if self.mode == 'contention' else process.returncode
+            return {'resources': {'contended': self.mode == 'contention'}, 'exit_code': code, 'timed_out': self.mode == 'timeout', 'oom_killed': self.mode == 'oom',
                     'stdout': process.stdout, 'stderr': process.stderr, 'logs_truncated': False,
                     'duration_seconds': 0.01}
         container.exec.side_effect = execute
@@ -76,6 +76,16 @@ class EvaluationTests(HistoryFixture):
     def assess(self, run_id='candidate', evaluation_id=None, runner=None, **kwargs):
         return evaluation.evaluate(self.store, 'example', run_id, self.config,
             evaluation_id=evaluation_id, sandbox=runner or EvaluationRunner(), **kwargs)
+
+    def test_resource_failed_run_is_not_evaluated_as_a_partial_solution(self):
+        record = self.saved()
+        for kind in ('resource_exhaustion', 'resource_contention'):
+            runner = EvaluationRunner()
+            with patch('mineval.evaluation.inspect_attempt', return_value=record | {'failure_kind': kind, 'status': 'error'}):
+                report = self.assess(evaluation_id=kind, runner=runner)
+            self.assertEqual(report['verdict'], 'error')
+            self.assertEqual(report['error_kind'], kind)
+            self.assertFalse(runner.specs)
 
     def test_pass_fail_reassessment_and_immutable_inputs_across_restart(self):
         self.saved()
@@ -171,7 +181,7 @@ class EvaluationTests(HistoryFixture):
             'reason': 'Evidence-backed test proposal does not repair infrastructure.',
             'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
             'limitations': [], 'inconclusive_reason': None}
-        for mode in ('command-error', 'timeout', 'oom'):
+        for mode in ('command-error', 'timeout', 'oom', 'contention'):
             runner = EvaluationRunner(assessment, mode=mode)
             self.assertEqual(self.assess(runner=runner, command=['fixture-evaluator'])['verdict'], 'error')
             self.assertEqual(len(runner.specs), 1)

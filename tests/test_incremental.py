@@ -27,7 +27,8 @@ class IncrementalTests(HistoryFixture):
 
     def flow(self, **settings):
         return Workflows(self.store, {'evaluation_config': str(self.eval_config),
-            'evaluator_agent': False, 'concurrency': {'total': 4}, **settings})
+            'evaluator_agent': False, 'concurrency': {'total': 4},
+            'resources': {'admission_interval_seconds': .01}, **settings})
 
     def enqueue(self, flow, *models):
         return flow.enqueue('benchmark', [{'task_id': 'example', 'version': self.version}],
@@ -219,7 +220,7 @@ class IncrementalTests(HistoryFixture):
         with self.assertRaisesRegex(ValueError, 'hash mismatch'):
             progress.cleanup(cleanup)
 
-    def test_oversized_evaluation_waits_while_other_jobs_progress(self):
+    def test_large_hard_limit_does_not_reserve_maximum_capacity(self):
         from mineval.publication import published
         flow = self.flow()
         self.enqueue(flow, 'large', 'small')
@@ -231,9 +232,8 @@ class IncrementalTests(HistoryFixture):
             flow.work()
         jobs = {j['payload']['configuration']['model']: j for j in flow.jobs()}
         self.assertEqual(jobs['small']['state'], 'completed')
-        self.assertEqual(jobs['large']['state'], 'queued')
-        self.assertEqual(jobs['large']['payload']['phase'], 'evaluation')
-        self.assertFalse(published(self.store, 'example', jobs['large']['payload']['run_id']))
+        self.assertEqual(jobs['large']['state'], 'completed')
+        self.assertTrue(published(self.store, 'example', jobs['large']['payload']['run_id']))
 
     def test_partial_evaluation_receipt_recovery(self):
         from mineval import evaluation
@@ -269,10 +269,13 @@ class IncrementalTests(HistoryFixture):
 
 
 def setUpModule():
-    global resource_patch
+    global resource_patch, pressure_patch
     resource_patch = patch('mineval.resources.capacity', return_value=(64, 131072))
     resource_patch.start()
+    pressure_patch = patch('mineval.resources.pressure', return_value={})
+    pressure_patch.start()
 
 
 def tearDownModule():
     resource_patch.stop()
+    pressure_patch.stop()

@@ -125,7 +125,7 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
                     raise TimeoutError('Evaluation deadline exhausted')
                 result = container.exec(step['argv'], timeout=budget, workdir=spec.workdir)
                 code = result['exit_code']
-                status = ('error' if result['timed_out'] or result['oom_killed'] else
+                status = ('error' if result['timed_out'] or result['oom_killed'] or (code != 0 and result.get('resources', {}).get('contended')) else
                           'passed' if code == 0 else
                           'failed' if step['kind'] == 'tests' and code in step.get('failure_exit_codes', [1]) else
                           'inconclusive' if step['kind'] == 'tests' and code in step.get('inconclusive_exit_codes', [2]) else 'error')
@@ -208,7 +208,10 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
         if image == frozen_config['image'] and re.fullmatch(r'sha256:[0-9a-f]{64}', pinned):
             image = pinned
         try:
-            if not run.get('output_available'):
+            if run.get('failure_kind') in ('resource_exhaustion', 'resource_contention'):
+                report.update(verdict='error', error_kind=run['failure_kind'],
+                    explanation='Run encountered resource exhaustion or contention; retry with sufficient capacity.')
+            elif not run.get('output_available'):
                 report.update(verdict='error', error_kind=run.get('failure_kind') or 'missing_output',
                     explanation='Run has no saved candidate workspace; execution infrastructure failed.')
             else:
