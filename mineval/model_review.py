@@ -26,7 +26,7 @@ def infer(store, value, *, image, model='gpt-6-luna', effort='medium', context=N
         control = temp / 'control'; control.mkdir()
         write_json(workspace / 'input.json', value)
         (inputs / 'prompt.txt').write_text(PROMPT)
-        command = CodexAdapter(model, effort=effort).stage(inputs)
+        command = CodexAdapter(model, effort=effort).stage(inputs, required_files=('observations.json',))
         if auth_file:
             provision_auth(auth_file, inputs / 'auth.json')
         spec = SandboxSpec(image, command, Limits(timeout_seconds=300), workspace=workspace,

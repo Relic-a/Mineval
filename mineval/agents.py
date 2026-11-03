@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 
-from .artifacts import copy_tree, digest, inventory, pack, read_json, write_json
+from .artifacts import copy_tree, digest, inventory, pack, read_json, relative, write_json
 from .history import git, validate
 from .sandbox import DockerSandbox, Limits, SandboxSpec
 
@@ -30,11 +30,16 @@ class CodexAdapter:
     name: str = 'codex'
     effort: str | None = None
 
-    def stage(self, inputs):
+    def stage(self, inputs, *, required_files=()):
         if not self.model or self.model.startswith('-') or any(c.isspace() for c in self.model):
             raise ValueError('Supply an explicit model identifier')
         if self.effort not in (None, 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
             raise ValueError('Unsupported reasoning effort')
+        required_files = tuple(required_files)
+        for name in required_files:
+            relative(name)
+        write_json(inputs / 'required-files.json', list(dict.fromkeys(('final.json', *required_files))))
+        shutil.copyfile(Path(__file__).with_name('codex_runner.py'), inputs / 'codex_runner.py')
         write_json(inputs / 'schema.json', SCHEMA)
         # No host binary, user config, plugins, home, or session directory is mounted.
         # Shell runs only in the container; task text is stdin, never shell source.
@@ -60,11 +65,7 @@ fi
 exec env -i PATH="$PATH" HOME=/tmp CODEX_HOME=/tmp/codex RUSTUP_HOME="${RUSTUP_HOME:-/tmp/.rustup}" \
   $dependency_env \
   NPM_CONFIG_CACHE="$npm_cache" NPM_CONFIG_PREFER_OFFLINE=true NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false \
-  codex exec --ignore-user-config --ignore-rules --ephemeral \
-  --yolo --cd /workspace \
-  --model "$1" --output-schema /mineval-input/schema.json \
-  --output-last-message /mineval-control/final.json - \
-  < /mineval-input/prompt.txt > /dev/null 2>&1
+  python3 /mineval-input/codex_runner.py --model "$1"
 ''', 'mineval-codex', self.model)
         if self.effort:
             return (*command[:2], command[2].replace('--model "$1"', '"$@"'), command[3],

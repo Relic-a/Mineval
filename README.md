@@ -10,7 +10,7 @@ Historical benchmarks let you compare models on the same real starting state, wi
 future regression checks kept private. Runs and evaluations retain immutable provenance.
 
 Start with [installation and setup](docs/installation.md). The
-[0.1.0a2 alpha release](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a2)
+[0.1.0a5 alpha release](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a5)
 provides Python wheel and source packages. Standalone executable publication is blocked
 by GitHub's attestation restriction for user-owned private repositories. This is an early
 testing release; fresh-host acceptance and a paid end-to-end benchmark remain unverified.
@@ -424,6 +424,16 @@ freshly reconstructed pre-base Git history, disposable `/mineval-control`, read-
 Docker socket is mounted. The cleaner must follow those instructions and write
 `/mineval-control/cleanup-report.json`, following [cleanup-report.json](examples/cleanup-report.json).
 Agent process logging is disabled; no transcript is retained.
+
+For Codex stages, a successful process exit with missing required output files
+triggers one follow-up prompt in the same Codex session. This covers completion,
+cleanup, extraction, review, evaluation assessment, and qualitative observation
+reports. All missing files are listed in one reminder; there is no retry loop.
+Both turns share the existing container timeout and resource limits. Nonzero
+exits, timeouts, and out-of-memory failures are not retried. Files still missing
+after the reminder fail the stage; existing report validation remains mandatory.
+Codex session history stays in the disposable container's temporary filesystem
+and is removed with it. Explicit commands and the fake adapter are unchanged.
 
 Alternatively use the Phase 3 adapters (image comes from `verify.json`):
 

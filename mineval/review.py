@@ -138,7 +138,8 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
         if adapter:
             if command or not isinstance(adapter, CodexAdapter):
                 raise ValueError('Supply explicit argv or the dedicated Codex adapter')
-            command = adapter.stage(prompts)
+            command = adapter.stage(prompts, required_files=(
+                'review.json' if stage == 'review' else 'selection.json',))
         if not command:
             raise ValueError('Supply an isolated agent executable or Codex adapter')
         if auth_file:

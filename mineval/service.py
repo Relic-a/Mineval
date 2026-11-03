@@ -122,7 +122,8 @@ def cleanup_session(store, task_id, command, *, runner, adapter=None, auth_file=
         if adapter:
             if command or not isinstance(adapter, (CodexAdapter, FakeAdapter)):
                 raise ValueError('Use explicit argv or a dedicated adapter')
-            command = adapter.stage(inputs)
+            command = (adapter.stage(inputs, required_files=('cleanup-report.json', 'verify.json'))
+                       if isinstance(adapter, CodexAdapter) else adapter.stage(inputs))
         if not command:
             raise ValueError('Supply a cleanup command or adapter')
         if auth_file:

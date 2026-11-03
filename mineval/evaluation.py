@@ -232,7 +232,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                     write_json(inputs / 'baseline-results.json', baseline)
                     (inputs / 'prompt.txt').write_text(PROMPT)
                     if adapter:
-                        command = adapter.stage(inputs)
+                        command = adapter.stage(inputs, required_files=('assessment.json',))
                     if auth_file:
                         provision_auth(auth_file, inputs / 'auth.json')
                     agent_limits = config.get('limits', {}) | {'timeout_seconds': evaluator_timeout}

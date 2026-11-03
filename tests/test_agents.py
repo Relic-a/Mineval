@@ -165,9 +165,12 @@ class PhaseThreeTests(HistoryFixture):
         inputs = self.root / 'inputs'; inputs.mkdir()
         command = CodexAdapter().stage(inputs)
         self.assertEqual(command[-1], 'gpt-6-luna')
-        for flag in ['--yolo', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--cd /workspace',
-                     '--output-schema', '> /dev/null 2>&1']:
-            self.assertIn(flag, command[2])
+        self.assertIn('python3 /mineval-input/codex_runner.py', command[2])
+        self.assertEqual(read_json(inputs / 'required-files.json'), ['final.json'])
+        runner = (inputs / 'codex_runner.py').read_text()
+        for flag in ['--yolo', '--ignore-user-config', '--ignore-rules', '--output-schema']:
+            self.assertIn(flag, runner)
+        self.assertNotIn('--ephemeral', runner)
         auth = self.root / 'auth.json'
         write_json(auth, {'tokens': {'access_token': 'synthetic', 'refresh_token': 'synthetic'}})
         provision_auth(auth, inputs / 'auth.json')
