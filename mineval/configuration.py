@@ -27,7 +27,7 @@ def diagnose(sandbox, settings):
     from .resources import capacity
     cpu, memory = capacity()
     if cpu < 2 or memory < 2560:
-        messages.append('Low available resources: workflow admission may leave jobs queued. Free capacity or configure smaller container limits/resource budgets.')
+        messages.append('Low available resources: preparation will attempt one job at a time; additional workflow admission may leave jobs queued. Free capacity or configure smaller container limits/resource budgets.')
     data = settings.get('data')
     checks['data_directory'] = bool(data and Path(data).is_dir() and os.access(data, os.W_OK))
     if not checks['data_directory']:

@@ -501,4 +501,5 @@ authentication file; credentials are never stored in the queue.
 Resource admission also checks available host/cgroup memory and CPU capacity. Configure
 `resources` budgets as described in [installation](installation.md). Optional
 `model_concurrency` maps individual model identifiers to provider limits; the general
-`concurrency.per_model` remains the fallback. Jobs that do not fit remain queued.
+`concurrency.per_model` remains the fallback. When no workflow jobs are running, one eligible preparation job is attempted even
+under low capacity or pressure. Additional concurrent jobs that do not fit remain queued.

@@ -21,7 +21,7 @@ from .agents import CodexAdapter, FakeAdapter
 from .artifacts import lock, read_json, write_json
 from .categories import category_for
 from .memory import encoded
-from .sandbox import DockerSandbox
+from .sandbox import DockerSandbox, SandboxError
 
 EFFORTS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
 
@@ -347,7 +347,10 @@ class Workflows:
                                     continue
                                 phase = 'prepare' if job['kind'] == 'prepare' else job['payload'].get('phase', 'benchmark')
                                 cpu, memory = self.resource_request(job, phase)
-                                if not admits(self.settings, [(c, r, usage) for p, m, c, r, usage in active.values()],
+                                # Soft estimates control parallelism, never all preparation
+                                # progress. Runtime checks and hard limits still apply.
+                                first_preparation = phase == 'prepare' and not active
+                                if not first_preparation and not admits(self.settings, [(c, r, usage) for p, m, c, r, usage in active.values()],
                                               (cpu, memory), now=time.monotonic(), last_start=last_start):
                                     continue
                                 choices = job['payload'].get('model_settings', {})
@@ -436,6 +439,8 @@ class Workflows:
             raise
         except Exception as exc:
             detail = str(exc) if isinstance(exc, WorkflowFailure) else 'Stage failed (' + type(exc).__name__ + '). Inspect task evidence and trusted CLI configuration, then retry.'
+            if isinstance(exc, (SandboxError, MemoryError)):
+                detail = 'Infrastructure failure (' + type(exc).__name__ + '): runtime execution failed. Inspect Docker resource availability, isolation requirements and task evidence, then retry.'
             self.update(jid, state='failed', detail=detail)
         finally:
             Runtime._cancellation.event = None

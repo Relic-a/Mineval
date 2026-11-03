@@ -7,13 +7,13 @@ trusted OS/Docker instructions; Mineval never installs services or changes conte
 
 ## Alpha release
 
-The [0.1.0a3 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a3)
+The [0.1.0a4 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a4)
 contains Python wheel and source packages. Python 3.11+ is required. With GitHub CLI
 authenticated to an account that can read this private repository:
 
 ```sh
-gh release download v0.1.0a3 --repo Relic-a/Mineval --pattern '*.whl'
-pipx install ./mineval-0.1.0a3-py3-none-any.whl
+gh release download v0.1.0a4 --repo Relic-a/Mineval --pattern '*.whl'
+pipx install ./mineval-0.1.0a4-py3-none-any.whl
 ```
 
 This alpha is intended for early testing; fresh-host acceptance and a paid end-to-end
@@ -109,8 +109,11 @@ There are no profiling runs or automatic tuning. OOMs and failed execution obser
 under heavy contention are infrastructure errors, not behavioral/model failures;
 successful checks still stand. Missing telemetry never changes a workload result.
 
-Insufficient resources leave work queued; run the worker again when capacity is
-available. Provider limits are operator configured.
+When no workflow jobs are running, one eligible preparation job is attempted
+regardless of soft resource estimates or pressure, including after each completion.
+Additional concurrent jobs still require resource admission. Docker limits, runtime
+checks and isolation always apply; execution failures are reported rather than left
+queued. Other jobs that do not fit remain queued until capacity is available. Provider limits are operator configured.
 Run `mineval workflow maintain` in a separate process for background compaction.
 
 ## Python distribution and development

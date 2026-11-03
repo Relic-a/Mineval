@@ -146,6 +146,88 @@ class ResourceTests(unittest.TestCase):
 
 
 class ProgressiveWorkTests(unittest.TestCase):
+    def queued_flow(self, tmp, kinds):
+        flow = Workflows(SimpleNamespace(root=Path(tmp)), {
+            'resources': {'admission_interval_seconds': .01},
+            'concurrency': {'total': 3, 'prepare': 3, 'benchmark': 3}})
+        for i, kind in enumerate(kinds):
+            with flow.db() as db:
+                db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)',
+                           (str(i), kind, 'fixture', '{}', 'queued', 'queued', '', i, i, str(i)))
+        return flow
+
+    def test_preparation_progresses_sequentially_under_soft_resource_constraints(self):
+        for capacity, pressure in [((0, 0), {}), ((8, 16000), {'cpu': 99}),
+                                   ((8, 16000), {'memory': 99})]:
+            with self.subTest(capacity=capacity, pressure=pressure), tempfile.TemporaryDirectory() as tmp:
+                flow = self.queued_flow(tmp, ['prepare'] * 3)
+                starts, running, peak = [], 0, 0
+                def stage(job, phase):
+                    nonlocal running, peak
+                    running += 1
+                    peak = max(peak, running)
+                    starts.append(job['id'])
+                    time.sleep(.04)  # Allow additional admission checks while active.
+                    running -= 1
+                    flow.update(job['id'], state='completed')
+                with patch.object(flow, '_work_stage', side_effect=stage), \
+                     patch.object(resources, 'capacity', return_value=capacity), \
+                     patch.object(resources, 'pressure', return_value=pressure):
+                    flow.work()
+                self.assertEqual(starts, ['0', '1', '2'])
+                self.assertEqual(peak, 1)
+                self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
+                self.assertEqual(len(list((Path(tmp) / 'resource-usage').glob('*.json'))), 3)
+
+    def test_preparation_cannot_bypass_admission_while_benchmark_is_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            flow = self.queued_flow(tmp, ['benchmark', 'prepare'])
+            starts = []
+            def stage(job, phase):
+                starts.append(phase)
+                if phase == 'benchmark':
+                    time.sleep(.06)
+                    self.assertEqual(starts, ['benchmark'])
+                flow.update(job['id'], state='completed')
+            with patch.object(flow, '_work_stage', side_effect=stage), \
+                 patch.object(resources, 'capacity', side_effect=lambda: (8, 16000) if not starts else (0, 0)), \
+                 patch.object(resources, 'pressure', return_value={}):
+                flow.work()
+            self.assertEqual(starts, ['benchmark', 'prepare'])
+
+    def test_preparation_additional_job_uses_progressive_admission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            flow = self.queued_flow(tmp, ['prepare'] * 2)
+            second = threading.Event()
+            starts = []
+            def stage(job, phase):
+                starts.append(time.monotonic())
+                if job['id'] == '0':
+                    self.assertTrue(second.wait(2), 'spare capacity should admit another job')
+                else:
+                    second.set()
+                flow.update(job['id'], state='completed')
+            with patch.object(flow, '_work_stage', side_effect=stage), \
+                 patch.object(resources, 'capacity', return_value=(8, 16000)), \
+                 patch.object(resources, 'pressure', return_value={}):
+                flow.work()
+            self.assertEqual(len(starts), 2)
+            self.assertGreaterEqual(starts[1] - starts[0], .009)
+
+    def test_first_preparation_runtime_failure_is_visible_and_next_is_attempted(self):
+        for failure in (SandboxError('Docker start: insufficient memory'), MemoryError()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp:
+                flow = self.queued_flow(tmp, ['prepare'] * 2)
+                with patch.object(flow, 'prepare', side_effect=[failure, None]) as prepare, \
+                     patch.object(resources, 'capacity', return_value=(0, 0)), \
+                     patch.object(resources, 'pressure', return_value={'memory': 99}):
+                    flow.work()
+                jobs = {j['id']: j for j in flow.jobs()}
+                self.assertEqual(prepare.call_count, 2)
+                self.assertEqual(jobs['0']['state'], 'failed')
+                self.assertIn('Infrastructure failure', jobs['0']['detail'])
+                self.assertEqual(jobs['1']['state'], 'completed')
+
     def test_starts_gradually_rechecks_pressure_and_respects_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
             flow = Workflows(SimpleNamespace(root=Path(tmp)), {
