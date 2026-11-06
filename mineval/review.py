@@ -42,6 +42,11 @@ Distinguish behavioral
 failure (exit 1) from inconclusive (2) and infrastructure errors (other codes).
 Never exempt expected failures. This config is private, reviewed and frozen.
 Omit it if no defensible runnable command exists; explain limitations.
+When /workspace/revision exists, inspect its prior review, extraction, and validation
+results. Address the reviewer’s reasons and empirically diagnose failing or incomplete
+commands. Adapt the evaluation command or test harness when needed, without altering
+selected historical artifact bytes. Verify cases actually execute and finish on both
+base and future where feasible; report remaining coverage limitations honestly.
 """
 REVIEW = """You are the independent third reviewer, after cleanup and extraction.
 Inspect task.json, base, cleaned, future/diffs, cleanup.json, diagnostic.json,
@@ -114,8 +119,20 @@ def approved(store, task_id, review_id):
     return record, directory
 
 
+def revision_evidence(store, task_id, review_id):
+    task = store.task(task_id)
+    directory = task / 'private/reviews' / identifier(review_id)
+    checked(directory)
+    record = read_json(directory / 'review.json')
+    if record['report']['verdict'] != 'revise':
+        raise ValueError('Extraction revision requires a revise verdict')
+    if record['inputs'] != inputs(store, task_id, record['inputs']['extraction_id']):
+        raise ValueError('Extraction revision evidence is stale')
+    return record
+
+
 def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None,
-            context=None, sandbox=None, extraction_id=None):
+            context=None, sandbox=None, extraction_id=None, revision_id=None):
     """Every invocation creates a fresh session; only disposable private copies mount."""
     from .agents import CodexAdapter, provision_auth
     from .verification import load_config
@@ -129,7 +146,10 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
         task, draft = store.task(task_id), store.draft(task_id)
         config = load_config(draft / 'control/verify.json')
         identity = uuid4().hex
+        if revision_id and stage != 'extraction':
+            raise ValueError('Revision evidence is only for extraction')
         bound = inputs(store, task_id, extraction_id) if stage == 'review' else None
+        revision = revision_evidence(store, task_id, revision_id) if revision_id else None
         # Extraction follows a completed producer, even if it later reports unavailable.
         cleanup = read_json(task / 'cleanup-latest.json')
         checked(task / 'cleanups' / identifier(cleanup['cleanup_id']))
@@ -156,6 +176,15 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
             validations = private / 'validations' / extraction_id
             if validations.exists():
                 copy_tree(validations, workspace / 'validations')
+        if revision:
+            previous = revision['inputs']['extraction_id']
+            revision_dir = workspace / 'revision'
+            revision_dir.mkdir()
+            write_json(revision_dir / 'review.json', revision)
+            copy_tree(private / 'extractions' / previous, revision_dir / 'extraction')
+            validations = private / 'validations' / previous
+            if validations.exists():
+                copy_tree(validations, revision_dir / 'validations')
         prompt = REVIEW if stage == 'review' else EXTRACTION
         (prompts / 'prompt.txt').write_text(prompt)
         if adapter:
@@ -188,6 +217,10 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
         if isinstance(cache_stats, dict):
             producer['download_cache'] = cache_stats
         if stage == 'extraction':
+            if revision_id:
+                if revision != revision_evidence(store, task_id, revision_id):
+                    raise ValueError('Extraction revision evidence changed during session')
+                producer['revision_review_id'] = revision_id
             plan = read_json(control / 'selection.json')
             validate_plan(plan)
             if plan['strategy'] == 'unavailable':

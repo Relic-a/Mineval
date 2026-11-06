@@ -81,6 +81,45 @@ class ReviewTests(HistoryFixture):
         with self.assertRaisesRegex(ValueError, 'did not approve'):
             self.store.finalize('example', review_id=result['review_id'])
 
+    def test_revision_feedback_restarts_extraction_and_survives_interruption(self):
+        from mineval.checkpoints import PreparationCheckpoints
+        task = self.store.task('example')
+        config = self.root / 'private-check.json'
+        write_json(config, {'image': 'local:test', 'commands': [
+            {'name': 'regression', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]})
+        validation = validate(self.store, 'example', self.extraction_id, config,
+                              sandbox=FakeRunner([step(1)]))
+        verdict = self.review_extraction(self.extraction_id, 'revise', ['Command timed out'])
+        progress = PreparationCheckpoints(self.store, 'example', lambda image: image)
+        # Mimic an old checkpoint written before retry feedback was implemented.
+        progress.saved['extraction'] = {'key': 'old', 'value': {'extraction_id': self.extraction_id}}
+        write_json(progress.path, progress.saved)
+        self.assertEqual(progress.revision(), verdict['review_id'])
+        class RevisionAgent(ReportAgent):
+            @contextmanager
+            def container(agent_self, spec):
+                revision = spec.workspace / 'revision'
+                self.assertEqual(read_json(revision / 'review.json')['report']['reasons'], ['Command timed out'])
+                self.assertTrue((revision / 'extraction/extraction-manifest.json').exists())
+                self.assertTrue((revision / 'validations' / validation['validation_id'] / 'validation.json').exists())
+                with super().container(spec) as agent:
+                    yield agent
+        def extract():
+            return session(self.store, 'example', stage='extraction', command=['extract'],
+                           revision_id=verdict['review_id'], sandbox=RevisionAgent('selection.json', plan(self.head)))
+        new = progress.run('extraction', ['revision', progress.revision()], extract, progress.extraction)
+        self.assertNotEqual(new['extraction_id'], self.extraction_id)
+        manifest = read_json(task / 'private/extractions' / new['extraction_id'] / 'extraction-manifest.json')
+        self.assertEqual(manifest['producer_session']['revision_review_id'], verdict['review_id'])
+        restarted = PreparationCheckpoints(self.store, 'example', lambda image: image)
+        self.assertEqual(restarted.revision(), verdict['review_id'])
+        self.assertEqual(restarted.run('extraction', ['revision', restarted.revision()],
+                                      lambda: self.fail('repeated extraction'), restarted.extraction), new)
+        diagnose(self.store, 'example', sandbox=FakeRunner([step()]))
+        self.assertIsNone(restarted.revision())
+        with self.assertRaisesRegex(ValueError, 'stale'):
+            extract()
+
     def test_unavailable_and_failed_agents_never_publish_approval(self):
         result = self.extract(plan(self.head) | {'strategy': 'unavailable', 'artifacts': [],
                                                'rationale': 'No defensible objective verification'})

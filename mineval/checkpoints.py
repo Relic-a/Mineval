@@ -71,6 +71,38 @@ class PreparationCheckpoints:
             return value
         return None
 
+    def revision(self):
+        # Recover a revise verdict even if the prior workflow stopped before it
+        # could persist a retry marker (including pre-upgrade failed workflows).
+        current = self.saved.get('extraction', {}).get('value', {}).get('extraction_id')
+        reviews = self.task / 'private/reviews'
+        candidates = sorted(reviews.glob('*/review.json'), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        for path in candidates:
+            record = read_json(path)
+            if record.get('inputs', {}).get('extraction_id') != current:
+                continue
+            review.checked(path.parent)
+            if record['report']['verdict'] != 'revise':
+                return None
+            try:
+                review.revision_evidence(self.store, self.task.name, path.parent.name)
+            except ValueError as exc:
+                if str(exc) == 'Extraction revision evidence is stale':
+                    return None
+                raise
+            self.saved['revision_review_id'] = path.parent.name
+            write_json(self.path, self.saved)
+            return path.parent.name
+        previous = self.saved.get('revision_review_id')
+        if previous:
+            try:
+                review.revision_evidence(self.store, self.task.name, previous)
+            except ValueError as exc:
+                if str(exc) == 'Extraction revision evidence is stale':
+                    return None
+                raise
+        return previous
+
     def extraction(self, value):
         if not value.get('extraction_id'):
             return False
