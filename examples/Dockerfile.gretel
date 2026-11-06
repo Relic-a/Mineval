@@ -16,7 +16,10 @@ RUN python3 -m venv /opt/mineval/venv \
     && ln -s /opt/mineval/venv/bin/mineval /usr/local/bin/mineval \
     && node --version && npm --version && python3 --version && codex --version \
     && mineval --help > /dev/null
-ENV PYTHON=/usr/bin/python3
+# The pinned Node image includes matching headers; node-gyp otherwise downloads
+# and extracts them with ownership changes forbidden by the rootless sandbox.
+ENV PYTHON=/usr/bin/python3 \
+    npm_config_nodedir=/usr/local
 LABEL io.mineval.npm-cache="v1"
 LABEL io.mineval.dependency-cache="npm,pip"
 WORKDIR /workspace
