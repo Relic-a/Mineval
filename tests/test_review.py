@@ -121,7 +121,8 @@ class ReviewTests(HistoryFixture):
         write_json(config, {'image': 'local:test', 'commands': [
             {'name': 'regression', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]})
         latest = digest(self.store.task('example') / 'verify-latest.json')
-        for result, interpretation in [(step(1), 'behavior_failure'), (step(127), 'environment_failure'),
+        for result, interpretation in [(step(1), 'behavior_failure'), (step(2), 'inconclusive'),
+                                       (step(127), 'environment_failure'),
                                        (step(), 'passed')]:
             outcome = validate(self.store, 'example', self.extraction_id, config,
                                future_commit=self.head if interpretation == 'passed' else None,
@@ -134,6 +135,20 @@ class ReviewTests(HistoryFixture):
         approval = self.review_extraction(self.extraction_id)
         frozen = self.store.finalize('example', review_id=approval['review_id'])
         self.assertTrue((self.store.task('example') / 'versions' / frozen['version'] / 'private/validations').exists())
+
+    def test_validation_executes_selected_fixture_on_base_and_future(self):
+        from test_evaluation import EvaluationRunner
+        config = self.root / 'private-real.json'
+        write_json(config, {'image': 'local:test', 'network': 'none', 'commands': [
+            {'name': 'private', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]})
+        base = validate(self.store, 'example', self.extraction_id, config, sandbox=EvaluationRunner())
+        future = validate(self.store, 'example', self.extraction_id, config,
+                          future_commit=self.head, sandbox=EvaluationRunner())
+        self.assertEqual(base['interpretation'], 'behavior_failure')
+        self.assertEqual(future['interpretation'], 'passed')
+        self.assertEqual(base['report']['configuration'], read_json(config))
+        self.assertEqual(base['report']['selected_checks'][0]['path'], 'tests/test_answer.py')
+        self.assertFalse((self.workspace / 'tests').exists())
 
     @unittest.skipUnless(os.environ.get('MINEVAL_TEST_IMAGE'), 'set MINEVAL_TEST_IMAGE for live private sessions')
     def test_live_later_regression_isolated_extraction_review_and_checks(self):

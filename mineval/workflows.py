@@ -492,22 +492,30 @@ class Workflows:
         if diagnostic.get('status') not in ('completed', 'checks_failed'):
             raise WorkflowFailure('Fresh diagnostics found an environment failure; inspect diagnostics and prerequisites.')
         self.stage(jid, 'private extraction')
+        selected = self.settings.get('evaluation_configs', {}).get(task, self.settings.get('evaluation_config'))
+        def reusable_extraction(value):
+            if not progress.extraction(value):
+                return False
+            manifest = read_json(self.store.task(task) / 'private/extractions' / value['extraction_id'] / 'extraction-manifest.json')
+            return bool(selected or manifest.get('plan', {}).get('evaluation_config'))
         extraction = progress.run('extraction', [progress.state(), cleanup, diagnostic, p.get('model_settings', {}).get('preparation'), review.EXTRACTION],
-            lambda: review.session(self.store, task, stage='extraction', **options), progress.extraction)
+            lambda: review.session(self.store, task, stage='extraction', **options), reusable_extraction)
         extraction_id = extraction.get('extraction_id')
         if not extraction_id:
             raise WorkflowFailure('No credible private verification was extracted; inspect extraction findings.')
         self.stage(jid, 'private validation')
         manifest = read_json(self.store.task(task) / 'private/extractions' / extraction_id / 'extraction-manifest.json')
-        selected = self.settings.get('evaluation_configs', {}).get(task, self.settings.get('evaluation_config'))
         config = manifest.get('plan', {}).get('evaluation_config')
+        if not (selected or config):
+            raise WorkflowFailure('Private extraction supplied no runnable evaluation configuration; '
+                                  'provide a trusted private configuration or retry extraction with runnable checks.')
         if selected or config:
             import tempfile
             from .artifacts import write_json
             with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
                 path = Path(temp) / 'config.json'
                 write_json(path, self.checked_config(verification.load_config(selected, evaluation=True) if selected else config))
-                validation_key = [progress.state(), extraction_id, review.checked(self.store.task(task) / 'private/extractions' / extraction_id), read_json(path), progress.runtime(read_json(path)['image'])]
+                validation_key = [review.VALIDATION_POLICY, progress.state(), extraction_id, review.checked(self.store.task(task) / 'private/extractions' / extraction_id), read_json(path), progress.runtime(read_json(path)['image'])]
                 progress.run('validation-base', validation_key,
                     lambda: review.validate(self.store, task, extraction_id, path, sandbox=DockerSandbox(context=self.context)), progress.validation)
                 metadata = read_json(self.store.task(task) / 'metadata.json')

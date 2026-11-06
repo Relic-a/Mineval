@@ -1,12 +1,13 @@
 """Private producing/review sessions and exact-input approval receipts."""
 from pathlib import Path
-import shutil
 import tempfile
 from uuid import uuid4
 
-from .artifacts import copy_tree, digest, inventory, read_json, write_json
+from .artifacts import copy_tree, digest, inventory, read_json, relative, write_json
 from .preparation import identifier
 from .sandbox import DockerSandbox, Limits, SandboxSpec
+
+VALIDATION_POLICY = "private-evaluation-execution-v2"
 
 EXTRACTION = """You are the separate verification extractor. Inspect task.json, base,
 cleaned, future and diffs. Do not edit the task. Write /mineval-control/selection.json:
@@ -18,9 +19,26 @@ select production implementation as test support. Explain behavioral obligations
 not arbitrary implementation choices. If no credible checks exist, use unavailable
 and an empty artifacts list. Do not invent superficial checks. No transcripts.
 Also supply evaluation_config when runnable verification is available: a JSON object
-with image (use the supplied runtime), network, optional limits, and commands
+with image (use the supplied runtime), network, optional limits, workdir, and commands
 [{name, kind: setup|build|tests|smoke, argv: [strings]}]. Include a tests command
-executing the selected private checks at /workspace paths. Distinguish behavioral
+executing the selected private checks at /workspace paths. The extraction session's
+/workspace/cleaned and /workspace/future trees are inspection copies only. During
+validation and evaluation, the candidate root is /workspace, and each selected
+artifact is overlaid at /workspace/<its selected path> before commands run. For
+example, a selected tests/regression.mjs is executed as node tests/regression.mjs
+with workdir /workspace; do not refer to /workspace/cleaned, /workspace/future,
+or /workspace/extraction in evaluation_config. A generic repository test command
+is insufficient unless it actually executes the selected checks. Include dependency
+setup commands required by the supplied runtime. Supply the config whenever a
+credible runnable check exists, and explain specifically if it cannot be run. Choose
+checks that demonstrate the task's missing behavior on the cleaned base and succeed
+on the relevant future tree when feasible; report nondiscriminating checks and failed
+or inconclusive runs honestly. Verify the intended cases actually ran to completion:
+a zero exit alone can mask skipped cases or an early process exit. Classify unexpected
+setup, harness, or premature termination separately from behavioral assertions. Do not
+assert historical implementation names or code shape where another implementation can
+satisfy the behavioral obligation.
+Distinguish behavioral
 failure (exit 1) from inconclusive (2) and infrastructure errors (other codes).
 Never exempt expected failures. This config is private, reviewed and frozen.
 Omit it if no defensible runnable command exists; explain limitations.
@@ -30,8 +48,13 @@ Inspect task.json, base, cleaned, future/diffs, cleanup.json, diagnostic.json,
 extraction and any validation results. Check task integrity, every cleanup edit,
 future/credential leakage, test-only provenance, meaningful behavioral relevance,
 arbitrary assumptions, alternate legitimate solutions, dependencies and reproducibility.
-Review any evaluation_config against selected checks and exit-code semantics; do not
-approve misleading or unjustified commands.
+Review the actual evaluation_config and private base/future validation results against
+selected checks and exit-code semantics. Diagnostics alone do not validate private
+checks. Require a runnable, reproducible private tests command that actually runs the
+selected artifacts in the evaluation workspace, or explain why execution is impossible.
+Assess whether the base and future results actually discriminate the stated behavior;
+a check that passes on both does not demonstrate the missing behavior. Do not approve
+misleading or unjustified commands or treat uncovered obligations as tested.
 Write /mineval-control/review.json: {verdict: approve|revise|reject, reasons: [nonempty
 strings], objective_preserved: boolean, snapshot_reviewed: boolean, changes:
 [{path, reason}]}. Account for exactly each cleanup change. Approve only credible
@@ -225,16 +248,19 @@ def validate_review(report):
 
 def validate(store, task_id, extraction_id, config_path, *, future_commit=None, sandbox=None):
     """Run selected original bytes privately in a fresh sandbox; never grade a solution."""
-    from .verification import diagnose, load_config
+    from .verification import load_config
+    from .evaluation import execute_checks
     from .preparation import commit
     with store.operation(task_id), tempfile.TemporaryDirectory(dir=store.root) as temp:
         temp = Path(temp)
         task = store.task(task_id)
         extraction = task / 'private/extractions' / identifier(extraction_id)
         extraction_hash = checked(extraction)
-        extraction_inventory = inventory(extraction)
         manifest = read_json(extraction / 'extraction-manifest.json')
         config = load_config(config_path, evaluation=True)
+        paths = [str(relative(item['path'])) for item in manifest['artifacts']]
+        if len(paths) != len(set(paths)):
+            raise ValueError('Validation requires one source per destination path')
         if future_commit:
             future_commit = commit(future_commit)
             if future_commit not in read_json(task / 'metadata.json')['future_commits']:
@@ -246,27 +272,24 @@ def validate(store, task_id, extraction_id, config_path, *, future_commit=None, 
                 raise ValueError('Stored future state was modified')
         else:
             source = store.draft(task_id) / 'workspace'
-        workspace = temp / 'workspace'
-        source_hashes = copy_tree(source, workspace)
-        destinations = set()
-        for item in manifest['artifacts']:
-            from .artifacts import relative
-            path = str(relative(item['path']))
-            if path in destinations:
-                raise ValueError('Validation requires one source per destination path')
-            destinations.add(path)
-            target = workspace / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(extraction / relative(item['stored_path']), target)
-            target.chmod(0o755 if extraction_inventory[item['stored_path']]['executable'] else 0o644)
-        write_json(temp / 'verify.json', config)
-        report = diagnose(store, task_id, sandbox=sandbox, already_locked=True,
-                          workspace=workspace, config_path=temp / 'verify.json', persist=False)
+        source_hashes = inventory(source)
+        # Use the same overlay, workdir and exit-code semantics as actual evaluation.
+        # The execution evidence is temporary; the sealed report records the outcome.
+        runner = sandbox or DockerSandbox()
+        from .downloads import cache_task
+        cache_task(runner, store, task_id)
+        report = execute_checks(source, temp / 'workspace', temp / 'execution',
+                                extraction, manifest['artifacts'], [], config,
+                                config['image'], runner)
+        report['configuration'] = config
+        selected_checks = temp / 'execution/selected-checks.json'
+        if selected_checks.exists():
+            report['selected_checks'] = read_json(selected_checks)
         record = {'extraction_id': extraction_id, 'extraction_sha256': extraction_hash,
                   'state': future_commit or 'cleaned-base', 'source_hashes': source_hashes,
                   'report': report,
-                  'interpretation': 'environment_failure' if report['status'] == 'environment_error' else
-                    'passed' if report['status'] == 'completed' else 'behavior_failure',
+                  'interpretation': {'error': 'environment_failure', 'pass': 'passed',
+                                     'fail': 'behavior_failure', 'inconclusive': 'inconclusive'}[report['verdict']],
                   'limitation': 'Future validation uses the original future tree without cleanup edits. '
                                 'Base behavioral failure is evidence for review, never automatic approval.'}
         staged = temp / 'validation'; staged.mkdir()
