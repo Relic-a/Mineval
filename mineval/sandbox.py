@@ -21,7 +21,7 @@ class SandboxError(RuntimeError):
 @dataclass(frozen=True)
 class Limits:
     cpus: float = 2
-    memory_mb: int = 1024
+    memory_mb: int = 2048
     pids: int = 256
     workspace_mb: int = 512
     tmp_mb: int = 64

@@ -15,7 +15,9 @@ meaningless tests. Do not inspect this project's future solution or verification
 Use `mineval verify` for a fresh, consistent sandbox copy of the current workspace
 and /mineval-control/verify.json; `mineval verify report` reads its latest report.
 Wait for verification to finish, including polling a still-running shell tool; a
-pending verification is not evidence. Install dependencies through verification
+pending verification is not evidence. If a required check runs out of memory,
+retry with an appropriate explicit limits.memory_mb in verify.json and record the
+requirement; do not treat an OOM as a task failure. Install dependencies through verification
 commands, not in the cleaned source tree. Keep node_modules and download caches
 out of the cleaned tree. Images labeled io.mineval.npm-cache=v1 receive a private
 npm cache at /mineval-npm-cache; preserve NPM_CONFIG_CACHE and do not override it.
