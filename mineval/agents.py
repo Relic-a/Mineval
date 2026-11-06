@@ -30,7 +30,7 @@ class CodexAdapter:
     name: str = 'codex'
     effort: str | None = None
 
-    def stage(self, inputs, *, required_files=()):
+    def stage(self, inputs, *, required_files=(), require_extraction_config=False):
         if not self.model or self.model.startswith('-') or any(c.isspace() for c in self.model):
             raise ValueError('Supply an explicit model identifier')
         if self.effort not in (None, 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
@@ -39,6 +39,10 @@ class CodexAdapter:
         for name in required_files:
             relative(name)
         write_json(inputs / 'required-files.json', list(dict.fromkeys(('final.json', *required_files))))
+        if require_extraction_config:
+            if 'selection.json' not in required_files:
+                raise ValueError('Extraction config contract requires selection.json')
+            write_json(inputs / 'extraction-contract.json', {'require_evaluation_config': True})
         shutil.copyfile(Path(__file__).with_name('codex_runner.py'), inputs / 'codex_runner.py')
         write_json(inputs / 'schema.json', SCHEMA)
         # No host binary, user config, plugins, home, or session directory is mounted.

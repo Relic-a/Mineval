@@ -13,7 +13,9 @@ EXTRACTION = """You are the separate verification extractor. Inspect task.json, 
 cleaned, future and diffs. Do not edit the task. Write /mineval-control/selection.json:
 {strategy: focused|fuller|unavailable, rationale: nonempty string, dependencies:
 [string], instructions: nonempty string, limitations: [string], artifacts:
-[{commit, path, purpose, test_only: true}]}. Select meaningful behavioral tests,
+[{commit, path, purpose, test_only: true}], evaluation_config: {image, commands}}.
+The evaluation_config object belongs inside selection.json, not only in the completion
+message. Select meaningful behavioral tests,
 fixtures and essential test-only dependencies from the supplied history. Never
 select production implementation as test support. Explain behavioral obligations,
 not arbitrary implementation choices. If no credible checks exist, use unavailable
@@ -41,7 +43,7 @@ satisfy the behavioral obligation.
 Distinguish behavioral
 failure (exit 1) from inconclusive (2) and infrastructure errors (other codes).
 Never exempt expected failures. This config is private, reviewed and frozen.
-Omit it if no defensible runnable command exists; explain limitations.
+If no defensible runnable command exists, use unavailable and explain limitations.
 When /workspace/revision exists, inspect its prior review, extraction, and validation
 results. Address the reviewer’s reasons and empirically diagnose failing or incomplete
 commands. Adapt the evaluation command or test harness when needed, without altering
@@ -132,7 +134,8 @@ def revision_evidence(store, task_id, review_id):
 
 
 def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None,
-            context=None, sandbox=None, extraction_id=None, revision_id=None):
+            context=None, sandbox=None, extraction_id=None, revision_id=None,
+            require_evaluation_config=False):
     """Every invocation creates a fresh session; only disposable private copies mount."""
     from .agents import CodexAdapter, provision_auth
     from .verification import load_config
@@ -191,7 +194,8 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
             if command or not isinstance(adapter, CodexAdapter):
                 raise ValueError('Supply explicit argv or the dedicated Codex adapter')
             command = adapter.stage(prompts, required_files=(
-                'review.json' if stage == 'review' else 'selection.json',))
+                'review.json' if stage == 'review' else 'selection.json',),
+                require_extraction_config=stage == 'extraction' and require_evaluation_config)
         if not command:
             raise ValueError('Supply an isolated agent executable or Codex adapter')
         if auth_file:
@@ -222,7 +226,7 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
                     raise ValueError('Extraction revision evidence changed during session')
                 producer['revision_review_id'] = revision_id
             plan = read_json(control / 'selection.json')
-            validate_plan(plan)
+            validate_plan(plan, require_evaluation_config=require_evaluation_config)
             if plan['strategy'] == 'unavailable':
                 staged = temp / 'unavailable'; staged.mkdir()
                 write_json(staged / 'report.json', {'plan': plan, 'producer': producer})
@@ -249,7 +253,7 @@ def strings(value):
     return isinstance(value, list) and all(isinstance(x, str) and x.strip() for x in value)
 
 
-def validate_plan(plan):
+def validate_plan(plan, *, require_evaluation_config=False):
     if (not isinstance(plan, dict) or set(plan) - {'evaluation_config'} != {'strategy', 'rationale', 'dependencies',
             'instructions', 'limitations', 'artifacts'} or
             plan['strategy'] not in ('focused', 'fuller', 'unavailable') or
@@ -258,6 +262,8 @@ def validate_plan(plan):
             not isinstance(plan['artifacts'], list) or
             (bool(plan['artifacts']) != (plan['strategy'] != 'unavailable'))):
         raise ValueError('Invalid private verification plan')
+    if require_evaluation_config and plan['strategy'] != 'unavailable' and not isinstance(plan.get('evaluation_config'), dict):
+        raise ValueError('Runnable private verification requires an evaluation_config object')
     if 'evaluation_config' in plan:
         from .verification import load_config
         with tempfile.TemporaryDirectory() as temp:

@@ -59,6 +59,27 @@ class ReviewTests(HistoryFixture):
         self.assertEqual(selected.read_text(), 'from app import answer\nassert answer() == 42\n')
         self.assertEqual(inventory(self.workspace), before)
 
+    def test_required_config_is_checked_before_sealing_extraction(self):
+        task = self.store.task('example')
+        before = set((task / 'private/extractions').iterdir())
+        with self.assertRaisesRegex(ValueError, 'requires an evaluation_config'):
+            session(self.store, 'example', stage='extraction', command=['extract'],
+                    require_evaluation_config=True,
+                    sandbox=ReportAgent('selection.json', plan(self.head)))
+        self.assertEqual(set((task / 'private/extractions').iterdir()), before)
+        config = {'image': 'local:test', 'commands': [
+            {'name': 'private', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]}
+        result = session(self.store, 'example', stage='extraction', command=['extract'],
+                         require_evaluation_config=True,
+                         sandbox=ReportAgent('selection.json', plan(self.head) | {'evaluation_config': config}))
+        manifest = read_json(task / 'private/extractions' / result['extraction_id'] / 'extraction-manifest.json')
+        self.assertEqual(manifest['plan']['evaluation_config'], config)
+        unavailable = plan(self.head) | {'strategy': 'unavailable', 'artifacts': []}
+        result = session(self.store, 'example', stage='extraction', command=['extract'],
+                         require_evaluation_config=True,
+                         sandbox=ReportAgent('selection.json', unavailable))
+        self.assertEqual(result['status'], 'needs-review')
+
     def test_inline_attestation_and_legacy_extraction_cannot_approve(self):
         with self.assertRaisesRegex(ValueError, 'independent review'):
             self.store.finalize('example', self.review)

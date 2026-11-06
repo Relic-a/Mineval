@@ -500,7 +500,8 @@ class Workflows:
             return bool(selected or manifest.get('plan', {}).get('evaluation_config'))
         revision_id = progress.revision()
         extraction = progress.run('extraction', [progress.state(), cleanup, diagnostic, p.get('model_settings', {}).get('preparation'), review.EXTRACTION, revision_id],
-            lambda: review.session(self.store, task, stage='extraction', revision_id=revision_id, **options), reusable_extraction)
+            lambda: review.session(self.store, task, stage='extraction', revision_id=revision_id,
+                require_evaluation_config=not bool(selected), **options), reusable_extraction)
         extraction_id = extraction.get('extraction_id')
         if not extraction_id:
             raise WorkflowFailure('No credible private verification was extracted; inspect extraction findings.')

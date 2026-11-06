@@ -37,6 +37,12 @@ print('non-json fixture noise')
 print('[]')
 mode = os.environ.get('FIXTURE_MODE', 'repair')
 names = ['final.json', 'cleanup-report.json', 'verify.json']
+if mode in ('selection-repair', 'selection-omit'):
+    (root / 'control' / 'final.json').write_text('{}')
+    selection = {'strategy': 'focused', 'artifacts': ['test']}
+    if mode == 'selection-repair' and prior:
+        selection['evaluation_config'] = {'image': 'fixture', 'commands': [{'kind': 'tests', 'argv': ['true']}]}
+    (root / 'control' / 'selection.json').write_text(json.dumps(selection))
 if mode == 'complete' or (mode == 'repair' and prior):
     for name in names:
         (root / 'control' / name).write_text('{}')
@@ -69,6 +75,23 @@ if mode == 'complete' or (mode == 'repair' and prior):
             self.assertIn(str(self.control / name), second['prompt'])
         self.assertNotIn('--last', second['argv'])
         self.assertFalse((self.root / 'unwanted').exists())
+
+    def test_incomplete_extraction_is_repaired_in_same_session(self):
+        CodexAdapter().stage(self.inputs, required_files=('selection.json',),
+                             require_extraction_config=True)
+        with patch.dict(os.environ, {'FIXTURE_MODE': 'selection-repair'}):
+            self.assertEqual(self.execute(), 0)
+        first, second = self.calls()
+        self.assertEqual(second['argv'][-3:], ['resume', 'exact-thread-id', '-'])
+        self.assertIn('evaluation_config', second['prompt'])
+        self.assertIn('evaluation_config', json.loads((self.control / 'selection.json').read_text()))
+
+    def test_incomplete_extraction_after_reminder_fails(self):
+        CodexAdapter().stage(self.inputs, required_files=('selection.json',),
+                             require_extraction_config=True)
+        with patch.dict(os.environ, {'FIXTURE_MODE': 'selection-omit'}):
+            self.assertEqual(self.execute(), 1)
+        self.assertEqual(len(self.calls()), 2)
 
     def test_complete_first_turn_needs_no_reminder(self):
         with patch.dict(os.environ, {'FIXTURE_MODE': 'complete'}):
