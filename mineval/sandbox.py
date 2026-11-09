@@ -233,7 +233,9 @@ class Container:
 
     def exec(self, argv, *, timeout, workdir="/workspace") -> dict:
         """Execute a step; timeout kills the whole sandbox, including descendants."""
+        from .resources import pressure_totals, pressure_delta
         started = time.monotonic()
+        psi_start = pressure_totals(self.measurement.group)
         timed_out = False
         limit = 64 * 1024
         buffers = [bytearray(), bytearray()]
@@ -294,7 +296,8 @@ class Container:
               sensitive={'stdout': stdout.decode(errors='replace'), 'stderr': stderr.decode(errors='replace')})
         state = self.inspect()
         self.measurement.sample()
-        return {"resources": dict(self.resources), "exit_code": code, "timed_out": timed_out, "oom_killed": bool(state.get("OOMKilled") or self.resources["oom_events"]),
+        psi_end = pressure_totals(self.measurement.group)
+        return {"resources": dict(self.resources), "pressure_stall_us": pressure_delta(psi_start, psi_end), "started_at_monotonic": started, "ended_at_monotonic": time.monotonic(), "exit_code": code, "timed_out": timed_out, "oom_killed": bool(state.get("OOMKilled") or self.resources["oom_events"]),
                 "stdout": stdout.decode(errors="replace"),
                 "stderr": stderr.decode(errors="replace"),
                 "logs_truncated": any(truncated),

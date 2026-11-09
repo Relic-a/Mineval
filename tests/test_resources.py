@@ -87,7 +87,7 @@ class ResourceTests(unittest.TestCase):
             usage = resources.Usage()
             measurement = resources.Measurement(Mock(), usage)
             measurement.group = group
-            with patch.object(resources, 'pressure', return_value={'memory': 2}):
+            with patch.object(resources, 'pressure_sources', return_value={'host': {'cpu': 0, 'memory': 2}, 'container': {'cpu': 0, 'memory': 0}}):
                 measurement.sample()
             metrics = usage.snapshot()[0]
             self.assertEqual(metrics['peak_memory_mb'], 2048)
@@ -99,6 +99,36 @@ class ResourceTests(unittest.TestCase):
                 (group / name).unlink()
             measurement.close()  # Exited cgroups are normal, not workload errors.
             self.assertFalse(usage.snapshot()[0]['active'])
+
+    def test_pressure_counter_delta_keeps_missing_or_reset_values_unknown(self):
+        before = {'host': {'cpu': 10, 'memory': 20}, 'container': {'cpu': None, 'memory': 5}}
+        after = {'host': {'cpu': 15, 'memory': 19}, 'container': {'cpu': 2, 'memory': 8}}
+        self.assertEqual(resources.pressure_delta(before, after),
+                         {'host': {'cpu': 5, 'memory': None}, 'container': {'cpu': None, 'memory': 3}})
+
+    def test_pressure_diagnostics_show_source_latched_trigger_and_later_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            group = Path(tmp)
+            for name, value in {'memory.current': '104857600', 'memory.peak': '209715200',
+                                'memory.max': '2147483648', 'memory.stat': 'anon 1\nshmem 0\n',
+                                'cpu.stat': 'usage_usec 1000000\n', 'memory.events': 'oom_kill 0\n'}.items():
+                (group / name).write_text(value)
+            measurement = resources.Measurement(Mock())
+            measurement.group = group
+            def source(host, container):
+                return {'host': {'cpu': host, 'memory': 0}, 'container': {'cpu': container, 'memory': 0}}
+            with patch.object(resources, 'pressure_sources', side_effect=[source(10, 70), source(60, 1), source(5, 2)]):
+                measurement.sample(); measurement.sample(); measurement.sample()
+            diag = measurement.metrics['pressure_diagnostics']
+            self.assertTrue(measurement.metrics['contended'])
+            self.assertEqual(diag['baseline']['host']['cpu'], 10)
+            self.assertEqual(diag['peak']['host']['cpu'], 60)
+            self.assertEqual(diag['end']['host']['cpu'], 5)
+            self.assertEqual(diag['first_trigger']['resources'], ['cpu'])
+            self.assertEqual(diag['first_trigger']['sources']['host']['cpu'], 60)
+            self.assertEqual(diag['thresholds_percent']['cpu'], 50)
+            self.assertEqual(diag['memory_end']['limit_mb'], 2048)
+            self.assertEqual(diag['samples'], 3)
 
     def test_exec_child_oom_is_infrastructure_even_when_container_survives(self):
         import io

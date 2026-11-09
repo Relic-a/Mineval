@@ -78,20 +78,55 @@ def slots(settings):
                       int((memory - values['reserve_memory_mb']) / values['memory_mb_per_job'])))
 
 
-def pressure():
-    """PSI some avg10: percent of time runnable work waited for a resource."""
+def pressure_sources(container_group=None):
+    """Bounded PSI samples; labels identify scope without exposing cgroup paths."""
     result = {}
-    for resource in ('cpu', 'memory'):
-        values = []
-        for base in [Path('/proc/pressure'), *cgroups()]:
-            path = base / resource if base == Path('/proc/pressure') else base / (resource + '.pressure')
+    scopes = [('host', Path('/proc/pressure'))]
+    scopes += [(f'ancestor_{i}', group) for i, group in enumerate(cgroups())]
+    if container_group is not None:
+        scopes.append(('container', container_group))
+    for label, base in scopes:
+        result[label] = {}
+        for resource in ('cpu', 'memory'):
+            path = base / resource if label == 'host' else base / (resource + '.pressure')
             try:
                 line = next(line for line in path.read_text().splitlines() if line.startswith('some '))
-                values.append(float(dict(item.split('=') for item in line.split()[1:])['avg10']))
+                result[label][resource] = float(dict(item.split('=') for item in line.split()[1:])['avg10'])
             except (OSError, ValueError, KeyError, StopIteration):
-                pass
-        result[resource] = max(values, default=0)
+                result[label][resource] = None
     return result
+
+
+def pressure_totals(container_group=None):
+    """Cumulative PSI stall microseconds, for command interval deltas only."""
+    scopes = [('host', Path('/proc/pressure'))]
+    scopes += [(f'ancestor_{i}', group) for i, group in enumerate(cgroups())]
+    if container_group is not None:
+        scopes.append(('container', container_group))
+    result = {}
+    for label, base in scopes:
+        result[label] = {}
+        for resource in ('cpu', 'memory'):
+            path = base / resource if label == 'host' else base / (resource + '.pressure')
+            try:
+                line = next(line for line in path.read_text().splitlines() if line.startswith('some '))
+                result[label][resource] = int(dict(item.split('=') for item in line.split()[1:])['total'])
+            except (OSError, ValueError, KeyError, StopIteration):
+                result[label][resource] = None
+    return result
+
+
+def pressure_delta(start, end):
+    return {scope: {key: (value - start[scope][key] if value is not None and
+                          start.get(scope, {}).get(key) is not None and value >= start[scope][key] else None)
+                    for key, value in readings.items()} for scope, readings in end.items()}
+
+
+def pressure():
+    """Maximum host/ancestor PSI some avg10, used by the existing policy."""
+    sources = pressure_sources()
+    return {resource: max((v[resource] for v in sources.values() if v[resource] is not None), default=0)
+            for resource in ('cpu', 'memory')}
 
 
 def pressured(values, sample=None):
@@ -157,7 +192,8 @@ class Measurement:
         self.done = threading.Event()
         self.thread = None
         self.group = None
-        self.metrics = dict(active=True, available=False, peak_memory_mb=0,
+        self.pressure_diagnostics = None
+        self.metrics = dict(active=True, available=False, measurement_unavailable='not_started', peak_memory_mb=0,
                             cpu_seconds=0, oom_events=0, contended=False)
         if usage is not None:
             usage.add(self.metrics)
@@ -168,6 +204,7 @@ class Measurement:
             pid = state.get('Pid')
             groups = cgroups(pid) if type(pid) is int and pid > 0 else []
             # Prevent accidental local PID matches for remote Docker contexts.
+            self.metrics['measurement_unavailable'] = 'container_cgroup_unidentified'
             if groups and self.container.id in str(groups[0]):
                 self.group = groups[0]
                 self.sample()
@@ -194,12 +231,41 @@ class Measurement:
                 peak = max(peak, number('memory.peak') / 1024**2)
             except OSError:
                 pass
-            self.metrics.update(available=True, memory_mb=current, charged_mb=min(charged, current),
+            self.metrics.update(available=True, measurement_unavailable=None, memory_mb=current, charged_mb=min(charged, current),
                 peak_memory_mb=max(self.metrics['peak_memory_mb'], peak),
                 cpu_seconds=int(fields('cpu.stat')['usage_usec']) / 1e6,
                 oom_events=max(self.metrics['oom_events'], int(fields('memory.events').get('oom_kill', 0))),
                 sampled_at=time.monotonic())
-            self.metrics['contended'] |= pressured(self.values)
+            try:
+                limit = (self.group / 'memory.max').read_text().strip()
+                limit_mb = None if limit == 'max' else int(limit) / 1024**2
+            except (OSError, ValueError):
+                limit_mb = None
+            memory = {'current_mb': current, 'peak_mb': peak, 'limit_mb': limit_mb,
+                      'oom_kill_events': self.metrics['oom_events']}
+            sources = pressure_sources(self.group)
+            sample = {resource: max((v[resource] for name, v in sources.items()
+                                     if name != 'container' and v[resource] is not None), default=0)
+                      for resource in ('cpu', 'memory')}
+            triggered = [key for key in ('cpu', 'memory')
+                         if sample[key] >= self.values[key + '_pressure_percent']]
+            diagnostic = self.pressure_diagnostics
+            if diagnostic is None:
+                diagnostic = {'thresholds_percent': {key: self.values[key + '_pressure_percent']
+                                                       for key in ('cpu', 'memory')},
+                              'baseline': sources, 'peak': sources, 'end': sources,
+                              'first_trigger': None, 'samples': 0, 'memory_baseline': memory}
+            peak_sources = {name: {key: max((x for x in (diagnostic['peak'].get(name, {}).get(key), value)
+                                                   if x is not None), default=None)
+                                   for key, value in readings.items()}
+                            for name, readings in sources.items()}
+            first = diagnostic['first_trigger']
+            if first is None and triggered:
+                first = {'sampled_at': self.metrics['sampled_at'], 'resources': triggered, 'sources': sources}
+            self.pressure_diagnostics = diagnostic | {'peak': peak_sources, 'end': sources,
+                'first_trigger': first, 'samples': diagnostic['samples'] + 1, 'memory_end': memory}
+            self.metrics['pressure_diagnostics'] = self.pressure_diagnostics
+            self.metrics['contended'] |= bool(triggered)
         except (OSError, ValueError, KeyError):
             pass  # An exited cgroup can disappear before Docker removal.
 

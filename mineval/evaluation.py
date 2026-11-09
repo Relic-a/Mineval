@@ -6,6 +6,7 @@ import tempfile
 import time
 from uuid import uuid4
 
+from .devlog import event
 from .artifacts import lock, copy_tree, digest, inventory, read_json, relative, unpack, write_json
 from .benchmark import inspect_attempt, now, output_path
 from .preparation import identifier
@@ -129,6 +130,15 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
                           'passed' if code == 0 else
                           'failed' if step['kind'] == 'tests' and code in step.get('failure_exit_codes', [1]) else
                           'inconclusive' if step['kind'] == 'tests' and code in step.get('inconclusive_exit_codes', [2]) else 'error')
+                reason = ('timeout' if result['timed_out'] else 'oom' if result['oom_killed'] else
+                          'nonzero_exit_with_latched_contention' if code != 0 and result.get('resources', {}).get('contended') else
+                          'exit_code')
+                event('evaluation.command.classified', container_id=container.id, command_index=len(report['commands']),
+                      kind=step['kind'], status=status, reason=reason, exit_code=code,
+                      timeout_seconds=budget, timed_out=result['timed_out'], oom_killed=result['oom_killed'],
+                      resources=result.get('resources', {}), pressure_stall_us=result.get('pressure_stall_us'), limits=vars(limits),
+                      started_at_monotonic=result.get('started_at_monotonic'),
+                      ended_at_monotonic=result.get('ended_at_monotonic'))
                 report['commands'].append({'name': step['name'], 'kind': step['kind'], 'status': status, **result})
                 if status == 'error' or not container.inspect()['Running']:
                     raise ValueError('Verification execution failed')
