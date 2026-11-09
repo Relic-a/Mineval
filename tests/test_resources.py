@@ -59,15 +59,14 @@ class ResourceTests(unittest.TestCase):
         usage.add(self.usage().containers[0])
         self.assertEqual(usage.remaining(4096, resources.DEFAULTS), 3072)
 
-    def test_cooldown_cpu_and_pressure_block_admission(self):
+    def test_psi_never_blocks_admission_but_cpu_and_cooldown_do(self):
         self.assertFalse(self.admit(self.usage(), 20000, last_start=9.5))
-        for pressure in ({'cpu': 51}, {'memory': 2}):
-            with patch.object(resources, 'capacity', return_value=(8, 20000)), \
-                 patch.object(resources, 'pressure', return_value=pressure):
-                self.assertFalse(resources.admits({}, [], (2, 2048), now=10, last_start=0))
-        with patch.object(resources, 'capacity', return_value=(1, 20000)), \
-             patch.object(resources, 'pressure', return_value={}):
+        with patch.object(resources, 'capacity', return_value=(8, 20000)), \
+             patch.object(resources, 'pressure', return_value={'cpu': 100, 'memory': 100}):
+            self.assertTrue(resources.admits({}, [], (2, 2048), now=10, last_start=0))
+        with patch.object(resources, 'capacity', return_value=(1, 20000)):
             self.assertFalse(resources.admits({}, [], (2, 2048), now=10, last_start=0))
+        self.assertNotIn('memory_pressure_percent', resources.options({'resources': {'memory_pressure_percent': 1}}))
 
     def test_resource_settings_reject_invalid_values(self):
         for values in ({'unknown': 1}, {'cpus_per_job': True}, {'memory_mb_per_job': 0},
@@ -94,7 +93,7 @@ class ResourceTests(unittest.TestCase):
             self.assertEqual(metrics['charged_mb'], 640)
             self.assertEqual(metrics['cpu_seconds'], 2.5)
             self.assertEqual(metrics['oom_events'], 1)
-            self.assertTrue(metrics['contended'])
+            self.assertEqual(metrics['pressure_diagnostics']['end']['host']['memory'], 2)
             for name in files:
                 (group / name).unlink()
             measurement.close()  # Exited cgroups are normal, not workload errors.
@@ -106,7 +105,7 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(resources.pressure_delta(before, after),
                          {'host': {'cpu': 5, 'memory': None}, 'container': {'cpu': None, 'memory': 3}})
 
-    def test_pressure_diagnostics_show_source_latched_trigger_and_later_recovery(self):
+    def test_pressure_diagnostics_show_baseline_peak_and_later_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             group = Path(tmp)
             for name, value in {'memory.current': '104857600', 'memory.peak': '209715200',
@@ -120,13 +119,9 @@ class ResourceTests(unittest.TestCase):
             with patch.object(resources, 'pressure_sources', side_effect=[source(10, 70), source(60, 1), source(5, 2)]):
                 measurement.sample(); measurement.sample(); measurement.sample()
             diag = measurement.metrics['pressure_diagnostics']
-            self.assertTrue(measurement.metrics['contended'])
             self.assertEqual(diag['baseline']['host']['cpu'], 10)
             self.assertEqual(diag['peak']['host']['cpu'], 60)
             self.assertEqual(diag['end']['host']['cpu'], 5)
-            self.assertEqual(diag['first_trigger']['resources'], ['cpu'])
-            self.assertEqual(diag['first_trigger']['sources']['host']['cpu'], 60)
-            self.assertEqual(diag['thresholds_percent']['cpu'], 50)
             self.assertEqual(diag['memory_end']['limit_mb'], 2048)
             self.assertEqual(diag['samples'], 3)
 
@@ -187,8 +182,7 @@ class ProgressiveWorkTests(unittest.TestCase):
         return flow
 
     def test_preparation_progresses_sequentially_under_soft_resource_constraints(self):
-        for capacity, pressure in [((0, 0), {}), ((8, 16000), {'cpu': 99}),
-                                   ((8, 16000), {'memory': 99})]:
+        for capacity, pressure in [((0, 0), {})]:
             with self.subTest(capacity=capacity, pressure=pressure), tempfile.TemporaryDirectory() as tmp:
                 flow = self.queued_flow(tmp, ['prepare'] * 3)
                 starts, running, peak = [], 0, 0
@@ -288,7 +282,7 @@ class ProgressiveWorkTests(unittest.TestCase):
             self.assertEqual(len(list((Path(tmp) / 'resource-usage').glob('*.json'))), 3)
             self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
 
-    def test_two_distinct_jobs_overlap_and_pressure_stops_third(self):
+    def test_two_distinct_jobs_overlap_and_pressure_does_not_stop_third(self):
         with tempfile.TemporaryDirectory() as tmp:
             flow = Workflows(SimpleNamespace(root=Path(tmp)), {
                 'resources': {'admission_interval_seconds': .01},
@@ -311,8 +305,8 @@ class ProgressiveWorkTests(unittest.TestCase):
                  patch.object(resources, 'capacity', return_value=(8, 16000)), \
                  patch.object(resources, 'pressure', side_effect=lambda: {'memory': 2 if second.is_set() else 0}):
                 flow.work()
-            self.assertEqual(len(starts), 2)
-            self.assertEqual(len(flow.jobs(state='queued')), 1)
+            self.assertEqual(len(starts), 3)
+            self.assertEqual(len(flow.jobs(state='queued')), 0)
 
 
 class CapacityTests(unittest.TestCase):

@@ -502,19 +502,20 @@ Resource admission also checks available host/cgroup memory and CPU capacity. Co
 `resources` budgets as described in [installation](installation.md). Optional
 `model_concurrency` maps individual model identifiers to provider limits; the general
 `concurrency.per_model` remains the fallback. When no workflow jobs are running, one eligible preparation job is attempted even
-under low capacity or pressure. Additional concurrent jobs that do not fit remain queued.
+under low capacity. Additional concurrent jobs that do not fit remain queued.
 
 Evaluation command records include bounded resource diagnostics when the local
-container cgroup is readable. `pressure_diagnostics` records the sampled PSI
-`some avg10` baseline, peak, end, thresholds, first threshold crossing and memory
-counters for the container lifetime. Host and worker ancestor PSI drive the existing
-contention flag; container PSI is diagnostic only. `ancestor_0` is the Mineval
-process's cgroup and subsequent indices walk toward the root. Missing readings are
-null; an unavailable cgroup cannot establish that pressure was absent. Monotonic
-command start/end times allow comparison with the first crossing. The flag remains
-latched for the container, so a successful earlier command can affect classification
-of a later nonzero exit. Per-command `pressure_stall_us` gives changes in PSI `some`
-cumulative stall microseconds for each scope; PSI avg10 is a rolling estimate and
-can remain elevated after stalls subside. PSI is evidence of pressure, not proof
-that it caused a particular failure. Command classification, limits and diagnostics
-also appear in the private `dev.jsonl` log as `evaluation.command.classified`.
+container cgroup is readable. `pressure_diagnostics` records sampled PSI `some
+avg10` baseline, peak, end and memory counters for the container lifetime. Host,
+worker ancestor, and container PSI are telemetry only; PSI does not affect
+admission or verdicts. `ancestor_0` is the Mineval process's cgroup and subsequent
+indices walk toward the root. Missing readings are null; an unavailable cgroup
+cannot establish that pressure was absent. Per-command `pressure_stall_us` gives
+changes in PSI cumulative stall microseconds for each scope; PSI avg10 is a rolling
+estimate and can remain elevated after stalls subside. PSI is evidence of pressure,
+not proof that it caused a particular failure. New evaluations use a distinct
+policy identifier so comparisons do not conflate them with PSI-gated assessments.
+Command classification, limits and
+diagnostics also appear in the private `dev.jsonl` log as
+`evaluation.command.classified`. Docker limits, OOM detection and timeouts remain
+in force.

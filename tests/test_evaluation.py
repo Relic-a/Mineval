@@ -79,13 +79,30 @@ class EvaluationTests(HistoryFixture):
 
     def test_resource_failed_run_is_not_evaluated_as_a_partial_solution(self):
         record = self.saved()
-        for kind in ('resource_exhaustion', 'resource_contention'):
+        for kind in ('resource_exhaustion',):
             runner = EvaluationRunner()
             with patch('mineval.evaluation.inspect_attempt', return_value=record | {'failure_kind': kind, 'status': 'error'}):
                 report = self.assess(evaluation_id=kind, runner=runner)
             self.assertEqual(report['verdict'], 'error')
             self.assertEqual(report['error_kind'], kind)
             self.assertFalse(runner.specs)
+
+    def test_legacy_contention_rechecks_actual_timeout(self):
+        record = self.saved()
+        for timed_out, verdict in ((False, 'pass'), (True, 'error')):
+            runner = EvaluationRunner()
+            legacy = record | {'failure_kind': 'resource_contention', 'status': 'error',
+                               'agent_result': {'timed_out': timed_out}}
+            with patch('mineval.evaluation.inspect_attempt', return_value=legacy):
+                report = self.assess(evaluation_id=f'legacy-{timed_out}', runner=runner)
+            self.assertEqual(report['verdict'], verdict)
+            self.assertEqual(bool(runner.specs), not timed_out)
+
+    def test_pressure_alone_does_not_override_failed_check(self):
+        self.saved()
+        report = self.assess(runner=EvaluationRunner(mode='contention'))
+        self.assertEqual(report['commands'][0]['status'], 'failed')
+        self.assertEqual(report['verdict'], 'fail')
 
     def test_pass_fail_reassessment_and_immutable_inputs_across_restart(self):
         self.saved()
@@ -181,7 +198,7 @@ class EvaluationTests(HistoryFixture):
             'reason': 'Evidence-backed test proposal does not repair infrastructure.',
             'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
             'limitations': [], 'inconclusive_reason': None}
-        for mode in ('command-error', 'timeout', 'oom', 'contention'):
+        for mode in ('command-error', 'timeout', 'oom'):
             runner = EvaluationRunner(assessment, mode=mode)
             self.assertEqual(self.assess(runner=runner, command=['fixture-evaluator'])['verdict'], 'error')
             self.assertEqual(len(runner.specs), 1)

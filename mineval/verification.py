@@ -98,7 +98,7 @@ def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False,
                     result = container.exec(command['argv'], timeout=budget, workdir=spec.workdir)
                     code = result['exit_code']
                     status = ('timeout' if result['timed_out'] else 'oom' if result['oom_killed'] else
-                              'environment_error' if code == 125 or (code != 0 and result.get('resources', {}).get('contended')) else 'command_error' if code in (126, 127) else 'passed' if code == 0 else 'failed')
+                              'environment_error' if code == 125 else 'command_error' if code in (126, 127) else 'passed' if code == 0 else 'failed')
                     interpretation = ('environment_failure' if status in ('timeout', 'oom', 'environment_error', 'command_error')
                                       or (status == 'failed' and command['kind'] in ('setup', 'build')) else
                                       'expected_task_failure' if status == 'failed' and command.get('expected_failure') else

@@ -53,15 +53,20 @@ def cgroups(pid='self'):
 
 DEFAULTS = dict(cpus_per_job=2, memory_mb_per_job=2048, reserve_memory_mb=512,
                 admission_interval_seconds=1, memory_spike_mb=256,
-                memory_spike_factor=1.5, cpu_pressure_percent=50,
-                memory_pressure_percent=1)
+                memory_spike_factor=1.5)
+
+# Accepted for existing settings files; PSI is telemetry only.
+LEGACY_PRESSURE_SETTINGS = {'cpu_pressure_percent', 'memory_pressure_percent'}
 
 
 def options(settings):
     supplied = settings.get('resources', {})
-    if not isinstance(supplied, dict) or set(supplied) - DEFAULTS.keys():
+    if not isinstance(supplied, dict) or set(supplied) - (DEFAULTS.keys() | LEGACY_PRESSURE_SETTINGS):
         raise ValueError('Unknown resource setting')
-    values = DEFAULTS | supplied
+    for key, value in supplied.items():
+        if key in LEGACY_PRESSURE_SETTINGS and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+            raise ValueError('Legacy pressure settings must be finite nonnegative numbers')
+    values = DEFAULTS | {k: v for k, v in supplied.items() if k not in LEGACY_PRESSURE_SETTINGS}
     for key, value in values.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError('Resource budgets must be finite numbers')
@@ -129,10 +134,6 @@ def pressure():
             for resource in ('cpu', 'memory')}
 
 
-def pressured(values, sample=None):
-    sample = pressure() if sample is None else sample
-    return any(sample.get(key, 0) >= values[key + '_pressure_percent'] for key in ('cpu', 'memory'))
-
 
 class Usage:
     """One stage's live containers, including overlapping verification sandboxes."""
@@ -171,7 +172,7 @@ class Usage:
 
 def admits(settings, active, request, *, now, last_start):
     values = options(settings)
-    if now - last_start < values['admission_interval_seconds'] or pressured(values):
+    if now - last_start < values['admission_interval_seconds']:
         return False
     cpu, available = capacity()
     requested_cpu, requested_memory = request
@@ -194,7 +195,7 @@ class Measurement:
         self.group = None
         self.pressure_diagnostics = None
         self.metrics = dict(active=True, available=False, measurement_unavailable='not_started', peak_memory_mb=0,
-                            cpu_seconds=0, oom_events=0, contended=False)
+                            cpu_seconds=0, oom_events=0)
         if usage is not None:
             usage.add(self.metrics)
 
@@ -244,28 +245,17 @@ class Measurement:
             memory = {'current_mb': current, 'peak_mb': peak, 'limit_mb': limit_mb,
                       'oom_kill_events': self.metrics['oom_events']}
             sources = pressure_sources(self.group)
-            sample = {resource: max((v[resource] for name, v in sources.items()
-                                     if name != 'container' and v[resource] is not None), default=0)
-                      for resource in ('cpu', 'memory')}
-            triggered = [key for key in ('cpu', 'memory')
-                         if sample[key] >= self.values[key + '_pressure_percent']]
             diagnostic = self.pressure_diagnostics
             if diagnostic is None:
-                diagnostic = {'thresholds_percent': {key: self.values[key + '_pressure_percent']
-                                                       for key in ('cpu', 'memory')},
-                              'baseline': sources, 'peak': sources, 'end': sources,
-                              'first_trigger': None, 'samples': 0, 'memory_baseline': memory}
+                diagnostic = {'baseline': sources, 'peak': sources, 'end': sources,
+                              'samples': 0, 'memory_baseline': memory}
             peak_sources = {name: {key: max((x for x in (diagnostic['peak'].get(name, {}).get(key), value)
                                                    if x is not None), default=None)
                                    for key, value in readings.items()}
                             for name, readings in sources.items()}
-            first = diagnostic['first_trigger']
-            if first is None and triggered:
-                first = {'sampled_at': self.metrics['sampled_at'], 'resources': triggered, 'sources': sources}
             self.pressure_diagnostics = diagnostic | {'peak': peak_sources, 'end': sources,
-                'first_trigger': first, 'samples': diagnostic['samples'] + 1, 'memory_end': memory}
+                'samples': diagnostic['samples'] + 1, 'memory_end': memory}
             self.metrics['pressure_diagnostics'] = self.pressure_diagnostics
-            self.metrics['contended'] |= bool(triggered)
         except (OSError, ValueError, KeyError):
             pass  # An exited cgroup can disappear before Docker removal.
 

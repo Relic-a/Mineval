@@ -136,11 +136,9 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
                 status = result['status']
                 invalid_completion = status == 'error' and result['exit_code'] == 0
                 exhausted = status == 'oom' or (status == 'error' and result.get('resources', {}).get('oom_events', 0) > 0)
-                contended = status in ('error', 'timeout') and result.get('resources', {}).get('contended')
-                terminal = {'status': ('error' if exhausted or contended or invalid_completion else
+                terminal = {'status': ('error' if exhausted or invalid_completion else
                                        {'error': 'crashed'}.get(status, status)),
                             'failure_kind': ('resource_exhaustion' if exhausted else
-                                             'resource_contention' if contended else
                                              'invalid_completion' if invalid_completion else
                                              'agent_process' if status == 'error' else None),
                             'output_available': True, 'agent_result': result}

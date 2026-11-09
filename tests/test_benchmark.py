@@ -102,8 +102,8 @@ class BenchmarkTests(HistoryFixture):
                         yield container
             record = self.run_fake(version, 'resource-' + str(oom) + str(missing_completion),
                                    adapter=FakeAdapter('success' if missing_completion else 'error'), sandbox=ResourceFailure())
-            self.assertEqual(record['status'], 'error')
-            self.assertEqual(record['failure_kind'], 'resource_exhaustion' if oom else 'resource_contention')
+            self.assertEqual(record['status'], 'error' if oom or missing_completion else 'crashed')
+            self.assertEqual(record['failure_kind'], 'resource_exhaustion' if oom else 'invalid_completion' if missing_completion else 'agent_process')
             self.assertTrue(record['output_available'])
             self.assertIsNone(record['task_verdict'])
 

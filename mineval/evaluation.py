@@ -14,7 +14,7 @@ from .review import checked, seal, strings
 from .sandbox import DockerSandbox, Limits, SandboxSpec
 from .verification import load_config
 
-POLICY = 'behavior-preserving-private-checks-v1'
+POLICY = 'behavior-preserving-private-checks-v2-psi-telemetry'
 PROMPT = """You are an independent evaluator of a saved candidate, not its coding agent.
 Start with /mineval-input/baseline-results.json and task.json. Inspect only failing
 checks and the candidate code they exercise; consult verification/extraction-manifest.json
@@ -126,12 +126,11 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
                     raise TimeoutError('Evaluation deadline exhausted')
                 result = container.exec(step['argv'], timeout=budget, workdir=spec.workdir)
                 code = result['exit_code']
-                status = ('error' if result['timed_out'] or result['oom_killed'] or (code != 0 and result.get('resources', {}).get('contended')) else
+                status = ('error' if result['timed_out'] or result['oom_killed'] else
                           'passed' if code == 0 else
                           'failed' if step['kind'] == 'tests' and code in step.get('failure_exit_codes', [1]) else
                           'inconclusive' if step['kind'] == 'tests' and code in step.get('inconclusive_exit_codes', [2]) else 'error')
                 reason = ('timeout' if result['timed_out'] else 'oom' if result['oom_killed'] else
-                          'nonzero_exit_with_latched_contention' if code != 0 and result.get('resources', {}).get('contended') else
                           'exit_code')
                 event('evaluation.command.classified', container_id=container.id, command_index=len(report['commands']),
                       kind=step['kind'], status=status, reason=reason, exit_code=code,
@@ -218,9 +217,13 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
         if image == frozen_config['image'] and re.fullmatch(r'sha256:[0-9a-f]{64}', pinned):
             image = pinned
         try:
-            if run.get('failure_kind') in ('resource_exhaustion', 'resource_contention'):
-                report.update(verdict='error', error_kind=run['failure_kind'],
-                    explanation='Run encountered resource exhaustion or contention; retry with sufficient capacity.')
+            if (run.get('failure_kind') == 'resource_exhaustion' or
+                    (run.get('failure_kind') == 'resource_contention' and
+                     run.get('agent_result', {}).get('timed_out'))):
+                report.update(verdict='error', error_kind=('timeout' if run.get('agent_result', {}).get('timed_out')
+                                                          and run['failure_kind'] == 'resource_contention'
+                                                          else run['failure_kind']),
+                    explanation='Run encountered resource exhaustion or a timeout; retry with sufficient capacity.')
             elif not run.get('output_available'):
                 report.update(verdict='error', error_kind=run.get('failure_kind') or 'missing_output',
                     explanation='Run has no saved candidate workspace; execution infrastructure failed.')

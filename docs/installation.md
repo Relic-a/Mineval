@@ -83,7 +83,7 @@ end-to-end CLI requests. Admission estimates are separate from Docker's enforced
 CPU, RAM, swap, PID and tmpfs limits; changing admission never changes frozen limits.
 Tmpfs is charged inside container RAM, not added to it. Stage, total and per-model
 concurrency limits still apply. The worker starts one job at a time, observes a fresh
-interval, then rechecks available RAM, CPU capacity and Linux pressure before adding
+interval, then rechecks available RAM and CPU capacity before adding
 another. Preparation reserves space for both the paused agent and broker verifier.
 
 The optional `resources` object in historical settings accepts:
@@ -96,8 +96,6 @@ The optional `resources` object in historical settings accepts:
 | `admission_interval_seconds` | 1 | Minimum time between starts |
 | `memory_spike_mb` | 256 | Additional growth allowance per live container |
 | `memory_spike_factor` | 1.5 | Growth multiplier on current container RAM |
-| `cpu_pressure_percent` | 50 | Pause admission at this PSI some avg10 CPU percentage |
-| `memory_pressure_percent` | 1 | Pause admission at this PSI some avg10 memory percentage |
 
 Available RAM already excludes live allocations. For each active container the worker
 reserves the greatest of its estimate, observed peak, or current RAM times the growth
@@ -110,15 +108,17 @@ headroom for unusually spiky workloads; reduce estimates only with measured evid
 
 Normal runs read local cgroup counters about once a second. Results include peak RAM
 (kernel `memory.peak` when available), cumulative CPU seconds, OOM kills and observed
-contention. Stage observations are also saved under `<data>/resource-usage/`, outside
+CPU and memory PSI. Stage observations are also saved under `<data>/resource-usage/`, outside
 benchmark receipts. Measurements are best effort: short-lived or inaccessible cgroups
 can be missed, and sampled peaks are lower bounds if the kernel peak is unavailable.
-There are no profiling runs or automatic tuning. OOMs and failed execution observed
-under heavy contention are infrastructure errors, not behavioral/model failures;
-successful checks still stand. Missing telemetry never changes a workload result.
+There are no profiling runs or automatic tuning. PSI is telemetry only: it neither
+blocks admission nor changes a verdict. OOMs and timeouts remain infrastructure
+errors. The legacy `cpu_pressure_percent` and `memory_pressure_percent` settings
+are accepted for compatibility but ignored. Missing telemetry never changes a
+workload result.
 
 When no workflow jobs are running, one eligible preparation job is attempted
-regardless of soft resource estimates or pressure, including after each completion.
+regardless of soft resource estimates, including after each completion.
 Additional concurrent jobs still require resource admission. Docker limits, runtime
 checks and isolation always apply; execution failures are reported rather than left
 queued. Other jobs that do not fit remain queued until capacity is available. Provider limits are operator configured.
