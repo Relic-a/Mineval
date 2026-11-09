@@ -150,6 +150,40 @@ class PhaseThreeTests(HistoryFixture):
             self.assertFalse(runner.spec.workspace.exists())
             self.assertFalse((self.root / 'bad').exists())
 
+    def test_generated_npm_links_are_excluded_but_source_links_still_rejected(self):
+        source = self.materialized()
+        class NpmDocker(SimulatedDocker):
+            @contextmanager
+            def container(inner, spec):
+                with super().container(spec) as container:
+                    start = container.start.side_effect
+                    def install():
+                        start()
+                        modules = spec.workspace / 'nested/node_modules'
+                        (modules / '.bin').mkdir(parents=True)
+                        (modules / '.bin/tool').symlink_to('../tool.js')
+                        (spec.workspace / 'candidate.py').write_text('candidate source')
+                    container.start.side_effect = install
+                    yield container
+        result = run_agent(source, 'fixture', self.root / 'npm-output', image='fixture', sandbox=NpmDocker())
+        self.assertEqual(result['status'], 'completed')
+        unpack(self.root / 'npm-output/workspace.tar.gz', self.root / 'npm-export')
+        self.assertEqual((self.root / 'npm-export/candidate.py').read_text(), 'candidate source')
+        self.assertFalse((self.root / 'npm-export/nested/node_modules').exists())
+        with self.assertRaisesRegex(ValueError, 'Links and special files'):
+            run_agent(source, 'fixture', self.root / 'bad-link', image='fixture', sandbox=SimulatedDocker(bad_output=True))
+
+    def test_starting_source_inside_node_modules_is_not_silently_removed(self):
+        from mineval.agents import discard_generated_npm
+        tree = self.root / 'preserve'; (tree / 'node_modules').mkdir(parents=True)
+        (tree / 'node_modules/source.js').write_text('source')
+        baseline = inventory(tree)
+        (tree / 'node_modules/bad-link').symlink_to('/etc/passwd')
+        self.assertEqual(discard_generated_npm(tree, baseline), 0)
+        with self.assertRaisesRegex(ValueError, 'Links and special files'):
+            inventory(tree)
+        self.assertEqual((tree / 'node_modules/source.js').read_text(), 'source')
+
     def test_modern_clone_links_and_git_configuration_rejected_before_docker(self):
         for source in [self.repo, self.workspace]:
             runner = SimulatedDocker()

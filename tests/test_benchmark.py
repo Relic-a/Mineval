@@ -83,6 +83,17 @@ class BenchmarkTests(HistoryFixture):
             benchmark.export(reopened, 'example', 'attempt-1', self.root / 'bad')
         self.assertFalse((self.root / 'bad').exists())
 
+    def test_output_collection_error_is_logged_restricted(self):
+        version = self.frozen()
+        with patch('mineval.devlog.failure') as diagnostic:
+            record = self.run_fake(version, 'bad-output', sandbox=SimulatedDocker(bad_output=True))
+        self.assertEqual(record['failure_kind'], 'infrastructure_or_output')
+        self.assertFalse(record['output_available'])
+        diagnostic.assert_called_once()
+        self.assertEqual(diagnostic.call_args.args[0], 'benchmark.output_collection_failed')
+        self.assertIsInstance(diagnostic.call_args.args[1], ValueError)
+        self.assertNotIn('Links and special files', str(record))
+
     def test_resource_failures_are_not_model_crashes(self):
         version = self.frozen()
         for oom, missing_completion in ((False, False), (True, False), (False, True)):

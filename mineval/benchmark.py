@@ -144,9 +144,10 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
                             'output_available': True, 'agent_result': result}
             except KeyboardInterrupt:
                 terminal = {'status': 'cancelled', 'failure_kind': 'interrupted_collection', 'output_available': False}
-            except Exception:
-                # Raw exceptions can contain subprocess output, credentials or user paths.
-                # Preserve only a small operational classification; never session logs.
+            except Exception as exc:
+                # Full traceback is restricted; ordinary records retain only a category.
+                from .devlog import failure
+                failure('benchmark.output_collection_failed', exc, task_id=task_id, run_id=run_id)
                 terminal = {'status': 'error', 'failure_kind': 'infrastructure_or_output', 'output_available': False}
             return seal(store, task_id, run_id, staged, terminal)
 

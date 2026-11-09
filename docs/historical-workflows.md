@@ -119,6 +119,14 @@ resolved image ID). Start the dashboard with `--context mineval-rootless` before
 settings are loaded at startup, so restart an existing dashboard after changing
 them. Failed jobs remain failed until explicitly retried.
 
+Benchmark output collection removes generated `node_modules` directories from the
+candidate snapshot when the starting tree contains no files beneath them. This
+keeps npm's links and installed packages out of the saved artifact; task source
+should live outside generated dependency directories. If the starting tree contains
+source under such a directory, it is retained and normal link and size validation
+still applies. Links and special files elsewhere remain forbidden. A collection
+exception is recorded in the restricted diagnostic stream, not benchmark receipts.
+
 ## Reusable dependency downloads
 
 Historical preparation, diagnostics, review, benchmark runs and evaluation can

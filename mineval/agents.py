@@ -14,6 +14,8 @@ POLICY = """Work only on the supplied task in /workspace.
 Ordinary outbound web access is allowed. Do not look up or inspect this source
 project's future implementation, commits, pull requests, historical solution,
 or private verification. This is a trust policy, not a technical guarantee.
+Generated node_modules directories without starting source are excluded from the
+collected workspace; keep task source outside generated dependency directories.
 At completion report whether you saw the historical solution, truthfully,
 using historical_solution_seen: yes, no, or unknown. This is self-reported.
 """
@@ -141,6 +143,26 @@ def completion(path):
     return report
 
 
+def discard_generated_npm(workspace, starting_inventory):
+    """Remove only generated node_modules dirs without starting source, never links."""
+    root = Path(workspace)
+    protected = set()
+    for name in starting_inventory:
+        parts = Path(name).parts
+        protected.update('/'.join(parts[:i + 1]) for i, part in enumerate(parts[:-1])
+                         if part == 'node_modules')
+    removed = 0
+    for current, dirs, _ in os.walk(root, followlinks=False):
+        for name in list(dirs):
+            path = Path(current) / name
+            if (name == 'node_modules' and path.relative_to(root).as_posix() not in protected
+                    and not path.is_symlink()):
+                shutil.rmtree(path)
+                dirs.remove(name)
+                removed += 1
+    return removed
+
+
 def run_agent(workspace, instructions, destination, *, image, adapter=None,
               context=None, limits=None, auth_file=None, sandbox=None, capture_interrupt=False, disposable=False, history_receipt=None):
     """Input is read-only to the host runner. Only disposable copies are mounted.
@@ -192,6 +214,7 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
         else:
             base = git(project, 'rev-parse', 'HEAD').decode().strip()
             validate(project, base)
+        starting_inventory = inventory(project, skip_root_git=True)
         (inputs / 'prompt.txt').write_text(POLICY + '\nTask:\n' + instructions)
         if auth_file:
             provision_auth(auth_file, inputs / 'auth.json')
@@ -229,6 +252,9 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
             metadata.unlink()
         elif metadata.exists():
             shutil.rmtree(metadata)
+        from .devlog import event
+        removed = discard_generated_npm(project, starting_inventory)
+        event('agent.output.generated_dependencies_removed', directories=removed)
         inventory(project)  # Reject links/sockets/special files before exporting.
         destination.mkdir(parents=True, exist_ok=False)
         try:
