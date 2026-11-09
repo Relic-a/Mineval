@@ -44,12 +44,19 @@ def diagnose(sandbox, settings):
         try:
             sandbox.image(image)
             from .sandbox import SandboxSpec, Limits
-            result = sandbox.run(SandboxSpec(image, ('/bin/sh', '-c',
-                'command -v python3 && command -v git && command -v codex'),
-                Limits(timeout_seconds=20), network='none'))
+            with tempfile.TemporaryDirectory(prefix='mineval-runtime-check-') as tmp:
+                inputs = Path(tmp)
+                shutil.copyfile(Path(__file__).with_name('codex_runner.py'), inputs / 'codex_runner.py')
+                result = sandbox.run(SandboxSpec(image, ('/bin/sh', '-c',
+                    'git --version && exec env -i PATH="$PATH" HOME=/tmp CODEX_HOME=/tmp/codex '
+                    'python3 /mineval-input/codex_runner.py --check-runtime'),
+                    Limits(timeout_seconds=30), inputs=inputs, network='none'))
             checks['preparation_image'] = result.exit_code == 0
             if not checks['preparation_image']:
-                messages.append('The preparation image needs python3, Git and Codex; build a derived trusted image.')
+                messages.append('The preparation image needs runnable Python, Git, Codex and '
+                                'codex-code-mode-host (beside Codex or on PATH), including runtime '
+                                'dependencies. Select or build a complete trusted image; existing '
+                                'drafts also retain their image in control/verify.json.')
         except Exception:
             messages.append('Build/load the trusted preparation image; see docs/installation.md.')
     else:

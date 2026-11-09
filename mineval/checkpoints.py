@@ -30,11 +30,19 @@ class PreparationCheckpoints:
                 'runtime': self.runtime(config['image'])}
 
     def run(self, name, inputs, action, verify, *, post_inputs=None):
+        from .devlog import event, failure
         key = hashlib.sha256(encoded(inputs).encode()).hexdigest()
         old = self.saved.get(name)
         if old and old['key'] == key and verify(old['value']):
+            event('stage.reused', stage=name)
             return old['value']
-        value = action()
+        event('stage.start', stage=name)
+        try:
+            value = action()
+        except BaseException as exc:
+            failure('stage.failed', exc, stage=name)
+            raise
+        event('stage.end', stage=name)
         if not verify(value):
             # Failed/incomplete results never displace a completed checkpoint.
             return value

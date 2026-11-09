@@ -64,6 +64,14 @@ toolchains in a derived trusted image; it is not a universal project environment
 The image recipe is provided, but no public image is assumed to be published. Authenticate the model separately, supplying
 only its model-specific credentials. Never bake credentials into an image.
 
+Codex-backed images must include a runnable `codex-code-mode-host` beside the
+resolved Codex executable or on PATH, with its runtime dependencies. Copying only
+the standalone `codex` binary is insufficient. `mineval doctor` probes both
+executables offline, and each Codex run repeats the probe before contacting the
+model. When replacing an incomplete image, update the saved default and existing
+drafts' `control/verify.json` image references; changing the default does not
+replace a draft's existing runtime configuration.
+
 Setup is noninteractive and saves host-only paths in `$XDG_CONFIG_HOME/mineval/config.json`
 (default `~/.config/mineval/config.json`, mode 0600). It reports missing requirements
 and does not pull images. Re-run with explicit options to update. Existing stores

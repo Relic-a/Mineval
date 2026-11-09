@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 import queue
-import subprocess
+from . import processes as subprocess
 import tempfile
 import threading
 import time

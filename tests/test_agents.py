@@ -179,7 +179,7 @@ class PhaseThreeTests(HistoryFixture):
         with self.assertRaises(ValueError):
             provision_auth(auth, inputs / 'bad.json')
 
-    def test_docker_mounts_only_disposable_dirs_and_disables_transcript_logs(self):
+    def test_docker_mounts_only_disposable_dirs_and_bounds_private_logs(self):
         source = self.materialized()
         runner = SimulatedDocker()
         run_agent(source, 'fixture', self.root / 'result', image='fixture', sandbox=runner)
@@ -193,8 +193,9 @@ class PhaseThreeTests(HistoryFixture):
         with sandbox.container(spec):
             pass
         args = sandbox._cli.call.call_args_list[0].args
-        self.assertIn('--log-driver=none', args)
-        self.assertNotIn('--log-driver=local', args)
+        self.assertIn('--log-driver=local', args)
+        self.assertIn('--log-opt=max-size=5m', args)
+        self.assertNotIn('--log-driver=none', args)
         self.assertTrue(any('dst=/mineval-input' in x and x.endswith(',readonly') for x in args))
         self.assertEqual(args.count('--mount'), 3)
         self.assertFalse(any('docker.sock' in x or '/home/relic' in x for x in args))

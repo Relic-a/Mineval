@@ -3,13 +3,28 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from mineval import configuration, resources
 from mineval.preparation import Store
 from mineval.workflows import Workflows
 
 
 class InstallationTests(unittest.TestCase):
+    def test_doctor_rejects_incomplete_codex_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Mock()
+            def probe(spec):
+                self.assertEqual(spec.network, 'none')
+                self.assertIn('--check-runtime', spec.command[-1])
+                self.assertTrue((spec.inputs / 'codex_runner.py').is_file())
+                self.assertEqual([p.name for p in spec.inputs.iterdir()], ['codex_runner.py'])
+                return Mock(exit_code=125)
+            sandbox.run.side_effect = probe
+            result = configuration.diagnose(sandbox, {'image': 'incomplete', 'data': tmp})
+            self.assertFalse(result['checks']['preparation_image'])
+            self.assertFalse(result['ready'])
+            self.assertTrue(any('codex-code-mode-host' in m for m in result['messages']))
+
     def test_settings_outside_repository(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'XDG_CONFIG_HOME': tmp}):
             path = configuration.config_path()

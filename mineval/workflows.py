@@ -438,6 +438,8 @@ class Workflows:
             self.update(jid, state='interrupted', detail='Interrupted; retry explicitly')
             raise
         except Exception as exc:
+            from .devlog import failure
+            failure("workflow.failed", exc, job_id=jid)
             detail = str(exc) if isinstance(exc, WorkflowFailure) else 'Stage failed (' + type(exc).__name__ + '). Inspect task evidence and trusted CLI configuration, then retry.'
             if isinstance(exc, (SandboxError, MemoryError)):
                 detail = 'Infrastructure failure (' + type(exc).__name__ + '): runtime execution failed. Inspect Docker resource availability, isolation requirements and task evidence, then retry.'
@@ -449,6 +451,8 @@ class Workflows:
         event = getattr(self, 'stop_event', None)
         if event is not None and event.is_set():
             raise KeyboardInterrupt()
+        from .devlog import event
+        event("workflow.stage", job_id=jid, stage=name)
         self.update(jid, stage=name)
 
     def prepare(self, jid, task, p):

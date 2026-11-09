@@ -210,7 +210,9 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
                 if status == 'completed':
                     try:
                         report = completion(control / 'final.json')
-                    except (ValueError, OSError, TypeError):
+                    except (ValueError, OSError, TypeError) as exc:
+                        from .devlog import failure
+                        failure("agent.completion_invalid", exc)
                         status = 'error'
                 # Container must be stopped before inspecting any agent-writable path.
                 if state['Running']:

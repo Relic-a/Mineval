@@ -2,7 +2,7 @@
 from contextlib import nullcontext
 import math
 from pathlib import Path
-import subprocess
+from . import processes as subprocess
 import tempfile
 from uuid import uuid4
 
@@ -113,6 +113,8 @@ def diagnose(store, task_id, *, sandbox=None, agent=None, already_locked=False,
                     report['status'] = ('environment_error' if any(x.get('interpretation') == 'environment_failure'
                                                                   or x['status'] == 'skipped' for x in report['commands']) else 'checks_failed')
         except (SandboxError, ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+            from .devlog import failure
+            failure("verification.error", exc)
             report['status'] = 'environment_error'
             report['error'] = str(exc)
             report['cleanup_notes'] = getattr(exc, '__notes__', [])

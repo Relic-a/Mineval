@@ -15,6 +15,7 @@ RUN python3 -m venv /opt/mineval/venv \
     && /opt/mineval/venv/bin/pip install --no-cache-dir . \
     && ln -s /opt/mineval/venv/bin/mineval /usr/local/bin/mineval \
     && node --version && npm --version && python3 --version && codex --version \
+    && codex-code-mode-host --help \
     && mineval --help > /dev/null
 # The pinned Node image includes matching headers; node-gyp otherwise downloads
 # and extracts them with ownership changes forbidden by the rootless sandbox.

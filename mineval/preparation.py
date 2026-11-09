@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
+from . import processes as subprocess
 import tempfile
 from uuid import uuid4
 

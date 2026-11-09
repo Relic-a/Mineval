@@ -4,13 +4,13 @@ import argparse
 from dataclasses import asdict
 import json
 import os
-import subprocess
+from . import processes as subprocess
 import sys
 
 from .sandbox import DockerSandbox, Limits, SandboxError, SandboxSpec
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     from .configuration import load
     try:
         saved = load()
@@ -229,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.data is None:
         from pathlib import Path
         args.data = str(Path.home() / '.local/share/mineval') if args.action == 'setup' else 'mineval-data'
+    from .devlog import event
+    event("command.selected", action=args.action)
     sandbox = DockerSandbox(context=args.context)
     try:
         if args.action == 'models':
@@ -492,6 +494,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(asdict(result)))
         return 124 if result.timed_out else result.exit_code
     except (SandboxError, ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        from .devlog import failure
+        failure("command.error", exc)
         print(f"mineval: {exc}", file=sys.stderr)
         for note in getattr(exc, "__notes__", ()):
             print(note, file=sys.stderr)
@@ -500,6 +504,38 @@ def main(argv: list[str] | None = None) -> int:
         for note in getattr(exc, "__notes__", ()):
             print(note, file=sys.stderr)
         return 130
+
+
+def main(argv: list[str] | None = None) -> int:
+    from .devlog import configure, event, failure
+    import time
+    started = time.monotonic()
+    directory = None
+    try:
+        try:
+            directory = configure()
+        except (OSError, ValueError):
+            print("mineval: diagnostics unavailable; cannot create log directory", file=sys.stderr)
+        event('command.start')
+        code = _main(argv)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        if code:
+            failure('command.error', exc)
+        raise
+    except BaseException as exc:
+        code = 130 if isinstance(exc, KeyboardInterrupt) else 125
+        failure('command.error', exc)
+        if directory:
+            print(f'mineval: diagnostics: {directory}', file=sys.stderr)
+        raise
+    finally:
+        event('command.end', exit_code=locals().get('code'),
+              level='warning' if locals().get('code') else 'info',
+              duration_seconds=time.monotonic() - started)
+    if code and directory:
+        print(f'mineval: diagnostics: {directory}', file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":

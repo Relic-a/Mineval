@@ -242,8 +242,8 @@ may receive an adaptation when its exit code is declared behavioral/inconclusive
 Unknown exit codes remain errors. Only fresh execution can establish a new verdict. Startup/setup
 failures, missing executables, timeout and OOM remain errors. Original and adapted
 outcomes remain inspectable; provenance/shape are validated mechanically, behavioral
-equivalence requires evaluator judgment and human inspection. No transcripts,
-agent logs, hidden sessions or resume controls survive. Real Codex calls require the
+equivalence requires evaluator judgment and human inspection. Evidence bundles exclude transcripts and raw agent logs. Hidden sessions and resume
+controls do not survive; restricted local diagnostics retain agent output. Real Codex calls require the
 same explicit smoke-test authorization as other development phases.
 
 Verdicts are **pass**, **fail**, **inconclusive**, **error**, with CLI exits
@@ -323,8 +323,8 @@ has exited. Recovery takes exclusive ownership of that run, records `unclean_hos
 an agent or claims a task failure. Forced host termination can leave an orphan container
 or disposable staging directory; inspect managed Docker resources before recovery.
 
-Only the final tree archive, small completion/status report and minimal operational
-provenance survive normal execution. No transcripts or raw session histories. Export
+Task evidence contains the final tree archive, small completion/status report and
+minimal operational provenance. Raw agent output is kept separately in restricted local diagnostics, outside evidence bundles. Export
 creates a new tree-only directory outside the store; it includes added/deleted/modified
 files as the saved final state, without agent-controlled Git. Safe outputs from crashes,
 timeouts and cancellation are retained too. Outputs can contain secrets copied by an
@@ -423,7 +423,28 @@ freshly reconstructed pre-base Git history, disposable `/mineval-control`, read-
 (a dedicated Unix socket). No future material, host repository, private store or
 Docker socket is mounted. The cleaner must follow those instructions and write
 `/mineval-control/cleanup-report.json`, following [cleanup-report.json](examples/cleanup-report.json).
-Agent process logging is disabled; no transcript is retained.
+Agent output is saved in restricted local diagnostics, separately from task evidence (see logging below).
+
+Logging is automatic for host commands and workflow workers. Each host process writes
+JSONL files under `${XDG_STATE_HOME:-~/.local/state}/mineval/logs/<session-id>/`.
+Set `MINEVAL_LOG_DIR=/path/to/logs` to choose another root. Failed CLI commands print
+their diagnostics directory to stderr; JSON stdout stays machine-readable.
+
+- `prod.jsonl`: warnings and errors with safe metadata.
+- `dev.jsonl`: command, stage, subprocess and container lifecycle, timing, exit codes,
+  timeout/OOM state and correlation IDs.
+- `sensitive.jsonl`: command arguments, captured output, tracebacks and raw Codex
+  events/stderr, including reminder dispatch, both turn outcomes and missing files.
+
+Directories are mode 0700 and files 0600. Environment variables, credential files and
+subprocess stdin are not logged. Agent output can echo sensitive material, so share
+only dev/prod logs by default. Sensitive logs stay outside task artifacts and dashboards
+and are never mounted into agent containers. Logging adds no model calls or retries.
+Each stream rotates at 5 MiB with two backups per host process; old session directories
+remain until deleted. Container output is a bounded 5 MiB tail collected before removal
+(including failure/cancellation); large runs can lose earlier events. Existing captured
+subprocess output is limited to 64 KiB in diagnostics. Logging I/O failures do not change
+benchmark outcomes. These diagnostics cannot recover output discarded by older versions.
 
 For Codex stages, a successful process exit with missing required output files
 triggers one follow-up prompt in the same Codex session. This covers completion,
@@ -535,7 +556,7 @@ mineval --data mineval-data finalize external-task-001 --review-id REVIEW
 For either producing/review session, replace `--command ...` with
 `--adapter codex --model gpt-6-luna --auth-file /explicit/auth.json` for an explicitly
 authorized model run. The existing Codex adapter uses a fresh ephemeral session and
-copied model authentication; no transcript logs are retained. Local fake executables
+copied model authentication; agent output is retained only in restricted local diagnostics. Local fake executables
 can follow the same report contract without a model. No automatic pipeline or human
 sign-off is required.
 
@@ -701,8 +722,7 @@ networking is enabled. Instructions forbid looking up the source project's futur
 solution; this is a trust policy, not a technical guarantee.
 
 Codex receives task text on stdin, uses ephemeral state without user config/rules,
-and writes a short schema-constrained report. Container logging is disabled for this
-runner; stdout/stderr are discarded and temporary Codex state is destroyed. Results
+and writes a short schema-constrained report. Agent stdout/stderr are saved in restricted local diagnostics; temporary Codex state is destroyed. Results
 contain status/exit/timeout/OOM fields, a summary, and a **self-reported** solution-lookup
 declaration. Missing/malformed completion reports become errors. Interruption removes
 the container and temporary files; cleanup failures remain visible.

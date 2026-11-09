@@ -151,7 +151,7 @@ class SandboxTests(unittest.TestCase):
         self.cli.call.assert_called_with("rm", "--force", "--volumes", create[create.index("--name") + 1])
 
     def test_cleanup_failure_is_visible_without_hiding_original_error(self):
-        self.cli.call.side_effect = [(CONTAINER_ID, "", False), SandboxError("daemon down")]
+        self.cli.call.side_effect = [(CONTAINER_ID, "", False), ("private logs", "", False), SandboxError("daemon down")]
         original = ValueError("work failed")
         with self.assertRaises(ValueError) as caught:
             with self.sandbox.container(self.spec):
@@ -160,7 +160,7 @@ class SandboxTests(unittest.TestCase):
         self.assertIn("daemon down", original.__notes__[0])
 
     def test_cleanup_failure_after_success_raises(self):
-        self.cli.call.side_effect = [(CONTAINER_ID, "", False), SandboxError("daemon down")]
+        self.cli.call.side_effect = [(CONTAINER_ID, "", False), ("private logs", "", False), SandboxError("daemon down")]
         with self.assertRaisesRegex(SandboxError, "daemon down"):
             with self.sandbox.container(self.spec):
                 pass
@@ -171,6 +171,30 @@ class SandboxTests(unittest.TestCase):
             with self.assertRaises(SandboxError):
                 self.sandbox.run(self.spec)
             self.cli.call.assert_not_called()
+
+    def test_private_logs_collected_before_removal_and_excluded_from_result(self):
+        from dataclasses import replace
+        order = []
+        def call(*args, **kwargs):
+            order.append(args[0])
+            return ('private agent event', 'private error', False) if args[0] == 'logs' else (CONTAINER_ID, '', False)
+        self.cli.call.side_effect = call
+        with patch('mineval.sandbox.event') as logged:
+            result = self.sandbox.run(replace(self.spec, retain_logs=False))
+        self.assertEqual((result.stdout, result.stderr), ('', ''))
+        self.assertLess(order.index('logs'), order.index('rm'))
+        output = next(c for c in logged.call_args_list if c.args[0] == 'container.output')
+        self.assertEqual(output.kwargs['sensitive']['stderr'], 'private error')
+
+    def test_log_collection_failure_does_not_prevent_removal(self):
+        def call(*args, **kwargs):
+            if args[0] == 'logs':
+                raise SandboxError('logs unavailable')
+            return (CONTAINER_ID, '', False)
+        self.cli.call.side_effect = call
+        with self.sandbox.container(self.spec):
+            pass
+        self.assertEqual(self.cli.call.call_args.args[0], 'rm')
 
     def test_limits_and_command_validation(self):
         for kwargs in ({"cpus": 0}, {"cpus": float("nan")}, {"timeout_seconds": float("inf")},

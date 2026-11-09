@@ -1,7 +1,7 @@
 """Task-preserving cleanup artifacts; these are producer claims, not approval."""
 import os
 import shutil
-import subprocess
+from . import processes as subprocess
 from uuid import uuid4
 
 from .artifacts import digest, inventory, pack, read_json, relative, write_json
@@ -111,6 +111,10 @@ def save_attempt(store, task_id, clean, control, result, *, image_id, diagnostic
         issues.append('Run a current fresh diagnostic without environment failures')
     if result.exit_code != 0 or result.timed_out or result.oom_killed:
         issues.append('Cleanup process did not complete successfully')
+    from .devlog import event
+    event('cleanup.assessed', level='warning' if issues else 'info',
+          exit_code=result.exit_code, diagnostic_count=len(diagnostic_ids), changed_count=len(changed),
+          sensitive={'issues': issues})
     disposition = report['disposition'] if report else 'needs-review'
     if issues and disposition == 'ready-for-review':
         disposition = 'needs-review'

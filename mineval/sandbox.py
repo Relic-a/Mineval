@@ -6,12 +6,13 @@ import json
 import math
 from pathlib import Path
 import shutil
-import subprocess
+from . import processes as subprocess
 import tempfile
 import time
 import threading
 from typing import Iterator
 from uuid import uuid4
+from .devlog import event
 
 
 class SandboxError(RuntimeError):
@@ -119,6 +120,10 @@ class DockerCLI:
         truncated = len(stdout) > limit or len(stderr) > limit
         stdout_text = stdout[:limit].decode("utf-8", errors="replace")
         stderr_text = stderr[:limit].decode("utf-8", errors="replace")
+        event('docker.command', exit_code=result.returncode, truncated=truncated,
+              level='warning' if result.returncode else 'info',
+              sensitive=None if args[0] == 'logs' else
+              {'operation': args[0], 'stdout': stdout_text, 'stderr': stderr_text})
         if result.returncode:
             raise SandboxError(f"Docker {args[0]} failed ({result.returncode}): {stderr_text.strip()}")
         return stdout_text, stderr_text, truncated
@@ -136,18 +141,20 @@ class DockerCLI:
 class Container:
     """Valid only inside DockerSandbox.container(); removal belongs to its owner."""
 
-    def __init__(self, cli: DockerCLI, container_id: str, image_id: str, workspace: Path | None = None, cancel_event=None, usage=None):
+    def __init__(self, cli: DockerCLI, container_id: str, image_id: str, workspace: Path | None = None, cancel_event=None, usage=None, retain_logs=True):
         self._cli = cli
         self.id = container_id
         self.image_id = image_id
         self.workspace = workspace
         self.cancel_event = cancel_event
+        self.retain_logs = retain_logs
         from .resources import Measurement
         self.measurement = Measurement(self, usage)
         self.resources = self.measurement.metrics
 
     def start(self) -> None:
         self._cli.call("start", self.id)
+        event("container.started", container_id=self.id)
         self.measurement.start()
 
     def wait(self, timeout: float) -> bool:
@@ -172,6 +179,7 @@ class Container:
                 raise KeyboardInterrupt()
             return False
         except subprocess.TimeoutExpired:
+            event("container.timeout", level="warning", container_id=self.id, timeout_seconds=timeout)
             try:
                 self._cli.call("kill", self.id)
             except SandboxError:
@@ -187,7 +195,7 @@ class Container:
                 watcher.join(timeout=31)
 
     def logs(self):
-        return self._cli.call("logs", self.id)
+        return self._cli.call("logs", self.id, limit=5 * 1024 * 1024)
 
     def export_workspace(self, destination):
         """Export a consistent result without coupling the lifecycle to a harness."""
@@ -213,6 +221,8 @@ class Container:
     def inspect(self) -> dict:
         state = self._cli.json("inspect", "--format", "{{json .State}}", self.id)
         self.resources['oom_events'] = max(self.resources['oom_events'], int(bool(state.get('OOMKilled'))))
+        event("container.state", container_id=self.id, running=state.get("Running"),
+              exit_code=state.get("ExitCode"), oom_killed=state.get("OOMKilled"))
         return state
 
     def pause(self):
@@ -278,6 +288,10 @@ class Container:
             if any(thread.is_alive() for thread in threads):
                 raise SandboxError("Docker exec output streams did not close")
         stdout, stderr = buffers
+        event('container.exec.end', container_id=self.id, exit_code=code, timed_out=timed_out,
+              truncated=any(truncated), duration_seconds=time.monotonic() - started,
+              level='warning' if code or timed_out else 'info',
+              sensitive={'stdout': stdout.decode(errors='replace'), 'stderr': stderr.decode(errors='replace')})
         state = self.inspect()
         self.measurement.sample()
         return {"resources": dict(self.resources), "exit_code": code, "timed_out": timed_out, "oom_killed": bool(state.get("OOMKilled") or self.resources["oom_events"]),
@@ -291,7 +305,7 @@ class Container:
         self.measurement.sample()
         if state["Running"]:
             raise SandboxError("Cannot collect a result while the workload is running")
-        stdout, stderr, truncated = self._cli.call("logs", self.id)
+        stdout, stderr, truncated = self._cli.call("logs", self.id) if self.retain_logs else ("", "", False)
         return RunResult(self.id, self.image_id, state["ExitCode"], timed_out,
                          bool(state["OOMKilled"] or self.resources["oom_events"]), stdout, stderr, truncated, duration_seconds, dict(self.resources))
 
@@ -419,12 +433,9 @@ class DockerSandbox:
                 "--pids-limit", str(limits.pids),
                 "--tmpfs", f"/tmp:rw,nosuid,nodev,size={limits.tmp_mb}m,mode=1777",
                 f"--workdir={spec.workdir}", "--env=HOME=/tmp",
-                "--log-driver=local", "--log-opt=max-size=1m", "--log-opt=max-file=1",
+                "--log-driver=local", "--log-opt=max-size=5m", "--log-opt=max-file=1",
                 "--log-opt=compress=false",
                 "--entrypoint", spec.command[0], image_id, *spec.command[1:]]
-        if not spec.retain_logs:
-            position = args.index("--log-driver=local")
-            args[position:position + 4] = ["--log-driver=none"]
         mounts = []
         if dependency_cache_path is not None:
             base = '/mineval-dependency-cache'
@@ -470,19 +481,35 @@ class DockerSandbox:
             container_id = output.strip()
             if len(container_id) != 64 or any(c not in "0123456789abcdef" for c in container_id):
                 raise SandboxError("Docker create did not return a valid container ID")
-            container = Container(self._cli, container_id, image_id, spec.workspace, self.cancel_event, self.usage)
+            container = Container(self._cli, container_id, image_id, spec.workspace, self.cancel_event, self.usage, spec.retain_logs)
+            event('container.created', container_id=container_id, sensitive={'image': spec.image})
             yield container
         except BaseException as exc:
+            from .devlog import failure as log_failure
+            log_failure('container.error', exc, container_id=name)
             failure = exc
             raise
         finally:
             if container is not None:
                 container.measurement.close()
+            # Collect before removal, even on timeout, cancellation or a failed stage.
+            # Never put raw workload output in evidence bundles or normal logs.
+            if container is not None:
+                try:
+                    stdout, stderr, truncated = container.logs()
+                    event('container.output', container_id=container.id, truncated=truncated,
+                          sensitive={'stdout': stdout, 'stderr': stderr})
+                except Exception as log_error:
+                    from .devlog import failure as log_failure
+                    log_failure('container.logs_failed', log_error, container_id=container.id)
             try:
                 self._cli.call("rm", "--force", "--volumes", name)
+                event('container.removed', container_id=name)
                 if lifecycle is not None:
                     lifecycle['removed'] = True
             except BaseException as cleanup_error:
+                from .devlog import failure as log_failure
+                log_failure("container.cleanup_failed", cleanup_error, container_id=name)
                 if failure is None:
                     raise
                 failure.add_note(f"Cleanup of {name} failed: {cleanup_error}")

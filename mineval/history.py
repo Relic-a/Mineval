@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
+from . import processes as subprocess
 
 from .artifacts import MAX_BYTES
 

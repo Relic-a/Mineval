@@ -6,7 +6,7 @@ already excludes live allocations), reserving only unconsumed estimates and grow
 import os
 import math
 import threading
-import subprocess
+from . import processes as subprocess
 import time
 from pathlib import Path
 
