@@ -209,6 +209,32 @@ class PreparationImportTests(HistoryFixture):
 
 
 class DispatchTests(HistoryFixture):
+    def test_download_resumes_after_disconnection_without_new_export(self):
+        import base64
+        from mineval.remote import RemoteError
+        from mineval.remote_dispatch import CHUNK_SIZE, fetch_resumable
+        content = b'a' * CHUNK_SIZE + b'end'
+        class Client:
+            starts = 0
+            fail = True
+            def request(self, request, timeout=60):
+                if request['action'] == 'fetch-start':
+                    self.starts += 1
+                    return {'token': 'export1', 'size': len(content), 'receipt': {}, 'state': {}}
+                offset = request['offset']
+                if offset and self.fail:
+                    self.fail = False
+                    raise RemoteError('connection lost')
+                return {'offset': offset, 'total': len(content),
+                        'data': base64.b64encode(content[offset:offset + request['size']]).decode()}
+        client = Client()
+        with self.assertRaises(RemoteError):
+            fetch_resumable(client, 'job1', self.root)
+        info, partial = fetch_resumable(client, 'job1', self.root)
+        self.assertEqual(client.starts, 1)
+        self.assertEqual(info['token'], 'export1')
+        self.assertEqual(partial.read_bytes(), content)
+
     def test_remote_dispatch_executes_and_imports_fake_attempt(self):
         from unittest.mock import patch
         from mineval import remote_api, remote_coordinator, remote_dispatch

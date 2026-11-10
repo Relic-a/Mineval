@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 import sys
 import tempfile
+from uuid import uuid4
 
 from .agents import provision_auth
 from .artifacts import read_json, write_json
@@ -92,7 +93,20 @@ def dispatch(root, request):
         remote_coordinator.enqueue(root, job)
         remote_coordinator.start(root)
         return {'job_id': job_id, 'state': 'queued'}
-    if action == 'fetch':
+    if action == 'fetch-chunk':
+        token = identifier(request.get('token'))
+        offset, size = request.get('offset'), request.get('size')
+        if type(offset) is not int or offset < 0 or type(size) is not int or not 1 <= size <= 1024 * 1024:
+            raise ValueError('Invalid export range')
+        archive = directory / 'exports' / (token + '.tar.gz')
+        total = archive.stat().st_size
+        if offset > total:
+            raise ValueError('Invalid export offset')
+        with archive.open('rb') as stream:
+            stream.seek(offset)
+            chunk = stream.read(size)
+        return {'offset': offset, 'total': total, 'data': base64.b64encode(chunk).decode()}
+    if action in ('fetch', 'fetch-start'):
         state = dispatch(root, {'action': 'status', 'job_id': job_id})
         if state['state'] not in ('completed', 'failed', 'interrupted'):
             raise ValueError('Job has not reached a terminal state')
@@ -125,6 +139,15 @@ def dispatch(root, request):
                                 if item['event_key'] == key]
                 write_json(selected / 'observations.json', observations)
             transfer.create(selected, archive, receipt)
+            if action == 'fetch-start':
+                token = uuid4().hex
+                exports = directory / 'exports'
+                exports.mkdir(exist_ok=True, mode=0o700)
+                saved = exports / (token + '.tar.gz')
+                os.replace(archive, saved)
+                saved.chmod(0o400)
+                return {'state': state, 'token': token, 'size': saved.stat().st_size,
+                        'receipt': read_json(receipt)}
             return {'state': state, 'archive': base64.b64encode(archive.read_bytes()).decode(),
                     'receipt': read_json(receipt)}
     raise ValueError('Unknown remote action')

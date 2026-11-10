@@ -12,6 +12,40 @@ from . import transfer
 # Archive transfers may take substantially longer than status calls on a slow or
 # lossy SSH link. A timeout must still be finite so reconciliation can retry.
 TRANSFER_TIMEOUT = 3600
+CHUNK_SIZE = 512 * 1024
+
+
+def fetch_resumable(client, jid, directory):
+    """Keep a verified export identity and durable byte offset across disconnects."""
+    descriptor = directory / 'download.json'
+    partial = directory / 'download.partial'
+    if descriptor.exists():
+        info = read_json(descriptor)
+    else:
+        info = client.request({'action': 'fetch-start', 'job_id': jid}, timeout=TRANSFER_TIMEOUT)
+        if (not isinstance(info.get('size'), int) or info['size'] < 0 or
+                not isinstance(info.get('token'), str)):
+            raise ValueError('Invalid remote export descriptor')
+        write_json(descriptor, info)
+    if not partial.exists():
+        partial.touch(mode=0o600)
+    offset = partial.stat().st_size
+    if offset > info['size']:
+        raise ValueError('Remote export partial exceeds declared size')
+    while offset < info['size']:
+        result = client.request({'action': 'fetch-chunk', 'job_id': jid, 'token': info['token'],
+                                 'offset': offset, 'size': min(CHUNK_SIZE, info['size'] - offset)},
+                                timeout=TRANSFER_TIMEOUT)
+        data = base64.b64decode(result['data'], validate=True)
+        if (result.get('offset') != offset or result.get('total') != info['size'] or
+                not data or len(data) > min(CHUNK_SIZE, info['size'] - offset)):
+            raise ValueError('Invalid remote export chunk')
+        with partial.open('ab') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        offset += len(data)
+    return info, partial
 
 
 def outbox(workflow, job):
@@ -75,11 +109,13 @@ def run_job(workflow, job, stop):
             if state['state'] not in ('completed', 'failed', 'interrupted'):
                 workflow.update(jid, state='interrupted', detail='Remote job state is uncertain; inspect the VPS before retrying.')
                 return
-            result = client.request({'action': 'fetch', 'job_id': jid}, timeout=TRANSFER_TIMEOUT)
+            result, downloaded = fetch_resumable(client, jid, directory)
+            state = result['state']
             with tempfile.TemporaryDirectory(dir=workflow.store.root) as temp:
                 temp = Path(temp)
                 archive, receipt = temp / 'output.tar.gz', temp / 'receipt.json'
-                archive.write_bytes(base64.b64decode(result['archive'], validate=True))
+                import shutil
+                shutil.copyfile(downloaded, archive)
                 write_json(receipt, result['receipt'])
                 verified = transfer.verify(archive, receipt, temp / 'data')
                 receipts = directory / 'receipts'
@@ -139,6 +175,8 @@ def run_job(workflow, job, stop):
                             finally:
                                 if os.path.exists(name):
                                     os.unlink(name)
+            downloaded.unlink(missing_ok=True)
+            (directory / 'download.json').unlink(missing_ok=True)
             workflow.update(jid, state=state['state'], stage=state.get('stage', state['state']),
                             detail=state.get('detail', ''), payload=state.get('payload', job['payload']))
             return
