@@ -90,8 +90,9 @@ The optional `resources` object in historical settings accepts:
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `cpus_per_job` | 2 | CPU admission estimate, independent of Docker quota |
-| `memory_mb_per_job` | 2048 | RAM estimate per container, MiB |
+| `cpus_per_job` | 2 | Local CPU admission estimate, independent of Docker quota |
+| `memory_mb_per_job` | 2048 | Local RAM estimate per container, MiB |
+| `reservation_percent` | 80 | VPS admission estimate as a percentage of each job’s Docker limits |
 | `reserve_memory_mb` | 512 | Host headroom kept free |
 | `admission_interval_seconds` | 1 | Minimum time between starts |
 | `memory_spike_mb` | 256 | Additional growth allowance per live container |

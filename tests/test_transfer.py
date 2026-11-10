@@ -268,7 +268,7 @@ class DispatchTests(HistoryFixture):
             def request(self, request, timeout=60):
                 try:
                     result = remote_api.dispatch(remote, request)
-                    if request['action'] == 'submit':
+                    if request['action'] == 'upload-finish' and not Client.submissions:
                         Client.submissions += 1
                         from mineval.remote import RemoteError
                         raise RemoteError('connection lost after submission')
@@ -456,3 +456,84 @@ class PreparationAuthTests(HistoryFixture):
                 with self.assertRaises(Stop):
                     flow.prepare('testjob', 'example', payload)
             self.assertEqual(session.call_args.kwargs['auth_file'], expected)
+
+class ResumableProtocolTests(unittest.TestCase):
+    def test_upload_recovers_partial_and_lost_queue_response_and_rejects_changed_bundle(self):
+        import base64
+        from unittest.mock import patch
+        from mineval import remote_api, remote_coordinator
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'source'
+            source.mkdir()
+            (source / 'job.json').write_text(json.dumps({'id': 'job1', 'kind': 'prepare', 'task': 'task1', 'payload': {}}))
+            (source / 'settings.json').write_text('{}')
+            (source / 'data').write_bytes(__import__('os').urandom(700000))
+            archive, receipt = root / 'archive', root / 'receipt'
+            transfer.create(source, archive, receipt)
+            data, manifest = archive.read_bytes(), json.loads(receipt.read_text())
+            worker = root / 'worker'
+            request = {'action': 'upload-start', 'job_id': 'job1', 'size': len(data), 'receipt': manifest}
+            with patch('mineval.remote_coordinator.ensure_running'):
+                self.assertEqual(remote_api.dispatch(worker, request)['offset'], 0)
+                remote_api.dispatch(worker, {'action': 'upload-chunk', 'job_id': 'job1', 'offset': 0,
+                                            'data': base64.b64encode(data[:400000]).decode()})
+                self.assertEqual(remote_api.dispatch(worker, request)['offset'], 400000)
+                changed = request | {'receipt': manifest | {'archive_sha256': '0' * 64}}
+                with self.assertRaisesRegex(ValueError, 'identity conflict'):
+                    remote_api.dispatch(worker, changed)
+                remote_api.dispatch(worker, {'action': 'upload-chunk', 'job_id': 'job1', 'offset': 400000,
+                                            'data': base64.b64encode(data[400000:]).decode()})
+                # Crash after verified publication but before queue insertion.
+                with patch('mineval.remote_coordinator.enqueue', side_effect=OSError('crash')):
+                    with self.assertRaises(OSError):
+                        remote_api.dispatch(worker, {'action': 'upload-finish', 'job_id': 'job1'})
+                self.assertTrue(remote_api.dispatch(worker, request)['complete'])
+                remote_api.dispatch(worker, {'action': 'upload-finish', 'job_id': 'job1'})
+                remote_api.dispatch(worker, {'action': 'upload-finish', 'job_id': 'job1'})
+                self.assertEqual(len(remote_coordinator.Coordinator(worker).jobs()), 1)
+
+    def test_stale_attempt_discards_partial_export(self):
+        import base64
+        from mineval.remote_dispatch import fetch_resumable
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            old = {'state': 'interrupted', 'updated': 1, 'payload': {'run_id': 'old', 'evaluation_id': 'one'}}
+            new = {'state': 'completed', 'updated': 2, 'payload': {'run_id': 'new', 'evaluation_id': 'two'}}
+            (root / 'download.json').write_text(json.dumps({'token': 'old', 'size': 3, 'state': old}))
+            (root / 'download.partial').write_bytes(b'bad')
+            class Client:
+                def request(self, request, timeout=60):
+                    if request['action'] == 'fetch-start':
+                        return {'token': 'new', 'size': 3, 'state': new, 'receipt': {}}
+                    self_test.assertEqual(request['offset'], 0)
+                    return {'offset': 0, 'total': 3, 'data': base64.b64encode(b'new').decode()}
+            self_test = self
+            info, path = fetch_resumable(Client(), 'job1', root, new)
+            self.assertEqual((info['token'], path.read_bytes()), ('new', b'new'))
+
+    def test_expired_exports_cleaned_without_removing_fresh_ones(self):
+        import os, time
+        from mineval.remote_api import cleanup_exports, EXPORT_TTL
+        with tempfile.TemporaryDirectory() as temp:
+            exports = Path(temp) / 'jobs/job1/exports'
+            exports.mkdir(parents=True)
+            old, fresh = exports / 'old.tar.gz', exports / 'fresh.tar.gz'
+            old.touch(); fresh.touch()
+            os.utime(old, (time.time() - EXPORT_TTL - 10,) * 2)
+            cleanup_exports(temp)
+            self.assertFalse(old.exists())
+            self.assertTrue(fresh.exists())
+
+    def test_vps_reservations_follow_each_jobs_limits(self):
+        from mineval.remote_coordinator import Coordinator
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'settings.json').write_text(json.dumps({'resources': {'reservation_percent': 50}}))
+            coordinator = Coordinator(root)
+            for jid, cpu, ram in [('small', 1, 1024), ('large', 4, 8192)]:
+                config = root / 'jobs' / jid / 'input/data/tasks/task1/versions/v1/verify-config.json'
+                config.parent.mkdir(parents=True)
+                config.write_text(json.dumps({'limits': {'cpus': cpu, 'memory_mb': ram}}))
+                job = {'id': jid, 'task': 'task1', 'payload': {'selection': {'version': 'v1'}}}
+                self.assertEqual(coordinator.resource_request(job, 'benchmark'), (cpu * .5, ram * .5))

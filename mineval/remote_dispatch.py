@@ -15,10 +15,40 @@ TRANSFER_TIMEOUT = 3600
 CHUNK_SIZE = 512 * 1024
 
 
-def fetch_resumable(client, jid, directory):
+def export_identity(state):
+    payload = state.get('payload', {})
+    return (state.get('state'), state.get('updated'), payload.get('run_id'), payload.get('evaluation_id'))
+
+
+def upload_resumable(client, jid, directory):
+    archive = directory / 'input.tar.gz'
+    info = client.request({'action': 'upload-start', 'job_id': jid, 'size': archive.stat().st_size,
+                           'receipt': read_json(directory / 'receipt.json')}, timeout=TRANSFER_TIMEOUT)
+    offset = info['offset']
+    if not info.get('complete'):
+        with archive.open('rb') as stream:
+            stream.seek(offset)
+            while offset < archive.stat().st_size:
+                data = stream.read(CHUNK_SIZE)
+                result = client.request({'action': 'upload-chunk', 'job_id': jid, 'offset': offset,
+                                         'data': base64.b64encode(data).decode()}, timeout=TRANSFER_TIMEOUT)
+                offset += len(data)
+                if result['offset'] != offset:
+                    raise ValueError('Invalid upload offset')
+    result = client.request({'action': 'upload-finish', 'job_id': jid}, timeout=TRANSFER_TIMEOUT)
+    if result.get('state') == 'receiving':
+        raise RemoteError('Upload checksum changed; restarting transfer')
+
+
+def fetch_resumable(client, jid, directory, state=None):
     """Keep a verified export identity and durable byte offset across disconnects."""
     descriptor = directory / 'download.json'
     partial = directory / 'download.partial'
+    if descriptor.exists() and state is not None:
+        saved = read_json(descriptor)
+        if export_identity(saved.get('state', {})) != export_identity(state):
+            descriptor.unlink()
+            partial.unlink(missing_ok=True)
     if descriptor.exists():
         info = read_json(descriptor)
     else:
@@ -26,6 +56,8 @@ def fetch_resumable(client, jid, directory):
         if (not isinstance(info.get('size'), int) or info['size'] < 0 or
                 not isinstance(info.get('token'), str)):
             raise ValueError('Invalid remote export descriptor')
+        if state is not None and export_identity(info.get('state', {})) != export_identity(state):
+            raise RemoteError('Remote attempt changed while preparing export')
         write_json(descriptor, info)
     if not partial.exists():
         partial.touch(mode=0o600)
@@ -33,9 +65,16 @@ def fetch_resumable(client, jid, directory):
     if offset > info['size']:
         raise ValueError('Remote export partial exceeds declared size')
     while offset < info['size']:
-        result = client.request({'action': 'fetch-chunk', 'job_id': jid, 'token': info['token'],
-                                 'offset': offset, 'size': min(CHUNK_SIZE, info['size'] - offset)},
-                                timeout=TRANSFER_TIMEOUT)
+        try:
+            result = client.request({'action': 'fetch-chunk', 'job_id': jid, 'token': info['token'],
+                                     'offset': offset, 'size': min(CHUNK_SIZE, info['size'] - offset)},
+                                    timeout=TRANSFER_TIMEOUT)
+        except RemoteError as exc:
+            if exc.code == 'FileNotFoundError':
+                descriptor.unlink(missing_ok=True)
+                partial.unlink(missing_ok=True)
+            raise
+
         data = base64.b64decode(result['data'], validate=True)
         if (result.get('offset') != offset or result.get('total') != info['size'] or
                 not data or len(data) > min(CHUNK_SIZE, info['size'] - offset)):
@@ -94,14 +133,11 @@ def run_job(workflow, job, stop):
             except RemoteError as exc:
                 if exc.code != 'FileNotFoundError':
                     raise
-                client.request({'action': 'submit', 'job_id': jid,
-                                'archive': base64.b64encode((directory / 'input.tar.gz').read_bytes()).decode(),
-                                'receipt': read_json(directory / 'receipt.json')}, timeout=TRANSFER_TIMEOUT)
+                upload_resumable(client, jid, directory)
                 continue
-            if state['state'] == 'ready':
-                workflow.update(jid, state='interrupted', stage='remote submission uncertain',
-                                detail='Remote input exists without a queued job; inspect the VPS before retrying.')
-                return
+            if state['state'] in ('receiving', 'ready'):
+                upload_resumable(client, jid, directory)
+                continue
             if state['state'] in ('queued', 'running'):
                 workflow.update(jid, stage='VPS: ' + state.get('stage', state['state']), detail=state.get('detail', ''))
                 stop.wait(5)
@@ -110,8 +146,14 @@ def run_job(workflow, job, stop):
                 workflow.update(jid, state='interrupted', detail='Remote job state is uncertain; inspect the VPS before retrying.')
                 return
             workflow.update(jid, stage='downloading VPS evidence', detail='Resuming verified export.')
-            result, downloaded = fetch_resumable(client, jid, directory)
+            result, downloaded = fetch_resumable(client, jid, directory, state)
+            latest = client.request({'action': 'status', 'job_id': jid})
+            if export_identity(latest) != export_identity(result['state']):
+                (directory / 'download.json').unlink(missing_ok=True)
+                downloaded.unlink(missing_ok=True)
+                continue
             state = result['state']
+            result_job = job | {'payload': state.get('payload', job['payload'])}
             with tempfile.TemporaryDirectory(dir=workflow.store.root) as temp:
                 temp = Path(temp)
                 archive, receipt = temp / 'output.tar.gz', temp / 'receipt.json'
@@ -135,9 +177,9 @@ def run_job(workflow, job, stop):
                     write_json(checkpoint, {'task': inventory(temp / 'data/tasks' / job['task']),
                                             'draft': inventory(temp / 'data/drafts' / job['task'])})
                 elif job['kind'] == 'benchmark':
-                    run = temp / 'data/tasks' / job['task'] / 'runs' / (job['payload']['run_id'] + '.json')
+                    run = temp / 'data/tasks' / job['task'] / 'runs' / (result_job['payload']['run_id'] + '.json')
                     if run.exists():
-                        transfer.import_benchmark(workflow.store, temp / 'data', job)
+                        transfer.import_benchmark(workflow.store, temp / 'data', result_job)
                         evaluation_id = state.get('payload', job['payload'])['evaluation_id']
                         evaluation_path = workflow.store.task(job['task']) / 'evaluations' / (evaluation_id + '.json')
                         if evaluation_path.exists():
@@ -176,12 +218,20 @@ def run_job(workflow, job, stop):
                             finally:
                                 if os.path.exists(name):
                                     os.unlink(name)
+            try:
+                client.request({'action': 'fetch-delete', 'job_id': jid, 'token': result['token']})
+            except RemoteError:
+                pass  # Expiration removes abandoned exports.
             downloaded.unlink(missing_ok=True)
             (directory / 'download.json').unlink(missing_ok=True)
             workflow.update(jid, state=state['state'], stage=state.get('stage', state['state']),
                             detail=state.get('detail', ''), payload=state.get('payload', job['payload']))
             return
-        except RemoteError:
+        except RemoteError as exc:
+            if exc.code and exc.code != 'FileNotFoundError':
+                workflow.update(jid, state='interrupted', stage='remote submission or import needs attention',
+                                detail='Remote operation rejected (' + exc.code + '); evidence remains on the VPS.')
+                return
             workflow.update(jid, stage='VPS connection unavailable', detail='Reconnecting without restarting the remote job.')
             stop.wait(3)
         except Exception as exc:

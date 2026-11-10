@@ -53,7 +53,7 @@ def cgroups(pid='self'):
 
 DEFAULTS = dict(cpus_per_job=2, memory_mb_per_job=2048, reserve_memory_mb=512,
                 admission_interval_seconds=1, memory_spike_mb=256,
-                memory_spike_factor=1.5)
+                memory_spike_factor=1.5, reservation_percent=80)
 
 # Accepted for existing settings files; PSI is telemetry only.
 LEGACY_PRESSURE_SETTINGS = {'cpu_pressure_percent', 'memory_pressure_percent'}
@@ -73,6 +73,8 @@ def options(settings):
         minimum = 1 if key == 'memory_spike_factor' else 0
         if value < minimum or (key in ('cpus_per_job', 'memory_mb_per_job', 'admission_interval_seconds') and value == 0):
             raise ValueError('Resource budgets must be positive; reserves must be nonnegative')
+    if not 0 < values['reservation_percent'] <= 100:
+        raise ValueError('reservation_percent must be greater than 0 and at most 100')
     return values
 
 

@@ -7,6 +7,7 @@ import zipfile
 import re
 import subprocess
 import tempfile
+import os
 import time
 from pathlib import Path
 
@@ -25,11 +26,14 @@ class SSHClient:
         if not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.:-]*', host):
             raise ValueError('VPS must be an SSH user@host')
         self.host = host
+        self._control_dir = tempfile.TemporaryDirectory(prefix="mineval-ssh-")
+        self._control_path = os.path.join(self._control_dir.name, "socket")
 
     def request(self, request, *, timeout=60):
         try:
             process = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-                                        '-o', 'ConnectTimeout=10', '--', self.host,
+                                        '-o', 'ControlMaster=auto', '-o', 'ControlPersist=60',
+                                        '-o', 'ControlPath=' + self._control_path, '-o', 'ConnectTimeout=10', '--', self.host,
                                         'PYTHONPATH="$HOME/.local/share/mineval-worker/code" python3 -m mineval.remote_api'],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             deadline = time.monotonic() + timeout

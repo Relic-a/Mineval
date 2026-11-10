@@ -34,7 +34,14 @@ worker queries that ID; it does not create another attempt. A remote coordinator
 uses the existing host-side admission and resource measurements, and individual
 job execution stores are separate from the local authoritative store. A completed
 result is checksum-validated and imported under the local task lock. Conflicting
-local evidence is rejected. Retrying a failed job is explicit. The worker account
+local evidence is rejected. Uploads resume from a confirmed offset and the worker
+binds each submission to its immutable archive receipt before accepting data. An
+older, incomplete submission without a recorded bundle identity cannot be resumed
+automatically; inspect it before any manual recovery. Downloads reuse one SSH
+connection, resume by offset, and discard a descriptor when the remote attempt or
+evaluation changes. Export archives are deleted after import; abandoned exports
+expire after 24 hours, and a private background reaper removes them. Expired exports
+are recreated on the next download. Retrying a failed job is explicit. The worker account
 holds private task data and job evidence until manually removed; retain it while
 reconciliation may still be necessary.
 
@@ -86,3 +93,10 @@ is retried. Failed or interrupted work remains available for explicit retry;
 it is not automatically replayed. A failed transfer or a local evidence conflict
 is reported as interrupted and leaves remote evidence intact. Live execution also
 requires the matching rootless images and is not established by SSH health alone.
+
+The remote coordinator reads `resources.reservation_percent` from its private worker
+`settings.json` (default `80`, greater than zero and at most `100`). It reserves that
+percentage of the job's Docker CPU and memory limits for each expected container,
+then accounts for live measurements and memory peaks. Preparation accounts for its
+agent and broker. These are admission estimates; the Docker hard limits do not change.
+The local scheduler continues to use its configured per-job estimates.

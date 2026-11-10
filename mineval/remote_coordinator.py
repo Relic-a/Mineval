@@ -20,6 +20,27 @@ class Coordinator(Workflows):
         super().__init__(Store(self.worker_root / 'queue'), settings,
                          auth_file=self.worker_root / 'auth.json')
 
+    def resource_request(self, job, phase):
+        from .resources import options
+        from .sandbox import Limits
+        values = options(self.settings)
+        task, payload = job['task'], job['payload']
+        store = Store(self.worker_root / 'jobs' / identifier(job['id']) / 'input' / 'data')
+        config = {}
+        if phase == 'prepare':
+            path = store.draft(task) / 'control/verify.json'
+            if path.exists():
+                config = read_json(path)
+        elif phase == 'benchmark':
+            path = store.task(task) / 'versions' / payload['selection']['version'] / 'verify-config.json'
+            config = read_json(path)
+        elif phase == 'evaluation':
+            config = payload.get('evaluation_config', {})
+        limits = Limits(**config.get('limits', {}))
+        count = 2 if phase == 'prepare' else 1
+        fraction = values['reservation_percent'] / 100
+        return count * limits.cpus * fraction, count * limits.memory_mb * fraction
+
     def _measured_stage(self, job, phase, usage):
         # Each execution has its own staged task data, but all stage transitions
         # and resource admission go through this one shared queue.
