@@ -9,6 +9,10 @@ from .artifacts import digest, inventory, lock, read_json, write_json
 from .remote import RemoteError, SSHClient
 from . import transfer
 
+# Archive transfers may take substantially longer than status calls on a slow or
+# lossy SSH link. A timeout must still be finite so reconciliation can retry.
+TRANSFER_TIMEOUT = 3600
+
 
 def outbox(workflow, job):
     root = workflow.store.root / 'remote-outbox'
@@ -57,7 +61,7 @@ def run_job(workflow, job, stop):
                     raise
                 client.request({'action': 'submit', 'job_id': jid,
                                 'archive': base64.b64encode((directory / 'input.tar.gz').read_bytes()).decode(),
-                                'receipt': read_json(directory / 'receipt.json')}, timeout=300)
+                                'receipt': read_json(directory / 'receipt.json')}, timeout=TRANSFER_TIMEOUT)
                 continue
             if state['state'] == 'ready':
                 workflow.update(jid, state='interrupted', stage='remote submission uncertain',
@@ -65,12 +69,12 @@ def run_job(workflow, job, stop):
                 return
             if state['state'] in ('queued', 'running'):
                 workflow.update(jid, stage='VPS: ' + state.get('stage', state['state']), detail=state.get('detail', ''))
-                stop.wait(1)
+                stop.wait(5)
                 continue
             if state['state'] not in ('completed', 'failed', 'interrupted'):
                 workflow.update(jid, state='interrupted', detail='Remote job state is uncertain; inspect the VPS before retrying.')
                 return
-            result = client.request({'action': 'fetch', 'job_id': jid}, timeout=300)
+            result = client.request({'action': 'fetch', 'job_id': jid}, timeout=TRANSFER_TIMEOUT)
             with tempfile.TemporaryDirectory(dir=workflow.store.root) as temp:
                 temp = Path(temp)
                 archive, receipt = temp / 'output.tar.gz', temp / 'receipt.json'
