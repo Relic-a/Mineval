@@ -45,6 +45,7 @@ def outbox(workflow, job):
 
 def run_job(workflow, job, stop):
     client = SSHClient(workflow.settings['vps']['host'])
+    client.stop_event = stop
     jid = job['id']
     try:
         directory = outbox(workflow, job)

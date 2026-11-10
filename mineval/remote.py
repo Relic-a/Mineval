@@ -7,6 +7,7 @@ import zipfile
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from .agents import provision_auth
@@ -27,18 +28,35 @@ class SSHClient:
 
     def request(self, request, *, timeout=60):
         try:
-            result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-                                     '-o', 'ConnectTimeout=10', '--', self.host,
-                                     'PYTHONPATH="$HOME/.local/share/mineval-worker/code" python3 -m mineval.remote_api'],
-                                    input=json.dumps(request).encode(), stdout=subprocess.PIPE,
-                                    stderr=subprocess.DEVNULL, timeout=timeout, check=False)
+            process = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                                        '-o', 'ConnectTimeout=10', '--', self.host,
+                                        'PYTHONPATH="$HOME/.local/share/mineval-worker/code" python3 -m mineval.remote_api'],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            deadline = time.monotonic() + timeout
+            data = json.dumps(request).encode()
+            try:
+                while True:
+                    if getattr(self, 'stop_event', None) and self.stop_event.is_set():
+                        raise RemoteError('SSH request cancelled; reconcile the job before retrying')
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(process.args, timeout)
+                    try:
+                        stdout, _ = process.communicate(input=data, timeout=min(1, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        data = None
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RemoteError('SSH request failed or timed out; reconcile the job before retrying') from exc
         try:
-            response = json.loads(result.stdout)
+            response = json.loads(stdout)
         except (ValueError, UnicodeError) as exc:
             raise RemoteError('SSH response unavailable; reconcile the job before retrying') from exc
-        if result.returncode or not response.get('ok'):
+        if process.returncode or not response.get('ok'):
             raise RemoteError('Remote request failed (' + str(response.get('error', 'SSH error')) + ')', response.get('error'))
         return response['result']
 

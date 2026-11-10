@@ -363,9 +363,13 @@ class Workflows:
         remote = threading.Thread(target=dispatch, args=(self, stop_event), daemon=True)
         remote.start()
         try:
-            return self._local_work(stop_event)
-        finally:
+            result = self._local_work(stop_event)
             remote.join()
+            return result
+        except KeyboardInterrupt:
+            stop_event.set()
+            remote.join()
+            raise
 
     def _local_work(self, stop_event=None):
         # One coordinator may own a store. This lock is never used by task work;

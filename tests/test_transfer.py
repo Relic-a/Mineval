@@ -6,6 +6,45 @@ import unittest
 from mineval import transfer
 
 
+class SSHCancellationTests(unittest.TestCase):
+    def test_slow_response_keeps_request_and_response_intact(self):
+        import os
+        from unittest.mock import patch
+        from mineval.remote import SSHClient
+        with tempfile.TemporaryDirectory() as temp:
+            ssh = Path(temp) / 'ssh'
+            ssh.write_text('#!/usr/bin/env python3\nimport json,sys,time\n'
+                           'request=json.load(sys.stdin)\ntime.sleep(1.2)\n'
+                           'json.dump({"ok": True, "result": request}, sys.stdout)\n')
+            ssh.chmod(0o755)
+            with patch.dict(os.environ, {'PATH': temp + os.pathsep + os.environ['PATH']}):
+                self.assertEqual(SSHClient('test@example.test').request({'action': 'status'}, timeout=5),
+                                 {'action': 'status'})
+
+    def test_cancellation_stops_local_ssh_without_waiting_for_transfer_timeout(self):
+        import os
+        import threading
+        import time
+        from unittest.mock import patch
+        from mineval.remote import SSHClient, RemoteError
+        with tempfile.TemporaryDirectory() as temp:
+            ssh = Path(temp) / 'ssh'
+            ssh.write_text('#!/bin/sh\nexec sleep 30\n')
+            ssh.chmod(0o755)
+            client = SSHClient('test@example.test')
+            client.stop_event = threading.Event()
+            timer = threading.Timer(0.2, client.stop_event.set)
+            start = time.monotonic()
+            with patch.dict(os.environ, {'PATH': temp + os.pathsep + os.environ['PATH']}):
+                timer.start()
+                try:
+                    with self.assertRaisesRegex(RemoteError, 'cancelled'):
+                        client.request({'action': 'status'}, timeout=60)
+                finally:
+                    timer.cancel()
+            self.assertLess(time.monotonic() - start, 4)
+
+
 class TransferTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
