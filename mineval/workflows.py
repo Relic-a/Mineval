@@ -184,11 +184,13 @@ class Workflows:
             raise ValueError('Evaluation requires private tests without expected_failure exemptions')
         return result
 
-    def enqueue(self, kind, selections, configurations=None, *, exclude=True):
+    def enqueue(self, kind, selections, configurations=None, *, exclude=True, execution_host='local'):
         if kind not in ('prepare', 'benchmark') or not isinstance(selections, list):
             raise ValueError('Select preparation or benchmark tasks')
         if len(selections) > 1000:
             raise ValueError('Select at most 1000 tasks per request')
+        if execution_host not in ('local', 'vps') or (execution_host == 'vps' and not self.settings.get('vps', {}).get('host')):
+            raise ValueError('Configure a VPS before selecting remote execution')
         configs = [configuration(c) for c in (configurations or [])]
         if kind == 'benchmark' and not 1 <= len(configs) <= 50:
             raise ValueError('Select 1–50 model configurations')
@@ -208,7 +210,7 @@ class Workflows:
                 for config in configs if kind == 'benchmark' else [None]:
                     payload = {'selection': selection, 'revision': revision, 'configuration': config,
                                'run_id': uuid4().hex, 'evaluation_id': uuid4().hex,
-                               'model_settings': model_settings}
+                               'model_settings': model_settings, 'execution_host': execution_host}
                     if kind == 'benchmark':
                         payload['evaluation_config'] = self.checked_config(self.eval_config(task, selection['version']))
                     dedup = hashlib.sha256(encoded([kind, task, revision, config]).encode()).hexdigest()
@@ -244,6 +246,26 @@ class Workflows:
         return record['status'] == 'running' or not record.get('output_available', False)
 
     def retry(self, jid, *, new_attempt=False):
+        job = next((j for j in self.jobs() if j['id'] == jid), None)
+        if job and job['payload'].get('execution_host') == 'vps' and not getattr(self, 'remote_coordinator', False):
+            if job['state'] not in ('failed', 'interrupted'):
+                raise ValueError('Only failed or interrupted work may be retried')
+            marker = self.store.root / 'remote-imports' / (job['task'] + '.json')
+            if marker.exists() and read_json(marker).get('job_id') == jid:
+                if new_attempt:
+                    raise ValueError('Complete the interrupted import before a new attempt')
+                self.update(jid, state='queued', stage='resuming remote import', detail='')
+                return
+            from .remote import SSHClient
+            client = SSHClient(self.settings.get('vps', {}).get('host'))
+            state = client.request({'action': 'status', 'job_id': jid})
+            if state['state'] in ('failed', 'interrupted', 'ready'):
+                state = client.request({'action': 'retry', 'job_id': jid, 'new_attempt': new_attempt})
+            elif new_attempt:
+                raise ValueError('Remote result must be reconciled before starting another attempt')
+            self.update(jid, state='queued', stage='reconnecting to VPS', detail='',
+                        payload=state.get('payload', job['payload']))
+            return
         # Failed/interrupted states are published only after ownership ended; the
         # atomic state transition permits retries while unrelated work is running.
         with self.db() as db:
@@ -280,6 +302,14 @@ class Workflows:
                     p['phase'] = 'evaluation'
                 p['evaluation_id'] = uuid4().hex
             db.execute("UPDATE jobs SET state='queued',detail='',payload=?,updated=? WHERE id=?", (encoded(p), time.time(), jid))
+
+    def cancel(self, jid):
+        job = next((j for j in self.jobs() if j['id'] == jid), None)
+        if not job or job['payload'].get('execution_host') != 'vps' or job['state'] not in ('queued', 'running'):
+            raise ValueError('Only active VPS work may be cancelled here')
+        from .remote import SSHClient
+        SSHClient(self.settings.get('vps', {}).get('host')).request({'action': 'cancel', 'job_id': jid})
+        self.update(jid, detail='Cancellation requested on VPS')
 
     def schedule_compaction(self, model, options):
         # One durable request per model. Authentication stays in the worker, never the DB.
@@ -326,6 +356,18 @@ class Workflows:
         return values
 
     def work(self, stop_event=None):
+        if getattr(self, 'remote_coordinator', False):
+            return self._local_work(stop_event)
+        stop_event = stop_event or threading.Event()
+        from .remote_dispatch import dispatch
+        remote = threading.Thread(target=dispatch, args=(self, stop_event), daemon=True)
+        remote.start()
+        try:
+            return self._local_work(stop_event)
+        finally:
+            remote.join()
+
+    def _local_work(self, stop_event=None):
         # One coordinator may own a store. This lock is never used by task work;
         # recovery cannot mistake another live coordinator's jobs for crashed work.
         self.stop_event = stop_event or threading.Event()
@@ -335,7 +377,7 @@ class Workflows:
         interrupted = False
         with lock(self.store.root / 'historical-worker.lock'):
             with self.db() as db:
-                db.execute("UPDATE jobs SET state='interrupted',detail='Worker stopped during this stage. Inspect saved evidence, then retry explicitly.' WHERE state='running'")
+                db.execute("UPDATE jobs SET state='interrupted',detail='Worker stopped during this stage. Inspect saved evidence, then retry explicitly.' WHERE state='running' AND (json_extract(payload,'$.execution_host') IS NULL OR json_extract(payload,'$.execution_host') != 'vps' OR ?=1)", (int(getattr(self, 'remote_coordinator', False)),))
             with ThreadPoolExecutor(max_workers=limits['total'], thread_name_prefix='mineval') as pool:
                 active = {}
                 last_start = float("-inf")
@@ -343,7 +385,8 @@ class Workflows:
                     while True:
                         if not self.stop_event.is_set():
                             for job in reversed(self.jobs(state='queued')):
-                                if job['state'] != 'queued' or len(active) >= limits['total']:
+                                if (job['state'] != 'queued' or len(active) >= limits['total'] or
+                                        (not getattr(self, 'remote_coordinator', False) and job['payload'].get('execution_host') == 'vps')):
                                     continue
                                 phase = 'prepare' if job['kind'] == 'prepare' else job['payload'].get('phase', 'benchmark')
                                 cpu, memory = self.resource_request(job, phase)
@@ -474,7 +517,7 @@ class Workflows:
                     {'name': 'bootstrap-runtime', 'kind': 'setup', 'argv': ['python3', '--version']}]})
         self.stage(jid, 'cleanup')
         prep_adapter = self.role_adapter('preparation', p)
-        options = dict(adapter=prep_adapter, auth_file=self.auth_file, context=self.context)
+        options = dict(adapter=prep_adapter, auth_file=self.auth_file if isinstance(prep_adapter, CodexAdapter) else None, context=self.context)
         from .checkpoints import PreparationCheckpoints
         runtime = DockerSandbox(context=self.context)
         progress = PreparationCheckpoints(self.store, task,
@@ -530,10 +573,11 @@ class Workflows:
                     progress.run('validation-future', [validation_key, future],
                         lambda: review.validate(self.store, task, extraction_id, path, future_commit=future, sandbox=DockerSandbox(context=self.context)), progress.validation)
         self.stage(jid, 'independent review')
+        review_adapter = CodexAdapter(self.settings['review_model'], effort=self.settings.get('review_effort')) if self.settings.get('review_model') else prep_adapter
         approval = progress.run('review', [review.inputs(self.store, task, extraction_id), progress.state(),
             p.get('model_settings', {}).get('preparation'), self.settings.get('review_model'), self.settings.get('review_effort'), review.REVIEW],
             lambda: review.session(self.store, task, stage='review', extraction_id=extraction_id,
-                **(options | {'adapter': CodexAdapter(self.settings['review_model'], effort=self.settings.get('review_effort')) if self.settings.get('review_model') else prep_adapter})), progress.approval)
+                **(options | {'adapter': review_adapter, 'auth_file': self.auth_file if isinstance(review_adapter, CodexAdapter) else None})), progress.approval)
         if approval['verdict'] != 'approve':
             raise WorkflowFailure('Independent review: ' + approval['verdict'] + '. ' + '; '.join(approval['reasons']))
         self.stage(jid, 'freezing')

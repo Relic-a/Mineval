@@ -112,6 +112,13 @@ def agent_summary(pages, preparation=False):
     return '<p class="notice">' + text + '. ' + pages.link('Agents & models settings', 'settings') + '</p>'
 
 
+def execution_host(pages):
+    choices = [('local', 'Local')]
+    if pages.workflows.settings.get('vps', {}).get('host'):
+        choices.append(('vps', 'VPS'))
+    return select('execution_host', choices, 'local', 'Execution host')
+
+
 def prepare(pages, query):
     if not pages.workflows:
         return pages.page('Prepare tasks', '<p>Preparation is available in the operational observe workspace.</p>')
@@ -124,6 +131,7 @@ def prepare(pages, query):
     content += '<p>Cleanup → diagnostics → private verification extraction → validation → independent review → freeze. Failures are isolated per task.</p>'
     content += table(['Task', 'Outcome'], [(pages.task_link(t['task_id']), 'Prepare' if t in ready else 'Skip · ' + esc(t['state']['status'])) for t in chosen])
     content += ''.join(hidden('task', t['task_id']) for t in ready) + hidden('operation', 'prepare')
+    content += execution_host(pages)
     content += '<div class="actions"><button' + ('' if ready else ' disabled') + '>Prepare ' + str(len(ready)) + ' tasks</button>' + pages.link('Cancel', 'tasks') + '</div>'
     return pages.page('Prepare tasks', form(pages, 'selection', content))
 
@@ -209,6 +217,7 @@ def benchmarks(pages, query, new=False):
     content = carry + hidden('operation', 'benchmark') + ''.join(hidden('configuration', json.dumps(c)) for c in configs)
     if query.get('exclude') == ['yes']:
         content += hidden('exclude', 'yes')
+    content += execution_host(pages)
     content += '<div class="actions"><button' + ('' if runnable else ' disabled') + '>Run benchmark</button>' + pages.link('Start over', 'benchmarks', 'new', task=[t['task_id'] for t in chosen]) + '</div>'
     return pages.page('Run benchmark · Review and run', body + form(pages, 'selection', content))
 
@@ -271,6 +280,8 @@ def jobs(pages, query=None):
             route = 'new-attempt' if new_attempt else 'retry'
             label = 'Start new benchmark attempt' if new_attempt else ('Retry qualitative review' if job['stage'] in ('model review', 'review compaction') else 'Retry remaining stages')
             detail += form(pages, route, hidden('job', job['id']) + '<button>' + label + '</button>')
+        if job['state'] == 'running' and p.get('execution_host') == 'vps':
+            detail += form(pages, 'cancel', hidden('job', job['id']) + '<button>Cancel VPS job</button>')
         detail += '<details><summary>Queued agent configuration</summary>' + pretty(p.get('model_settings', {'note': 'Legacy job resolves defaults when executed'})) + '</details>'
         refs = pages.task_link(tid)
         for field, route in (('run_id', 'runs'), ('evaluation_id', 'evaluations')):
@@ -279,7 +290,7 @@ def jobs(pages, query=None):
                 if route == 'evaluations':
                     assessment = pages.store._inspect_record(tid, 'evaluations', p[field])
                     refs += ' · ' + status(assessment.get('verdict', assessment['status']))
-        rows.append((refs, esc(job['kind']) + ('<br>' + esc(config['model'] + ' · ' + config['effort']) if config else ''), status(job['state']), esc(job['stage']), detail))
+        rows.append((refs, esc(job['kind']) + '<br>' + esc(p.get('execution_host', 'local').upper()) + ('<br>' + esc(config['model'] + ' · ' + config['effort']) if config else ''), status(job['state']), esc(job['stage']), detail))
     return pages.page('Activity', body + table(['Task / results', 'Operation', 'State', 'Stage', 'Outcome / next step'], rows))
 
 
@@ -381,6 +392,9 @@ def action(pages, route, fields):
             'effort': fields.get(role + '_effort', ['medium'])[0], 'adapter': 'codex'}
             for role in ('preparation', 'evaluation')})
         return settings(pages, saved=True)
+    if route == 'cancel':
+        workflows.cancel(fields['job'][0])
+        return jobs(pages)
     if route in ('retry', 'new-attempt'):
         workflows.retry(fields['job'][0], new_attempt=route == 'new-attempt')
         return jobs(pages)
@@ -415,7 +429,8 @@ def action(pages, route, fields):
     configs = [json.loads(v) for v in fields.get('configuration', [])]
     configs += [{'model': m.strip(), 'effort': fields.get('effort', ['medium'])[0], 'adapter': 'codex'}
                 for m in fields.get('models', [''])[0].splitlines() if m.strip()]
-    outcomes = workflows.enqueue(kind, selections, configs, exclude=fields.get('exclude') == ['yes'])
+    outcomes = workflows.enqueue(kind, selections, configs, exclude=fields.get('exclude') == ['yes'],
+                                 execution_host=fields.get('execution_host', ['local'])[0])
     pages.start_worker()
     submission = table(['Task', 'Submission outcome', 'Details'], ((pages.task_link(r['task']), status(r['state']), esc(r.get('detail', ''))) for r in outcomes))
     progress = jobs(pages)

@@ -774,3 +774,5 @@ review-gated publication and cache budgets are described in
 [Historical workflows](docs/historical-workflows.md). Reproducible local rootless
 measurements and remaining reuse limits are in
 [Incremental pipeline validation](docs/incremental-pipeline.md).
+
+For SSH-only VPS execution and rootless host prerequisites, see [VPS execution](docs/vps.md).

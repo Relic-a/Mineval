@@ -29,6 +29,15 @@ def _main(argv: list[str] | None = None) -> int:
     setup = commands.add_parser('setup', help='save host settings and diagnose prerequisites; installs nothing')
     setup.add_argument('--image')
     setup.add_argument('--auth-file')
+    vps = commands.add_parser('vps', help='configure and inspect the SSH-only worker')
+    vps_actions = vps.add_subparsers(dest='vps_action', required=True)
+    vps_configure = vps_actions.add_parser('configure')
+    vps_configure.add_argument('host', help='SSH user@host; host key must already be trusted')
+    vps_health = vps_actions.add_parser('health')
+    vps_health.add_argument('--image', help='check a preloaded image reference or pinned image ID')
+    vps_actions.add_parser('install')
+    vps_auth = vps_actions.add_parser('provision-auth')
+    vps_auth.add_argument('--auth-file', required=True)
     cache = commands.add_parser('cache', help='inspect or prune reusable verified dependency downloads')
     caches = cache.add_subparsers(dest='cache_action', required=True)
     caches.add_parser('status')
@@ -243,6 +252,25 @@ def _main(argv: list[str] | None = None) -> int:
             result = setup(args, sandbox)
             print(json.dumps(result))
             return 0 if result['ready'] else 125
+        if args.action == 'vps':
+            from .remote import SSHClient
+            if args.vps_action == 'configure':
+                SSHClient(args.host)
+                from .configuration import config_path
+                from .artifacts import write_json
+                path = config_path()
+                path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                saved['vps'] = {'host': args.host}
+                write_json(path, saved)
+                path.chmod(0o600)
+                result = {'configured': True, 'host': args.host}
+            else:
+                client = SSHClient(saved.get('vps', {}).get('host'))
+                result = (client.provision_auth(args.auth_file) if args.vps_action == 'provision-auth'
+                          else client.install() if args.vps_action == 'install'
+                          else client.request({'action': 'health', 'image': args.image}))
+            print(json.dumps(result))
+            return 125 if args.vps_action == 'health' and not result.get('ready') else 0
         if args.action == 'cache':
             from pathlib import Path
             from .downloads import NpmCache
@@ -291,6 +319,8 @@ def _main(argv: list[str] | None = None) -> int:
                 from .workflows import Workflows, tasks
                 from .workflows import load_settings
                 settings = load_settings(store, args.settings)
+                if saved.get('vps'):
+                    settings['vps'] = saved['vps']
                 if args.image:
                     settings['preparation_image'] = args.image
                 flow = Workflows(store, settings, context=args.context, auth_file=args.auth_file)
@@ -342,6 +372,8 @@ def _main(argv: list[str] | None = None) -> int:
             store = Store(args.data)
             from .workflows import load_settings
             settings = load_settings(store, args.settings)
+            if saved.get('vps'):
+                settings['vps'] = saved['vps']
             if args.image:
                 settings['preparation_image'] = args.image
             serve(store, port=args.port, workflows=Workflows(store, settings, context=args.context, auth_file=args.auth_file))

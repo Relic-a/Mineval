@@ -258,6 +258,8 @@ class Store:
     @contextmanager
     def operation(self, task_id, *, allow_rejected=False, shared=False):
         with lock(self.root / 'locks' / (identifier(task_id) + '.lock'), shared=shared):
+            if (self.root / 'remote-imports' / (identifier(task_id) + '.json')).exists():
+                raise ValueError('Remote preparation import needs recovery before task operations')
             if not self.task(task_id).is_dir():
                 raise ValueError('Task is not registered')
             if not allow_rejected and read_json(self.task(task_id) / 'status.json')['status'] == 'rejected':
