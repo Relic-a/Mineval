@@ -109,6 +109,7 @@ def run_job(workflow, job, stop):
             if state['state'] not in ('completed', 'failed', 'interrupted'):
                 workflow.update(jid, state='interrupted', detail='Remote job state is uncertain; inspect the VPS before retrying.')
                 return
+            workflow.update(jid, stage='downloading VPS evidence', detail='Resuming verified export.')
             result, downloaded = fetch_resumable(client, jid, directory)
             state = result['state']
             with tempfile.TemporaryDirectory(dir=workflow.store.root) as temp:
