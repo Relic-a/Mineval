@@ -18,6 +18,12 @@ jobs:
       - run: python -m pip install --require-hashes -r packaging/build-requirements.txt
       - run: python -m unittest discover -s tests
       - run: python -m build
+      - name: Clean wheel installation smoke
+        run: python scripts/smoke-wheel.py dist/*.whl
+      - name: Build and probe the starter image
+        run: |
+          docker build -f examples/Dockerfile.starter -t mineval-starter-smoke .
+          docker run --rm --network none --read-only --tmpfs /tmp:exec mineval-starter-smoke python3 /opt/mineval/mineval/codex_runner.py --check-runtime
       - run: scripts/build-standalone.sh
       - run: python scripts/smoke-standalone.py
       - name: Python-free runtime smoke

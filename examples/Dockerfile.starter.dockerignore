@@ -1,0 +1,7 @@
+*
+!pyproject.toml
+!README.md
+!mineval/
+!mineval/**
+**/__pycache__/
+**/*.pyc

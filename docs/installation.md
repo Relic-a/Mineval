@@ -4,17 +4,26 @@ Supported execution host: Linux x86_64, local rootless Docker, cgroup v2 and sys
 with delegated CPU, memory, swap and PID controllers. Docker Desktop, remote Docker,
 macOS and Windows are not supported execution hosts. Install Git and Docker using
 trusted OS/Docker instructions; Mineval never installs services or changes contexts.
+Follow Docker's [rootless installation](https://docs.docker.com/engine/security/rootless/)
+and [resource-limit setup](https://docs.docker.com/engine/security/rootless/tips/#limiting-resources)
+for your distribution before running setup. Confirm the rootless daemon and context
+work as your normal user; Mineval's doctor checks the required controllers.
 
 ## Alpha release
 
 The [0.1.0a5 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a5)
 contains Python wheel and source packages. Python 3.11+ is required. With GitHub CLI
-authenticated to an account that can read this private repository:
+authenticated to an account that can read this private repository, install `pipx`
+and make sure its executable directory is on PATH, then run:
 
 ```sh
-gh release download v0.1.0a5 --repo Relic-a/Mineval --pattern '*.whl'
+gh release download v0.1.0a5 --repo Relic-a/Mineval --pattern '*.whl' --pattern SHA256SUMS
+sha256sum --ignore-missing --check SHA256SUMS
 pipx install ./mineval-0.1.0a5-py3-none-any.whl
 ```
+
+Alternatively, use `python -m venv` and install the wheel with that environment's
+`python -m pip install`; activate the environment before running `mineval`.
 
 This alpha is intended for early testing; fresh-host acceptance and a paid end-to-end
 benchmark remain unverified. Standalone builds pass CI smoke checks, but GitHub does
