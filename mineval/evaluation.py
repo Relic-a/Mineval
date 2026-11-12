@@ -14,30 +14,40 @@ from .review import checked, seal, strings
 from .sandbox import DockerSandbox, Limits, SandboxSpec
 from .verification import load_config
 
-POLICY = 'behavior-preserving-private-checks-v2-psi-telemetry'
+POLICY = 'behavior-preserving-private-checks-v3-source-assessment'
 PROMPT = """You are an independent evaluator of a saved candidate, not its coding agent.
 Start with /mineval-input/baseline-results.json and task.json. Inspect only failing
 checks and the candidate code they exercise; consult verification/extraction-manifest.json
 for original evidence. Decide promptly whether behavior is wrong or only the private
 check interface differs. For incorrect behavior, report no adaptations. Do not search
 for unrelated improvements, rerun successful checks, install tools or fix production.
-For a legitimate alternative, propose the smallest interface change preserving every
-behavioral assertion. Stop when evidence supports that decision.
+A missing implementation is not a legitimate alternative: never create or simulate
+production behavior, add passing stubs, or hide missing implementation. For a legitimate
+alternative, propose the smallest interface change preserving every behavioral assertion. Stop when evidence supports that decision.
 Write only /mineval-control/assessment.json with exactly:
 {adaptations: [{path, content, reason, evidence: [{commit, path}]}],
- limitations: [string], inconclusive_reason: string|null, error_reason?: string|null}.
+ limitations: [string], inconclusive_reason: string|null, error_reason?: string|null,
+ behavior_failure_reason?: string|null, candidate_evidence?: [{path, reason}]}.
 Adapt only selected private test interfaces when a legitimate implementation needs it.
 Keep assertions and behavioral obligations; never weaken checks to pass wrong code,
 require historical code shape, or invent obligations. Cite original extracted evidence
-for every adaptation. If execution broke, provide error_reason. If evidence is insufficient/flaky/not defensibly adaptable,
+for every adaptation. A source-supported behavior failure requires behavior_failure_reason
+and nonempty candidate_evidence citing existing candidate files with specific reasons.
+For an inconclusive, execution-error, or adaptation decision, omit candidate_evidence
+or set it to an empty array; include it only with behavior_failure_reason.
+Inspect source and rule out legitimate equivalent interfaces before making that finding;
+missing modules alone are insufficient. Do not claim assertions ran when collection failed.
+A behavior failure cannot be combined with adaptations, error_reason or inconclusive_reason.
+If setup, infrastructure or execution broke, provide error_reason. If evidence is insufficient/flaky/not defensibly adaptable,
 explain inconclusive_reason. Do not edit production code. This report proposes checks;
 Mineval executes them in a separate fresh sandbox. Do not save transcripts.
 """
 
 
-def validate_assessment(value, artifacts):
-    if (not isinstance(value, dict) or set(value) not in ({'adaptations', 'limitations', 'inconclusive_reason'},
-                {'adaptations', 'limitations', 'inconclusive_reason', 'error_reason'})
+def validate_assessment(value, artifacts, candidate=None):
+    if (not isinstance(value, dict) or not {'adaptations', 'limitations', 'inconclusive_reason'} <= set(value)
+            or set(value) - {'adaptations', 'limitations', 'inconclusive_reason', 'error_reason',
+                             'behavior_failure_reason', 'candidate_evidence'}
             or not strings(value['limitations']) or not isinstance(value['adaptations'], list)
             or (value['inconclusive_reason'] is not None and
                 (not isinstance(value['inconclusive_reason'], str) or not value['inconclusive_reason'].strip()))):
@@ -45,6 +55,28 @@ def validate_assessment(value, artifacts):
     if value.get('error_reason') is not None and (not isinstance(value['error_reason'], str)
             or not value['error_reason'].strip()):
         raise ValueError('Evaluator execution error requires an explanation')
+    behavior = value.get('behavior_failure_reason')
+    evidence = value.get('candidate_evidence', [])
+    if not isinstance(evidence, list):
+        raise ValueError('Invalid candidate source evidence')
+    if behavior is not None:
+        if (not isinstance(behavior, str) or not behavior.strip() or value['adaptations'] or
+                value['inconclusive_reason'] is not None or value.get('error_reason') is not None or
+                not isinstance(evidence, list) or not evidence or candidate is None):
+            raise ValueError('Source-supported failure requires exclusive reason and candidate evidence')
+        files = inventory(candidate)
+        seen_evidence = set()
+        for item in evidence:
+            if (not isinstance(item, dict) or set(item) != {'path', 'reason'} or
+                    not isinstance(item['path'], str) or not isinstance(item['reason'], str) or
+                    not item['reason'].strip()):
+                raise ValueError('Invalid candidate source evidence')
+            path = str(relative(item['path']))
+            if path not in files or path in seen_evidence:
+                raise ValueError('Candidate source evidence must be an existing unique file')
+            seen_evidence.add(path)
+    elif evidence:
+        raise ValueError('Candidate evidence requires a source-supported failure')
     known = {(a['commit'], a['path']) for a in artifacts}
     paths = {a['path'] for a in artifacts}
     seen = set()
@@ -155,6 +187,57 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
     return report
 
 
+def assess_checks(candidate, verification, artifacts, config, image, runner, baseline,
+                  temp, task_summary, *, command=None, adapter=None, auth_file=None,
+                  evaluator_timeout=180, proposed_path=None, provenance_path=None):
+    """Run the shared isolated evaluator; validate citations before any rerun."""
+    from .agents import CodexAdapter, provision_auth
+    if adapter and (command or not isinstance(adapter, CodexAdapter)):
+        raise ValueError('Use explicit evaluator argv or the dedicated Codex adapter')
+    if auth_file and not isinstance(adapter, CodexAdapter):
+        raise ValueError('Only Codex may receive authentication')
+    copy_tree(candidate, temp / 'agent')
+    control = temp / 'control'; control.mkdir()
+    inputs = temp / 'inputs'; inputs.mkdir()
+    copy_tree(verification, inputs / 'verification')
+    write_json(inputs / 'task.json', {'task_summary': task_summary})
+    write_json(inputs / 'config.json', config)
+    write_json(inputs / 'baseline-results.json', baseline)
+    (inputs / 'prompt.txt').write_text(PROMPT)
+    if adapter:
+        command = adapter.stage(inputs, required_files=('assessment.json',))
+    if auth_file:
+        provision_auth(auth_file, inputs / 'auth.json')
+    agent_limits = config.get('limits', {}) | {'timeout_seconds': evaluator_timeout}
+    spec = SandboxSpec(image, tuple(command), Limits(**agent_limits),
+        workspace=temp / 'agent', control=control, inputs=inputs, network='bridge', retain_logs=False)
+    evaluator = {'session_id': uuid4().hex, 'harness': adapter.name if adapter else 'explicit-command',
+                 'model': adapter.model if adapter else 'unspecified',
+                 'instructions_sha256': digest(inputs / 'prompt.txt')}
+    if adapter and getattr(adapter, 'effort', None):
+        evaluator['effort'] = adapter.effort
+    if provenance_path is not None:
+        write_json(provenance_path, evaluator)
+    with runner.container(spec) as container:
+        evaluator['image_id'] = container.image_id
+        if provenance_path is not None:
+            write_json(provenance_path, evaluator)
+        container.start()
+        timed_out = container.wait(spec.limits.timeout_seconds)
+        state = container.inspect()
+        if timed_out or state.get('OOMKilled') or state['Running'] or state['ExitCode']:
+            from .sandbox import log_agent_failure
+            log_agent_failure('evaluator.failed', container, state, timed_out)
+            if timed_out:
+                raise TimeoutError('Evaluator timed out')
+            raise ValueError('Evaluator did not complete')
+    proposal = read_json(control / 'assessment.json')
+    if proposed_path is not None:
+        write_json(proposed_path, proposal)
+    assessment = validate_assessment(proposal, artifacts, candidate)
+    return assessment, evaluator
+
+
 def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox=None,
              command=None, adapter=None, auth_file=None, evaluator_timeout=180):
     """Config is an explicit trusted operator selection; evaluator proposes adaptations."""
@@ -235,39 +318,22 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                 report.update(baseline)
                 assessment = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None}
                 if (command or adapter) and baseline['verdict'] in ('fail', 'inconclusive'):
-                    # Agent sees copies and proposes a bounded report; never edits executed tree.
-                    copy_tree(temp / 'candidate', temp / 'agent')
-                    control = temp / 'control'; control.mkdir()
-                    inputs = temp / 'inputs'; inputs.mkdir()
-                    copy_tree(verification, inputs / 'verification')
-                    write_json(inputs / 'task.json', {'task_summary': run['task_instructions']})
-                    write_json(inputs / 'config.json', config)
-                    write_json(inputs / 'baseline-results.json', baseline)
-                    (inputs / 'prompt.txt').write_text(PROMPT)
-                    if adapter:
-                        command = adapter.stage(inputs, required_files=('assessment.json',))
-                    if auth_file:
-                        provision_auth(auth_file, inputs / 'auth.json')
-                    agent_limits = config.get('limits', {}) | {'timeout_seconds': evaluator_timeout}
-                    spec = SandboxSpec(image, tuple(command), Limits(**agent_limits),
-                        workspace=temp / 'agent', control=control, inputs=inputs, network='bridge', retain_logs=False)
-                    with runner.container(spec) as container:
-                        container.start()
-                        timed_out = container.wait(spec.limits.timeout_seconds)
-                        state = container.inspect()
-                        if timed_out or state.get('OOMKilled') or state['Running'] or state['ExitCode']:
-                            raise ValueError('Evaluator did not complete')
-                    assessment = validate_assessment(read_json(control / 'assessment.json'), artifacts)
-                    report['evaluator'] = {'session_id': uuid4().hex, 'harness': adapter.name if adapter else 'explicit-command',
-                        'model': adapter.model if adapter else 'unspecified', 'image_id': container.image_id,
-                        'instructions_sha256': digest(inputs / 'prompt.txt')}
+                    assessment, report['evaluator'] = assess_checks(
+                        temp / 'candidate', verification, artifacts, config, image, runner, baseline,
+                        temp, run['task_instructions'], command=command, adapter=adapter,
+                        auth_file=auth_file, evaluator_timeout=evaluator_timeout,
+                        proposed_path=staged / 'assessment-proposal.json',
+                        provenance_path=staged / 'evaluator.json')
                 report['adaptations'] = assessment['adaptations']
                 report['limitations'].extend(assessment['limitations'])
                 write_json(staged / 'assessment.json', assessment)
                 # Only declared behavioral/inconclusive outcomes may be adapted.
                 # Unknown exit codes and infrastructure errors never invoke AI.
                 can_adapt = baseline['verdict'] in ('fail', 'inconclusive')
-                if assessment.get('error_reason'):
+                if assessment.get('behavior_failure_reason'):
+                    report.update(verdict='fail', explanation=assessment['behavior_failure_reason'],
+                                  failure_basis='source_assessment', candidate_evidence=assessment['candidate_evidence'])
+                elif assessment.get('error_reason'):
                     report.update(verdict='error', explanation=assessment['error_reason'])
                 elif assessment['inconclusive_reason'] and baseline['verdict'] != 'error':
                     report.update(verdict='inconclusive', explanation=assessment['inconclusive_reason'])
@@ -280,6 +346,10 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
         except KeyboardInterrupt:
             report.update(verdict='error', explanation='Evaluation cancelled; no task failure inferred.', error_kind='interrupted')
         except Exception as exc:
+            # Provenance is written before startup and updated once the image is known.
+            provenance = staged / 'evaluator.json'
+            if provenance.exists():
+                report['evaluator'] = read_json(provenance)
             # No raw infrastructure exceptions/session output in durable records.
             report.update(verdict='error', explanation='Verification or evaluation infrastructure failed.',
                           error_kind=type(exc).__name__)

@@ -193,10 +193,14 @@ def _main(argv: list[str] | None = None) -> int:
     submit.add_argument('definition')
     flows.add_parser('maintain', help='process durable model memory compaction independently')
     flows.add_parser('list')
-    flows.add_parser('work', help='process queued tasks; independent failures do not stop the queue')
+    work = flows.add_parser('work', help='process queued tasks; independent failures do not stop the queue')
+    work.add_argument('--job-id', help='process only this job')
+    work.add_argument('--refresh-export', action='store_true', help='preserve and replace a terminal legacy export download')
     retry = flows.add_parser('retry')
     retry.add_argument('job_id')
-    retry.add_argument('--new-attempt', action='store_true', help='allocate a new run identity for an attempt without usable output')
+    retry_options = retry.add_mutually_exclusive_group()
+    retry_options.add_argument('--new-attempt', action='store_true', help='allocate a new run identity for an attempt without usable output')
+    retry_options.add_argument('--reevaluate', action='store_true', help='evaluate the existing saved run with a new evaluation ID')
     flows.add_parser('prepare-all', help='enqueue all eligible unprepared tasks')
     memory = commands.add_parser('model-review', help='append-only model memory and safe compaction reservations')
     memories = memory.add_subparsers(dest='memory_action', required=True)
@@ -225,6 +229,8 @@ def _main(argv: list[str] | None = None) -> int:
         operation.add_argument('--model', default='gpt-6-luna')
         operation.add_argument('--auth-file')
     args = parser.parse_args(argv)
+    if args.action == 'workflow' and args.workflow_action == 'work' and args.refresh_export and not args.job_id:
+        parser.error('--refresh-export requires --job-id')
     for name in ('image', 'auth_file'):
         if hasattr(args, name) and getattr(args, name) is None:
             # Saved credentials are defaults for model operations, not for fake
@@ -333,14 +339,14 @@ def _main(argv: list[str] | None = None) -> int:
                 elif args.workflow_action == 'list':
                     result = flow.jobs()
                 elif args.workflow_action == 'retry':
-                    result = flow.retry(args.job_id, new_attempt=args.new_attempt)
+                    result = flow.retry(args.job_id, new_attempt=args.new_attempt, reevaluate=args.reevaluate)
                 elif args.workflow_action == 'prepare-all':
                     result = flow.enqueue('prepare', [{'task_id': t['task_id']} for t in tasks(store)
                         if not t['versions'] and t['state']['status'] not in ('retired','rejected','needs-review')])
                 else:
                     from .benchmark import termination_handler
                     with termination_handler():
-                        flow.work()
+                        flow.work(job_id=args.job_id, refresh_export=args.refresh_export)
                     result = flow.jobs()
             else:
                 from .memory import Memory, record_evaluation

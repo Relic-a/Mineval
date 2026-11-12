@@ -7,7 +7,7 @@ from .artifacts import copy_tree, digest, inventory, read_json, relative, write_
 from .preparation import identifier
 from .sandbox import DockerSandbox, Limits, SandboxSpec
 
-VALIDATION_POLICY = "private-evaluation-execution-v2"
+VALIDATION_POLICY = "private-evaluation-assessment-v3"
 
 EXTRACTION = """You are the separate verification extractor. Inspect task.json, base,
 cleaned, future and diffs. Do not edit the task. Write /mineval-control/selection.json:
@@ -20,6 +20,11 @@ fixtures and essential test-only dependencies from the supplied history. Never
 select production implementation as test support. Explain behavioral obligations,
 not arbitrary implementation choices. If no credible checks exist, use unavailable
 and an empty artifacts list. Do not invent superficial checks. No transcripts.
+Read /workspace/evidence-index.json first. Examine its exact future tree roots and
+files, selected artifacts, configs and revision paths before claiming evidence is absent.
+Future trees are under /workspace/future/<commit>/, not directly under
+/workspace/future/. Inspect the selected commit's actual paths before concluding an
+artifact is absent; prior selected original bytes are also in revision/extraction.
 Also supply evaluation_config when runnable verification is available: a JSON object
 with image (use the supplied runtime), network, optional limits, workdir, and commands
 [{name, kind: setup|build|tests|smoke, argv: [strings]}]. Include a tests command
@@ -35,11 +40,26 @@ setup commands required by the supplied runtime. Supply the config whenever a
 credible runnable check exists, and explain specifically if it cannot be run. Choose
 checks that demonstrate the task's missing behavior on the cleaned base and succeed
 on the relevant future tree when feasible; report nondiscriminating checks and failed
-or inconclusive runs honestly. Verify the intended cases actually ran to completion:
+or inconclusive runs honestly. If the feature is absent on the base and its historical
+test interface cannot collect, inspect the base source and diff for an equivalent
+legitimate interface. Preserve the original tests and config, record that base assertions
+did not run and why, and verify the future checks where feasible. Do not invent missing
+production behavior or stubs to force base assertions to run. Verify intended cases
+actually ran to completion wherever execution is feasible:
 a zero exit alone can mask skipped cases or an early process exit. Classify unexpected
 setup, harness, or premature termination separately from behavioral assertions. Do not
-assert historical implementation names or code shape where another implementation can
-satisfy the behavioral obligation.
+leave a test command running after its cases finish. For Node's test runner, investigate
+lingering handles and, if supported and appropriate for the selected tests, consider
+--test-force-exit; confirm all intended cases finished and runnable commands exit normally.
+Do not assert historical implementation names or code shape where another implementation can
+satisfy the behavioral obligation. Historical tests may nevertheless be useful when
+their behavioral assertions are sound but their imports or API seams are specific to
+the historical implementation. Identify those seams and limitations explicitly:
+the independent evaluator can propose minimal test-interface adaptations for a
+legitimate alternative, preserving behavioral assertions and original evidence.
+Do not treat an import or collection failure as a proven behavioral failure. Select
+such tests only if their obligations remain defensible and the reviewer can assess
+the base/future evidence; otherwise report unavailable.
 Distinguish behavioral
 failure (exit 1) from inconclusive (2) and infrastructure errors (other codes).
 Never exempt expected failures. This config is private, reviewed and frozen.
@@ -51,17 +71,35 @@ selected historical artifact bytes. Verify cases actually execute and finish on 
 base and future where feasible; report remaining coverage limitations honestly.
 """
 REVIEW = """You are the independent third reviewer, after cleanup and extraction.
+Read /workspace/evidence-index.json first and examine its exact paths and configs
+before claiming evidence is absent. The selected evaluation config is in the extraction
+manifest at plan.evaluation_config; runtime.json is the cleanup diagnostic config.
 Inspect task.json, base, cleaned, future/diffs, cleanup.json, diagnostic.json,
 extraction and any validation results. Check task integrity, every cleanup edit,
 future/credential leakage, test-only provenance, meaningful behavioral relevance,
 arbitrary assumptions, alternate legitimate solutions, dependencies and reproducibility.
+Consider the independent evaluator's ability to adapt test interfaces, while requiring
+that behavior assertions and their provenance remain intact. A missing historical
+module alone is not proof of a behavioral failure.
 Review the actual evaluation_config and private base/future validation results against
-selected checks and exit-code semantics. Diagnostics alone do not validate private
+selected checks and exit-code semantics. Inspect baseline, full assessment, selected-check
+hashes and any adapted rerun in each validation directory. Assess whether adaptations
+only adjust an existing legitimate interface, preserve all assertions and do not invent
+implementation or stubs; reject unsupported adaptations. Diagnostics alone do not validate private
 checks. Require a runnable, reproducible private tests command that actually runs the
 selected artifacts in the evaluation workspace, or explain why execution is impossible.
-Assess whether the base and future results actually discriminate the stated behavior;
-a check that passes on both does not demonstrate the missing behavior. Do not approve
-misleading or unjustified commands or treat uncovered obligations as tested.
+Distinguish an empirical assertion failure from collection or interface failure and
+from an independent source-based finding that the behavior is absent. A missing module
+alone does not establish absence: inspect the base source and diff, and the independent
+assessment for an existing legitimate equivalent interface. If base execution is
+demonstrably infeasible because the feature is absent and no legitimate interface can
+be adapted, you may assess credible future-executed checks with the base limitation
+clearly recorded; never claim base assertions ran or require production code or stubs
+to force them to run. Independently assess original assertions and provenance,
+legitimate alternatives and evaluator adaptability, reproducible future execution,
+and coverage gaps. Passing on both trees is nondiscriminating; broken future checks or
+future environment failures remain blockers. Do not approve misleading or unjustified
+commands or treat uncovered obligations as tested. No outcome is automatic approval.
 Write /mineval-control/review.json: {verdict: approve|revise|reject, reasons: [nonempty
 strings], objective_preserved: boolean, snapshot_reviewed: boolean, changes:
 [{path, reason}]}. Account for exactly each cleanup change. Approve only credible
@@ -133,6 +171,48 @@ def revision_evidence(store, task_id, review_id):
     return record
 
 
+def evidence_index(workspace):
+    """Describe verified private copies for this disposable agent workspace."""
+    root = '/workspace/'
+    future = workspace / 'future'
+    trees = []
+    if future.exists():
+        for tree in sorted(p for p in future.iterdir() if p.is_dir()):
+            trees.append({'commit': tree.name, 'root': root + tree.relative_to(workspace).as_posix(),
+                          'files': [root + p.relative_to(workspace).as_posix()
+                                    for p in sorted(tree.rglob('*')) if p.is_file()]})
+
+    def extraction(directory):
+        manifest_path = directory / 'extraction-manifest.json'
+        if not manifest_path.exists():
+            return None
+        manifest = read_json(manifest_path)
+        prefix = root + directory.relative_to(workspace).as_posix() + '/'
+        return {'manifest': prefix + 'extraction-manifest.json',
+                'evaluation_config_location': prefix + 'extraction-manifest.json#/plan/evaluation_config',
+                'evaluation_config': manifest.get('plan', {}).get('evaluation_config'),
+                'artifacts': [{'future_original': root + 'future/' + item['commit'] + '/' + item['path'],
+                               'selected_copy': prefix + item['stored_path'], 'path': item['path']}
+                              for item in manifest['artifacts']]}
+
+    def validations(directory):
+        return [{'record': root + p.relative_to(workspace).as_posix(),
+                 'configuration_location': root + p.relative_to(workspace).as_posix() + '#/report/configuration',
+                 'evidence_files': [root + f.relative_to(workspace).as_posix()
+                                    for f in sorted(p.parent.rglob('*')) if f.is_file()]}
+                for p in sorted(directory.glob('*/validation.json'))]
+
+    revision = workspace / 'revision'
+    return {'future_trees': trees,
+            'diagnostic_runtime_config': root + 'runtime.json',
+            'diagnostic_result': root + 'diagnostic.json',
+            'extraction': extraction(workspace / 'extraction'),
+            'validations': validations(workspace / 'validations'),
+            'revision': {'review': root + 'revision/review.json',
+                         'extraction': extraction(revision / 'extraction'),
+                         'validations': validations(revision / 'validations')} if revision.exists() else None}
+
+
 def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None,
             context=None, sandbox=None, extraction_id=None, revision_id=None,
             require_evaluation_config=False):
@@ -165,11 +245,10 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
                 copy_tree(private / name, workspace / name)
         # Verify preserved evidence before it informs producing/review decisions.
         expected = read_json(task / 'source-hashes.json')
-        for name in ('base', 'future', 'diffs'):
-            if (workspace / name).exists():
-                if {f'{name}/{p}': v for p, v in inventory(workspace / name).items()} != {
-                        p: v for p, v in expected.items() if p.startswith(name + '/')}:
-                    raise ValueError('Stored source evidence was modified')
+        actual = {f'{name}/{p}': v for name in ('base', 'future', 'diffs')
+                  if (workspace / name).exists() for p, v in inventory(workspace / name).items()}
+        if actual != {p: v for p, v in expected.items() if p.split('/', 1)[0] in ('base', 'future', 'diffs')}:
+            raise ValueError('Stored source evidence was modified')
         copy_tree(draft / 'workspace', workspace / 'cleaned')
         write_json(workspace / 'task.json', read_json(task / 'metadata.json'))
         write_json(workspace / 'cleanup.json', cleanup)
@@ -188,6 +267,7 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
             validations = private / 'validations' / previous
             if validations.exists():
                 copy_tree(validations, revision_dir / 'validations')
+        write_json(workspace / 'evidence-index.json', evidence_index(workspace))
         prompt = REVIEW if stage == 'review' else EXTRACTION
         (prompts / 'prompt.txt').write_text(prompt)
         if adapter:
@@ -264,6 +344,10 @@ def validate_plan(plan, *, require_evaluation_config=False):
         raise ValueError('Invalid private verification plan')
     if require_evaluation_config and plan['strategy'] != 'unavailable' and not isinstance(plan.get('evaluation_config'), dict):
         raise ValueError('Runnable private verification requires an evaluation_config object')
+    if plan.get('evaluation_config') is None:
+        if 'evaluation_config' in plan and plan['strategy'] != 'unavailable':
+            raise ValueError('Private evaluation_config must be an object')
+        return
     if 'evaluation_config' in plan:
         from .verification import load_config
         with tempfile.TemporaryDirectory() as temp:
@@ -285,10 +369,11 @@ def validate_review(report):
         raise ValueError('Approval requires explicit integrity and leakage review')
 
 
-def validate(store, task_id, extraction_id, config_path, *, future_commit=None, sandbox=None):
+def validate(store, task_id, extraction_id, config_path, *, future_commit=None, sandbox=None,
+             command=None, adapter=None, auth_file=None, evaluator_timeout=180):
     """Run selected original bytes privately in a fresh sandbox; never grade a solution."""
     from .verification import load_config
-    from .evaluation import execute_checks
+    from .evaluation import execute_checks, assess_checks
     from .preparation import commit
     with store.operation(task_id), tempfile.TemporaryDirectory(dir=store.root) as temp:
         temp = Path(temp)
@@ -317,21 +402,58 @@ def validate(store, task_id, extraction_id, config_path, *, future_commit=None, 
         runner = sandbox or DockerSandbox()
         from .downloads import cache_task
         cache_task(runner, store, task_id)
-        report = execute_checks(source, temp / 'workspace', temp / 'execution',
-                                extraction, manifest['artifacts'], [], config,
-                                config['image'], runner)
+        staged = temp / 'validation'; staged.mkdir()
+        baseline = execute_checks(source, temp / 'workspace', staged / 'baseline',
+                                  extraction, manifest['artifacts'], [], config, config['image'], runner)
+        assessment = None
+        evaluator = None
+        report = dict(baseline)
+        adapted = None
+        if baseline['verdict'] in ('fail', 'inconclusive'):
+            if command or adapter:
+                try:
+                    metadata = read_json(task / 'metadata.json')
+                    assessment, evaluator = assess_checks(
+                        source, extraction, manifest['artifacts'], config, config['image'], runner,
+                        baseline, temp, metadata['task_summary'], command=command, adapter=adapter,
+                        auth_file=auth_file, evaluator_timeout=evaluator_timeout,
+                        proposed_path=staged / 'assessment.json', provenance_path=staged / 'evaluator.json')
+                    if assessment.get('behavior_failure_reason'):
+                        report.update(verdict='fail', explanation=assessment['behavior_failure_reason'],
+                                      failure_basis='source_assessment', candidate_evidence=assessment['candidate_evidence'])
+                    elif assessment.get('error_reason'):
+                        report.update(verdict='error', explanation=assessment['error_reason'])
+                    elif assessment['inconclusive_reason']:
+                        report.update(verdict='inconclusive', explanation=assessment['inconclusive_reason'])
+                    elif assessment['adaptations']:
+                        adapted = execute_checks(source, temp / 'adapted-workspace', staged / 'adapted',
+                                                 extraction, manifest['artifacts'], assessment['adaptations'],
+                                                 config, config['image'], runner)
+                        report = dict(adapted)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    if (staged / 'evaluator.json').exists():
+                        evaluator = read_json(staged / 'evaluator.json')
+                    report.update(verdict='error', explanation='Independent assessment failed.',
+                                  error_kind=type(exc).__name__)
+            else:
+                report.update(verdict='inconclusive',
+                              explanation='A failing test command was not independently assessed; a harness failure cannot be ruled out.')
         report['configuration'] = config
-        selected_checks = temp / 'execution/selected-checks.json'
+        selected_checks = staged / ('adapted/selected-checks.json' if adapted is not None
+                                    else 'baseline/selected-checks.json')
         if selected_checks.exists():
             report['selected_checks'] = read_json(selected_checks)
         record = {'extraction_id': extraction_id, 'extraction_sha256': extraction_hash,
                   'state': future_commit or 'cleaned-base', 'source_hashes': source_hashes,
-                  'report': report,
+                  'policy': VALIDATION_POLICY, 'baseline': baseline, 'assessment': assessment,
+                  'evaluator': evaluator, 'adapted': adapted, 'report': report,
                   'interpretation': {'error': 'environment_failure', 'pass': 'passed',
                                      'fail': 'behavior_failure', 'inconclusive': 'inconclusive'}[report['verdict']],
                   'limitation': 'Future validation uses the original future tree without cleanup edits. '
-                                'Base behavioral failure is evidence for review, never automatic approval.'}
-        staged = temp / 'validation'; staged.mkdir()
+                                'Base behavioral failure is evidence for review, never automatic approval. '
+                                'Adaptation provenance is checked; behavioral equivalence requires independent review.'}
         write_json(staged / 'validation.json', record)
         identity = uuid4().hex
         seal(staged, task / 'private/validations' / extraction_id / identity)

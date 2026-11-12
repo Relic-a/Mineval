@@ -313,6 +313,14 @@ class Container:
                          bool(state["OOMKilled"] or self.resources["oom_events"]), stdout, stderr, truncated, duration_seconds, dict(self.resources))
 
 
+def log_agent_failure(name, container, state, timed_out):
+    """Record failure state privately; lifecycle cleanup captures bounded logs."""
+    reason = ('timeout' if timed_out else 'oom' if state.get('OOMKilled')
+              else 'running' if state.get('Running') else 'nonzero_exit')
+    event(name, level='error', container_id=container.id, reason=reason,
+          sensitive={'state': state})
+
+
 class DockerSandbox:
     _cancellation = threading.local()
 

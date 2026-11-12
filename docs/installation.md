@@ -11,22 +11,24 @@ work as your normal user; Mineval's doctor checks the required controllers.
 
 ## Alpha release
 
-The [0.1.0a5 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.1.0a5)
+The [0.2.0a1 prerelease](https://github.com/Relic-a/Mineval/releases/tag/v0.2.0a1)
 contains Python wheel and source packages. Python 3.11+ is required. With GitHub CLI
 authenticated to an account that can read this private repository, install `pipx`
 and make sure its executable directory is on PATH, then run:
 
 ```sh
-gh release download v0.1.0a5 --repo Relic-a/Mineval --pattern '*.whl' --pattern SHA256SUMS
+gh release download v0.2.0a1 --repo Relic-a/Mineval --pattern '*.whl' --pattern SHA256SUMS
 sha256sum --ignore-missing --check SHA256SUMS
-pipx install ./mineval-0.1.0a5-py3-none-any.whl
+pipx install ./mineval-0.2.0a1-py3-none-any.whl
 ```
 
 Alternatively, use `python -m venv` and install the wheel with that environment's
 `python -m pip install`; activate the environment before running `mineval`.
 
-This alpha is intended for early testing; fresh-host acceptance and a paid end-to-end
-benchmark remain unverified. Standalone builds pass CI smoke checks, but GitHub does
+This alpha is intended for early testing. Paid end-to-end VPS workflows completed
+for two frozen Gretel tasks with GPT-6 Luna medium and GPT-6.1 Terra medium; see
+[validation details](release-validation.md#020a1-vps-validation). Fresh-host
+acceptance remains unverified. Standalone builds pass CI smoke checks, but GitHub does
 not support provenance attestations for user-owned private repositories. No standalone
 binary or installer asset is published in this alpha; use the Python package above.
 

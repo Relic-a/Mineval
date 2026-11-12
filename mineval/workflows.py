@@ -245,15 +245,58 @@ class Workflows:
         record = self.store.inspect_run(job['task'], job['payload']['run_id'])
         return record['status'] == 'running' or not record.get('output_available', False)
 
-    def retry(self, jid, *, new_attempt=False):
+    def _require_reevaluation_run(self, job):
+        payload = job['payload']
+        path = self.store.task(job['task']) / 'runs' / (payload['run_id'] + '.json')
+        if not path.exists():
+            raise ValueError('Reevaluation requires a usable saved run')
+        record = self.store.inspect_run(job['task'], payload['run_id'])
+        if (record['status'] in ('running', 'reserved') or not record.get('output_available', False) or
+                not matches(record, payload['revision'], payload['configuration'])):
+            raise ValueError('Reevaluation requires a usable matching saved run')
+
+    def retry(self, jid, *, new_attempt=False, reevaluate=False, expected_evaluation_id=None):
+        if new_attempt and reevaluate:
+            raise ValueError('Cannot combine a new attempt with reevaluation')
         job = next((j for j in self.jobs() if j['id'] == jid), None)
+        if reevaluate and (not job or job['kind'] != 'benchmark'):
+            raise ValueError('Reevaluation requires a benchmark job')
         if job and job['payload'].get('execution_host') == 'vps' and not getattr(self, 'remote_coordinator', False):
+            if reevaluate:
+                if job['state'] not in ('completed', 'failed', 'interrupted'):
+                    raise ValueError('Reevaluation requires completed, failed or interrupted work')
+                self._require_reevaluation_run(job)
+                marker = self.store.root / 'remote-imports' / (job['task'] + '.json')
+                outbox = self.store.root / 'remote-outbox' / jid
+                if marker.exists() or (outbox / 'download.json').exists() or (outbox / 'download.partial').exists():
+                    raise ValueError('Complete the interrupted import before reevaluation')
+                from .remote import SSHClient
+                state = SSHClient(self.settings.get('vps', {}).get('host')).request({
+                    'action': 'retry', 'job_id': jid, 'reevaluate': True,
+                    'expected_evaluation_id': job['payload']['evaluation_id']})
+                payload = state['payload']
+                if (payload.get('run_id') != job['payload']['run_id'] or
+                        payload.get('revision') != job['payload'].get('revision') or
+                        payload.get('configuration') != job['payload'].get('configuration') or
+                        payload.get('evaluation_id') == job['payload']['evaluation_id'] or
+                        not payload.get('internal_evaluation_ids') or
+                        payload['internal_evaluation_ids'][-1] != job['payload']['evaluation_id']):
+                    raise ValueError('Remote reevaluation identity mismatch')
+                self.update(jid, state='queued', stage='reconnecting to VPS', detail='', payload=payload)
+                return
             if job['state'] not in ('failed', 'interrupted'):
+
                 raise ValueError('Only failed or interrupted work may be retried')
             marker = self.store.root / 'remote-imports' / (job['task'] + '.json')
             if marker.exists() and read_json(marker).get('job_id') == jid:
                 if new_attempt:
                     raise ValueError('Complete the interrupted import before a new attempt')
+                self.update(jid, state='queued', stage='resuming remote import', detail='')
+                return
+            outbox = self.store.root / 'remote-outbox' / jid
+            if not new_attempt and (outbox / 'download.json').exists() and (outbox / 'download.partial').exists():
+                # Reconcile the terminal export before asking the worker to retry.
+                # The dispatcher verifies its identity against the current remote state.
                 self.update(jid, state='queued', stage='resuming remote import', detail='')
                 return
             from .remote import SSHClient
@@ -271,12 +314,24 @@ class Workflows:
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone()
-            if not row or row['state'] not in ('failed', 'interrupted'):
-                raise ValueError('Only failed or interrupted work may be retried')
+            if not row or row['state'] not in (('completed', 'failed', 'interrupted') if reevaluate else ('failed', 'interrupted')):
+                raise ValueError('Only terminal work may be reevaluated' if reevaluate else 'Only failed or interrupted work may be retried')
             other = db.execute("SELECT id FROM jobs WHERE dedup=? AND id!=? AND state IN ('queued','running','interrupted')", (row['dedup'], jid)).fetchone()
             if other:
                 raise ValueError('This configuration already has active work; open the queue instead')
             p = json.loads(row['payload'])
+            if reevaluate:
+                if row['kind'] != 'benchmark':
+                    raise ValueError('Reevaluation requires a benchmark job')
+                if expected_evaluation_id is not None and p['evaluation_id'] != expected_evaluation_id:
+                    raise ValueError('Evaluation identity changed before reevaluation')
+                self._require_reevaluation_run(dict(row) | {'payload': p})
+                p['internal_evaluation_ids'] = p.get('internal_evaluation_ids', []) + [p['evaluation_id']]
+                p['evaluation_id'] = uuid4().hex
+                p['phase'] = 'evaluation'
+                db.execute("UPDATE jobs SET state='queued',stage='evaluation',detail='',payload=?,updated=? WHERE id=?",
+                           (encoded(p), time.time(), jid))
+                return
             unusable = self.needs_new_attempt(dict(row) | {'payload': p})
             if unusable:
                 record = self.store.inspect_run(row['task'], p['run_id'])
@@ -355,15 +410,23 @@ class Workflows:
             raise ValueError('Model concurrency limits must be integers between 1 and 64')
         return values
 
-    def work(self, stop_event=None):
+    def work(self, stop_event=None, *, job_id=None, refresh_export=False):
+        if refresh_export and job_id is None:
+            raise ValueError('Export refresh requires a job ID')
+        if job_id is not None and not any(job['id'] == job_id for job in self.jobs()):
+            raise ValueError('Unknown workflow job: ' + job_id)
+        if refresh_export:
+            job = next(j for j in self.jobs() if j['id'] == job_id)
+            if getattr(self, 'remote_coordinator', False) or job['payload'].get('execution_host') != 'vps' or job['state'] not in ('queued', 'running', 'interrupted'):
+                raise ValueError('Export refresh requires an active or interrupted VPS job')
         if getattr(self, 'remote_coordinator', False):
-            return self._local_work(stop_event)
+            return self._local_work(stop_event, job_id=job_id)
         stop_event = stop_event or threading.Event()
         from .remote_dispatch import dispatch
-        remote = threading.Thread(target=dispatch, args=(self, stop_event), daemon=True)
+        remote = threading.Thread(target=dispatch, args=(self, stop_event, job_id, refresh_export), daemon=True)
         remote.start()
         try:
-            result = self._local_work(stop_event)
+            result = None if refresh_export else self._local_work(stop_event, job_id=job_id)
             remote.join()
             return result
         except KeyboardInterrupt:
@@ -371,7 +434,7 @@ class Workflows:
             remote.join()
             raise
 
-    def _local_work(self, stop_event=None):
+    def _local_work(self, stop_event=None, *, job_id=None):
         # One coordinator may own a store. This lock is never used by task work;
         # recovery cannot mistake another live coordinator's jobs for crashed work.
         self.stop_event = stop_event or threading.Event()
@@ -381,7 +444,7 @@ class Workflows:
         interrupted = False
         with lock(self.store.root / 'historical-worker.lock'):
             with self.db() as db:
-                db.execute("UPDATE jobs SET state='interrupted',detail='Worker stopped during this stage. Inspect saved evidence, then retry explicitly.' WHERE state='running' AND (json_extract(payload,'$.execution_host') IS NULL OR json_extract(payload,'$.execution_host') != 'vps' OR ?=1)", (int(getattr(self, 'remote_coordinator', False)),))
+                db.execute("UPDATE jobs SET state='interrupted',detail='Worker stopped during this stage. Inspect saved evidence, then retry explicitly.' WHERE state='running' AND (json_extract(payload,'$.execution_host') IS NULL OR json_extract(payload,'$.execution_host') != 'vps' OR ?=1) AND (? IS NULL OR id=?)", (int(getattr(self, 'remote_coordinator', False)), job_id, job_id))
             with ThreadPoolExecutor(max_workers=limits['total'], thread_name_prefix='mineval') as pool:
                 active = {}
                 last_start = float("-inf")
@@ -389,7 +452,7 @@ class Workflows:
                     while True:
                         if not self.stop_event.is_set():
                             for job in reversed(self.jobs(state='queued')):
-                                if (job['state'] != 'queued' or len(active) >= limits['total'] or
+                                if ((job_id is not None and job['id'] != job_id) or job['state'] != 'queued' or len(active) >= limits['total'] or
                                         (not getattr(self, 'remote_coordinator', False) and job['payload'].get('execution_host') == 'vps')):
                                     continue
                                 phase = 'prepare' if job['kind'] == 'prepare' else job['payload'].get('phase', 'benchmark')
@@ -421,7 +484,7 @@ class Workflows:
                                     break  # Observe a fresh interval before another admission.
                         if not active:
                             delay = options(self.settings)['admission_interval_seconds'] - (time.monotonic() - last_start)
-                            if delay > 0 and not self.stop_event.is_set() and self.jobs(state='queued'):
+                            if delay > 0 and not self.stop_event.is_set() and any(job_id is None or job['id'] == job_id for job in self.jobs(state='queued')):
                                 self.stop_event.wait(min(delay, 0.2))
                                 continue
                             break
@@ -555,7 +618,9 @@ class Workflows:
                 require_evaluation_config=not bool(selected), **options), reusable_extraction)
         extraction_id = extraction.get('extraction_id')
         if not extraction_id:
-            raise WorkflowFailure('No credible private verification was extracted; inspect extraction findings.')
+            plan = extraction.get('plan', {})
+            raise WorkflowFailure('No credible private verification was extracted; inspect the saved extraction attempt. '
+                                  + str(plan.get('rationale', 'No rationale supplied.')))
         self.stage(jid, 'private validation')
         manifest = read_json(self.store.task(task) / 'private/extractions' / extraction_id / 'extraction-manifest.json')
         config = manifest.get('plan', {}).get('evaluation_config')
@@ -568,14 +633,23 @@ class Workflows:
             with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
                 path = Path(temp) / 'config.json'
                 write_json(path, self.checked_config(verification.load_config(selected, evaluation=True) if selected else config))
-                validation_key = [review.VALIDATION_POLICY, progress.state(), extraction_id, review.checked(self.store.task(task) / 'private/extractions' / extraction_id), read_json(path), progress.runtime(read_json(path)['image'])]
+                from .evaluation import POLICY as evaluation_policy, PROMPT as evaluation_prompt
+                evaluation_adapter = self.role_adapter('evaluation', p) if self.settings.get('evaluator_agent', True) else None
+                assessment_options = dict(adapter=evaluation_adapter,
+                    auth_file=self.auth_file if isinstance(evaluation_adapter, CodexAdapter) else None,
+                    evaluator_timeout=self.settings.get('evaluator_timeout_seconds', 180))
+                validation_key = [review.VALIDATION_POLICY, evaluation_policy, evaluation_prompt,
+                                  (p['model_settings'] if 'model_settings' in p else self.model_settings())['evaluation'], assessment_options['evaluator_timeout'],
+                                  bool(evaluation_adapter), progress.state(), extraction_id,
+                                  review.checked(self.store.task(task) / 'private/extractions' / extraction_id),
+                                  read_json(path), progress.runtime(read_json(path)['image'])]
                 progress.run('validation-base', validation_key,
-                    lambda: review.validate(self.store, task, extraction_id, path, sandbox=DockerSandbox(context=self.context)), progress.validation)
+                    lambda: review.validate(self.store, task, extraction_id, path, sandbox=DockerSandbox(context=self.context), **assessment_options), progress.validation)
                 metadata = read_json(self.store.task(task) / 'metadata.json')
                 future = metadata.get('head_commit')
                 if future:
                     progress.run('validation-future', [validation_key, future],
-                        lambda: review.validate(self.store, task, extraction_id, path, future_commit=future, sandbox=DockerSandbox(context=self.context)), progress.validation)
+                        lambda: review.validate(self.store, task, extraction_id, path, future_commit=future, sandbox=DockerSandbox(context=self.context), **assessment_options), progress.validation)
         self.stage(jid, 'independent review')
         review_adapter = CodexAdapter(self.settings['review_model'], effort=self.settings.get('review_effort')) if self.settings.get('review_model') else prep_adapter
         approval = progress.run('review', [review.inputs(self.store, task, extraction_id), progress.state(),

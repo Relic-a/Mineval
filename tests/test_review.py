@@ -59,6 +59,64 @@ class ReviewTests(HistoryFixture):
         self.assertEqual(selected.read_text(), 'from app import answer\nassert answer() == 42\n')
         self.assertEqual(inventory(self.workspace), before)
 
+    def test_private_evidence_index_lists_verified_paths_and_configs(self):
+        config = {'image': 'local:test', 'commands': [
+            {'name': 'private', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]}
+        extraction = self.extract(plan(self.head) | {'evaluation_config': config})
+        config_path = self.root / 'index-validation.json'
+        write_json(config_path, config)
+        validation = validate(self.store, 'example', extraction['extraction_id'], config_path,
+                              sandbox=FakeRunner([step(1)]))
+        class IndexAgent(ReportAgent):
+            @contextmanager
+            def container(agent_self, spec):
+                index = read_json(spec.workspace / 'evidence-index.json')
+                tree = next(t for t in index['future_trees'] if t['commit'] == self.head)
+                original = '/workspace/future/' + self.head + '/tests/test_answer.py'
+                self.assertIn(original, tree['files'])
+                self.assertTrue((spec.workspace / original.removeprefix('/workspace/')).is_file())
+                details = index['extraction']
+                self.assertEqual(details['evaluation_config'], config)
+                self.assertTrue(details['evaluation_config_location'].endswith('extraction-manifest.json#/plan/evaluation_config'))
+                self.assertEqual(index['diagnostic_runtime_config'], '/workspace/runtime.json')
+                self.assertEqual(details['artifacts'][0]['future_original'], original)
+                self.assertTrue((spec.workspace / details['artifacts'][0]['selected_copy'].removeprefix('/workspace/')).is_file())
+                self.assertIn(validation['validation_id'], index['validations'][0]['record'])
+                self.assertTrue(index['validations'][0]['configuration_location'].endswith('#/report/configuration'))
+                self.assertIn('evidence-index.json', (spec.inputs / 'prompt.txt').read_text())
+                with super().container(spec) as agent:
+                    yield agent
+        verdict = session(self.store, 'example', stage='review', extraction_id=extraction['extraction_id'],
+                          command=['review'], sandbox=IndexAgent('review.json', report(self.review) | {'verdict': 'revise'}))
+        class RevisionIndexAgent(ReportAgent):
+            @contextmanager
+            def container(agent_self, spec):
+                index = read_json(spec.workspace / 'evidence-index.json')
+                self.assertEqual(index['revision']['review'], '/workspace/revision/review.json')
+                self.assertEqual(index['revision']['extraction']['evaluation_config'], config)
+                self.assertIn(validation['validation_id'], index['revision']['validations'][0]['record'])
+                self.assertIn('evidence-index.json', (spec.inputs / 'prompt.txt').read_text())
+                with super().container(spec) as agent:
+                    yield agent
+        session(self.store, 'example', stage='extraction', revision_id=verdict['review_id'],
+                command=['extract'], sandbox=RevisionIndexAgent('selection.json', plan(self.head)))
+        self.assertFalse((self.workspace / 'evidence-index.json').exists())
+
+    def test_corrupt_evidence_rejected_before_index_is_used(self):
+        task = self.store.task('example')
+        source = task / 'private/future' / self.head / 'tests/test_answer.py'
+        source.chmod(0o644)
+        source.write_text('changed')
+        agent = ReportAgent('selection.json', plan(self.head))
+        with self.assertRaisesRegex(ValueError, 'Stored source evidence was modified'):
+            session(self.store, 'example', stage='extraction', command=['extract'], sandbox=agent)
+        self.assertEqual(agent.specs, [])
+        manifest = task / 'private/extractions' / self.extraction_id / 'extraction-manifest.json'
+        manifest.chmod(0o644)
+        manifest.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+            self.review_extraction(self.extraction_id)
+
     def test_required_config_is_checked_before_sealing_extraction(self):
         task = self.store.task('example')
         before = set((task / 'private/extractions').iterdir())
@@ -78,6 +136,10 @@ class ReviewTests(HistoryFixture):
         result = session(self.store, 'example', stage='extraction', command=['extract'],
                          require_evaluation_config=True,
                          sandbox=ReportAgent('selection.json', unavailable))
+        self.assertEqual(result['status'], 'needs-review')
+        result = session(self.store, 'example', stage='extraction', command=['extract'],
+                         require_evaluation_config=True,
+                         sandbox=ReportAgent('selection.json', unavailable | {'evaluation_config': None}))
         self.assertEqual(result['status'], 'needs-review')
 
     def test_inline_attestation_and_legacy_extraction_cannot_approve(self):
@@ -181,7 +243,7 @@ class ReviewTests(HistoryFixture):
         write_json(config, {'image': 'local:test', 'commands': [
             {'name': 'regression', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]})
         latest = digest(self.store.task('example') / 'verify-latest.json')
-        for result, interpretation in [(step(1), 'behavior_failure'), (step(2), 'inconclusive'),
+        for result, interpretation in [(step(1), 'inconclusive'), (step(2), 'inconclusive'),
                                        (step(127), 'environment_failure'),
                                        (step(), 'passed')]:
             outcome = validate(self.store, 'example', self.extraction_id, config,
@@ -196,6 +258,150 @@ class ReviewTests(HistoryFixture):
         frozen = self.store.finalize('example', review_id=approval['review_id'])
         self.assertTrue((self.store.task('example') / 'versions' / frozen['version'] / 'private/validations').exists())
 
+    def test_validation_assesses_and_reruns_only_selected_test_on_fresh_copy(self):
+        from test_evaluation import EvaluationRunner
+        config = self.root / 'private-adapt.json'
+        write_json(config, {'image': 'local:test', 'commands': [
+            {'name': 'private', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]})
+        (self.workspace / 'app.py').write_text('def result(): return 42\n')
+        assessment = {'adaptations': [{'path': 'tests/test_answer.py',
+            'content': 'from app import result\nassert result() == 42\n',
+            'reason': 'Use the existing alternative function.',
+            'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
+            'limitations': [], 'inconclusive_reason': None}
+        before = inventory(self.store.task('example') / 'private/extractions' / self.extraction_id)
+        class InspectInputRunner(EvaluationRunner):
+            @contextmanager
+            def container(inner, spec):
+                if spec.control:
+                    task_input = read_json(spec.inputs / 'task.json')
+                    self.assertEqual(task_input, {'task_summary': read_json(
+                        self.store.task('example') / 'metadata.json')['task_summary']})
+                    self.assertIsInstance(task_input['task_summary'], str)
+                with super(InspectInputRunner, inner).container(spec) as agent:
+                    yield agent
+        runner = InspectInputRunner(assessment)
+        result = validate(self.store, 'example', self.extraction_id, config,
+                          sandbox=runner, command=['fixture-evaluator'])
+        self.assertEqual(result['interpretation'], 'passed')
+        self.assertEqual(result['baseline']['verdict'], 'fail')
+        self.assertEqual(result['adapted']['verdict'], 'pass')
+        self.assertEqual(result['assessment'], assessment)
+        self.assertEqual(result['evaluator']['harness'], 'explicit-command')
+        self.assertNotEqual(runner.specs[0].workspace, runner.specs[2].workspace)
+        self.assertEqual((self.workspace / 'app.py').read_text(), 'def result(): return 42\n')
+        self.assertEqual(inventory(self.store.task('example') / 'private/extractions' / self.extraction_id), before)
+        evidence = self.store.task('example') / 'private/validations' / self.extraction_id / result['validation_id']
+        self.assertFalse(read_json(evidence / 'baseline/selected-checks.json')[0]['adapted'])
+        adapted_checks = read_json(evidence / 'adapted/selected-checks.json')
+        self.assertTrue(adapted_checks[0]['adapted'])
+        self.assertEqual(result['report']['selected_checks'], adapted_checks)
+        self.assertNotEqual(adapted_checks[0]['executed_sha256'],
+                            read_json(evidence / 'baseline/selected-checks.json')[0]['executed_sha256'])
+        self.assertEqual(read_json(evidence / 'assessment.json'), assessment)
+        checked(evidence)
+
+    def test_validation_rejects_production_adaptation_and_preserves_failures(self):
+        from test_evaluation import EvaluationRunner
+        config = self.root / 'private-invalid.json'
+        write_json(config, {'image': 'local:test', 'commands': [
+            {'name': 'private', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]})
+        proposal = {'adaptations': [{'path': 'app.py', 'content': 'def answer(): return 42\n',
+            'reason': 'Invent missing behavior', 'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
+            'limitations': [], 'inconclusive_reason': None}
+        runner = EvaluationRunner(proposal)
+        result = validate(self.store, 'example', self.extraction_id, config, sandbox=runner, command=['assess'])
+        self.assertEqual(result['interpretation'], 'environment_failure')
+        self.assertEqual(result['baseline']['verdict'], 'fail')
+        self.assertEqual(len(runner.specs), 2)
+        evidence = self.store.task('example') / 'private/validations' / self.extraction_id / result['validation_id']
+        self.assertEqual(read_json(evidence / 'assessment.json'), proposal)
+        class TimeoutAssessment(EvaluationRunner):
+            @contextmanager
+            def container(inner, spec):
+                with super(TimeoutAssessment, inner).container(spec) as container:
+                    if spec.control:
+                        container.wait.return_value = True
+                    yield container
+        result = validate(self.store, 'example', self.extraction_id, config,
+                          sandbox=TimeoutAssessment(proposal), command=['assess'])
+        self.assertEqual(result['interpretation'], 'environment_failure')
+        self.assertEqual(result['report']['error_kind'], 'TimeoutError')
+        self.assertEqual(result['baseline']['verdict'], 'fail')
+        self.assertEqual(result['evaluator']['harness'], 'explicit-command')
+        no_alternative = {'adaptations': [], 'limitations': ['Missing implementation is not an alternative.'],
+                          'inconclusive_reason': 'Cannot establish behavior from the harness failure.'}
+        result = validate(self.store, 'example', self.extraction_id, config,
+                          sandbox=EvaluationRunner(no_alternative), command=['assess'])
+        self.assertEqual(result['interpretation'], 'inconclusive')
+        for mode in ('timeout', 'command-error'):
+            runner = EvaluationRunner(proposal, mode=mode)
+            result = validate(self.store, 'example', self.extraction_id, config, sandbox=runner, command=['assess'])
+            self.assertEqual(result['interpretation'], 'environment_failure')
+            self.assertEqual(len(runner.specs), 1)
+            self.assertEqual(result['baseline']['verdict'], 'error')
+
+    def test_review_can_record_unexecutable_base_as_a_limitation(self):
+        from test_evaluation import EvaluationRunner
+        from mineval.review import EXTRACTION, REVIEW, validate_review
+        config = self.root / 'private-collection.json'
+        write_json(config, {'image': 'local:test', 'commands': [{
+            'name': 'private', 'kind': 'tests', 'argv': ['python3', '-c',
+                "import app, runpy\nif app.answer() == 0: import absent_fixture_interface\nrunpy.run_path('tests/test_answer.py')"]}]})
+        assessment = {'adaptations': [], 'limitations': ['No existing equivalent base interface'],
+                      'inconclusive_reason': None,
+                      'error_reason': 'Test collection cannot import the missing base interface.'}
+        base = validate(self.store, 'example', self.extraction_id, config,
+                        command=['fixture-assessor'], sandbox=EvaluationRunner(assessment))
+        future = validate(self.store, 'example', self.extraction_id, config,
+                          future_commit=self.head, sandbox=EvaluationRunner())
+        self.assertEqual(base['interpretation'], 'environment_failure')
+        self.assertEqual(base['baseline']['verdict'], 'fail')
+        self.assertIn('ModuleNotFoundError', base['baseline']['commands'][0]['stderr'])
+        self.assertEqual(base['assessment'], assessment)
+        self.assertIsNone(base['adapted'])
+        self.assertEqual(future['interpretation'], 'passed')
+        self.assertIn('record that base assertions\ndid not run', EXTRACTION)
+        self.assertIn('never claim base assertions ran', REVIEW)
+        self.assertIn('A missing module\nalone does not establish absence', REVIEW)
+        self.assertIn('future environment failures remain blockers', REVIEW)
+        class InspectReviewer(ReportAgent):
+            @contextmanager
+            def container(agent_self, spec):
+                index = read_json(spec.workspace / 'evidence-index.json')
+                records = [read_json(spec.workspace / item['record'].removeprefix('/workspace/'))
+                           for item in index['validations']]
+                self.assertTrue(any(r['interpretation'] == 'environment_failure' and
+                                    r['assessment'] == assessment for r in records))
+                self.assertTrue(any(r['interpretation'] == 'passed' and r['state'] == self.head
+                                    for r in records))
+                self.assertIn('never claim base assertions ran', (spec.inputs / 'prompt.txt').read_text())
+                with super().container(spec) as agent:
+                    yield agent
+        reviewer = InspectReviewer('review.json', report(self.review) | {
+            'reasons': ['Future checks ran; base collection failed and no base assertions ran.']})
+        result = session(self.store, 'example', stage='review', extraction_id=self.extraction_id,
+                         command=['fixture-reviewer'], sandbox=reviewer)
+        self.assertEqual(result['verdict'], 'approve')
+        with self.assertRaisesRegex(ValueError, 'explicit integrity'):
+            validate_review(report(self.review) | {'snapshot_reviewed': False})
+
+    def test_validation_accepts_explicit_source_assessed_failure(self):
+        from test_evaluation import EvaluationRunner
+        config = self.root / 'source-assessment.json'
+        write_json(config, {'image': 'local:test', 'commands': [
+            {'name': 'private', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]})
+        assessment = {'adaptations': [], 'limitations': ['No assertion completed.'],
+                      'inconclusive_reason': None,
+                      'behavior_failure_reason': 'Source inspection found no correct behavior or alternate interface.',
+                      'candidate_evidence': [{'path': 'app.py', 'reason': 'The existing answer returns the wrong value.'}]}
+        result = validate(self.store, 'example', self.extraction_id, config,
+                          command=['assessor'], sandbox=EvaluationRunner(assessment))
+        self.assertEqual(result['interpretation'], 'behavior_failure')
+        self.assertEqual(result['report']['failure_basis'], 'source_assessment')
+        self.assertEqual(result['assessment'], assessment)
+        self.assertEqual(result['report']['candidate_evidence'], assessment['candidate_evidence'])
+
     def test_validation_executes_selected_fixture_on_base_and_future(self):
         from test_evaluation import EvaluationRunner
         config = self.root / 'private-real.json'
@@ -204,7 +410,7 @@ class ReviewTests(HistoryFixture):
         base = validate(self.store, 'example', self.extraction_id, config, sandbox=EvaluationRunner())
         future = validate(self.store, 'example', self.extraction_id, config,
                           future_commit=self.head, sandbox=EvaluationRunner())
-        self.assertEqual(base['interpretation'], 'behavior_failure')
+        self.assertEqual(base['interpretation'], 'inconclusive')
         self.assertEqual(future['interpretation'], 'passed')
         self.assertEqual(base['report']['configuration'], read_json(config))
         self.assertEqual(base['report']['selected_checks'][0]['path'], 'tests/test_answer.py')
@@ -248,7 +454,7 @@ class ReviewTests(HistoryFixture):
         base = validate(self.store, 'later', extraction['extraction_id'], config, sandbox=runner)
         future = validate(self.store, 'later', extraction['extraction_id'], config,
                           future_commit=self.later, sandbox=runner)
-        self.assertEqual(base['interpretation'], 'behavior_failure')
+        self.assertEqual(base['interpretation'], 'inconclusive')
         self.assertEqual(future['interpretation'], 'passed')
         approval = session(self.store, 'later', stage='review', sandbox=runner,
             extraction_id=extraction['extraction_id'], command=command('review.json', report(self.review)))

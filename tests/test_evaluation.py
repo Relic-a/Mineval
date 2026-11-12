@@ -132,6 +132,60 @@ class EvaluationTests(HistoryFixture):
         self.assertEqual(failed['verdict'], 'fail')
         self.assertIn('AssertionError', failed['commands'][0]['stderr'])
 
+    def test_source_assessment_distinguishes_missing_behavior_from_import_failure(self):
+        self.saved(code='VALUE = 0\n')
+        assessment = {'adaptations': [], 'limitations': ['Assertions did not run.'],
+                      'inconclusive_reason': None,
+                      'behavior_failure_reason': 'Source lacks the required answer behavior and an alternative interface.',
+                      'candidate_evidence': [{'path': 'app.py', 'reason': 'Only an unrelated constant is present.'}]}
+        result = self.assess(evaluation_id='source-failure', runner=EvaluationRunner(assessment),
+                             command=['fixture-evaluator'])
+        self.assertEqual(result['verdict'], 'fail')
+        self.assertEqual(result['failure_basis'], 'source_assessment')
+        self.assertEqual(result['candidate_evidence'], assessment['candidate_evidence'])
+        evidence = self.store.task('example') / 'evaluation-evidence/source-failure'
+        self.assertIn('ImportError', read_json(evidence / 'baseline/execution.json')['commands'][0]['stderr'])
+        self.assertEqual(read_json(evidence / 'assessment-proposal.json'), assessment)
+        self.assertFalse((evidence / 'adapted').exists())
+
+    def test_source_assessment_requires_safe_existing_evidence_and_exclusive_outcome(self):
+        from copy import deepcopy
+        self.saved(code='VALUE = 0\n')
+        valid = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None,
+                 'behavior_failure_reason': 'Required behavior is absent after source inspection.',
+                 'candidate_evidence': [{'path': 'app.py', 'reason': 'The required behavior is missing.'}]}
+        for mutation in ('missing', 'unsafe', 'empty', 'error', 'inconclusive', 'adaptation'):
+            proposal = deepcopy(valid)
+            if mutation == 'missing': proposal['candidate_evidence'][0]['path'] = 'missing.py'
+            if mutation == 'unsafe': proposal['candidate_evidence'][0]['path'] = '../app.py'
+            if mutation == 'empty': proposal['candidate_evidence'] = []
+            if mutation == 'error': proposal['error_reason'] = 'Infrastructure failed.'
+            if mutation == 'inconclusive': proposal['inconclusive_reason'] = 'Uncertain.'
+            if mutation == 'adaptation': proposal['adaptations'] = [{'path': 'tests/test_answer.py'}]
+            result = self.assess(evaluation_id='invalid-' + mutation, runner=EvaluationRunner(proposal),
+                                 command=['fixture-evaluator'])
+            self.assertEqual(result['verdict'], 'error', mutation)
+            evidence = self.store.task('example') / 'evaluation-evidence' / ('invalid-' + mutation)
+            self.assertEqual(read_json(evidence / 'assessment-proposal.json'), proposal)
+        runner = EvaluationRunner(valid, mode='timeout')
+        result = self.assess(evaluation_id='source-timeout', runner=runner, command=['fixture-evaluator'])
+        self.assertEqual(result['verdict'], 'error')
+        self.assertEqual(len(runner.specs), 1)
+
+    def test_candidate_evidence_requires_behavior_failure_for_other_outcomes(self):
+        for outcome in ('inconclusive', 'error', 'adaptation'):
+            with self.subTest(outcome=outcome):
+                proposal = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None,
+                            'candidate_evidence': [{'path': 'app.py', 'reason': 'Different interface.'}]}
+                if outcome == 'inconclusive':
+                    proposal['inconclusive_reason'] = 'Cannot establish behavior.'
+                elif outcome == 'error':
+                    proposal['error_reason'] = 'Execution failed.'
+                else:
+                    proposal['adaptations'] = [{'path': 'tests/test_answer.py'}]
+                with self.assertRaisesRegex(ValueError, 'Candidate evidence requires a source-supported failure'):
+                    evaluation.validate_assessment(proposal, [])
+
     def test_passing_checks_do_not_launch_evaluator(self):
         self.saved()
         runner = EvaluationRunner({'deliberately': 'invalid'})

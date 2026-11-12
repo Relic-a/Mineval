@@ -36,6 +36,8 @@ def infer(store, value, *, image, model='gpt-6-luna', effort='medium', context=N
             timeout = container.wait(300)
             state = container.inspect()
             if timeout or state['Running'] or state.get('OOMKilled') or state['ExitCode']:
+                from .sandbox import log_agent_failure
+                log_agent_failure('qualitative_review.failed', container, state, timeout)
                 raise ValueError('Qualitative review did not complete; retry separately')
         return Memory.bullets(read_json(control / 'observations.json'))
 

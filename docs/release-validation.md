@@ -41,8 +41,8 @@ No installed Python environment or materialized Git integrity checks were remove
 
 Run the workflow from the matching version tag, inspect candidate checksums and
 GitHub attestations, and validate installation/upgrade/uninstall against an actual
-attested release. Test a fresh Linux rootless Docker host, the starter image and a
-paid benchmark with explicit authorization. Verify target glibc compatibility.
+attested release. Test a fresh Linux rootless Docker host and the starter image; further paid
+benchmarks require explicit authorization. Verify target glibc compatibility.
 Build dependencies are version/hash locked; byte-identical executable reproducibility
 has not been established. Authorize release upload and PyPI publication separately.
 No packages, public images or releases were published by this work.
@@ -79,3 +79,17 @@ publication remains blocked by the existing attestation policy.
 The full suite with live historical/rootless and Arena integration enabled passed:
 214 tests, 6 skipped (optional toolchains/capture). The installed Arena CLI also
 created a brief and generated a ready fixture result with saved authentication present.
+
+
+## 0.2.0a1 VPS validation
+
+Paid end-to-end workflows completed on an existing VPS for the same two frozen
+Gretel tasks with GPT-6 Luna medium and GPT-6.1 Terra medium. Luna received fail
+verdicts on both tasks. Terra received a fail on the queue task and an inconclusive
+verdict on the search task because the historical test interface could not be
+defensibly adapted. These results describe these tasks and configurations, not
+general model performance or broad product readiness.
+
+The local benchmark was not rerun in this session. This VPS validation does not
+establish fresh-host installation acceptance. Earlier sections describe validation
+performed at their stated times and retain their historical limitations.

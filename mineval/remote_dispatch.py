@@ -1,9 +1,12 @@
 """Local durable outbox and remote job reconciliation."""
 import base64
+import json
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import os
 from pathlib import Path
 import tempfile
+import shutil
+from uuid import uuid4
 
 from .artifacts import digest, inventory, lock, read_json, write_json
 from .remote import RemoteError, SSHClient
@@ -40,10 +43,78 @@ def upload_resumable(client, jid, directory):
         raise RemoteError('Upload checksum changed; restarting transfer')
 
 
-def fetch_resumable(client, jid, directory, state=None):
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _finish_export_switch(directory):
+    marker = directory / 'export-switch.json'
+    if not marker.exists():
+        return
+    from .preparation import identifier
+    saved = read_json(marker)
+    backup = directory / 'export-backups' / identifier(saved['backup'])
+    if (not (backup / 'download.json').is_file() or not (backup / 'download.partial').is_file()
+            or digest(backup / 'download.json') != saved['descriptor_sha256']
+            or digest(backup / 'download.partial') != saved['partial_sha256']):
+        raise ValueError('Saved export backup is missing or corrupt')
+    (directory / 'download.json').unlink(missing_ok=True)
+    (directory / 'download.partial').unlink(missing_ok=True)
+    _sync_directory(directory)
+    marker.unlink()
+    _sync_directory(directory)
+
+
+def _refresh_export(directory, state):
+    descriptor, partial = directory / 'download.json', directory / 'download.partial'
+    if not descriptor.exists():
+        return
+    info = read_json(descriptor)
+    if 'delta' in info:
+        return
+    if (state is None or state.get('state') not in ('completed', 'failed', 'interrupted') or
+            export_identity(info.get('state', {})) != export_identity(state)):
+        raise ValueError('Legacy export does not match the terminal remote job')
+    if not partial.is_file() or partial.is_symlink() or descriptor.is_symlink():
+        raise ValueError('Legacy export partial is unavailable')
+    backups = directory / 'export-backups'
+    backups.mkdir(exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(dir=backups) as temp:
+        staged = Path(temp)
+        for source in (descriptor, partial):
+            target = staged / source.name
+            shutil.copyfile(source, target, follow_symlinks=False)
+            if digest(source) != digest(target):
+                raise ValueError('Legacy export changed during backup')
+            target.chmod(0o400)
+            with target.open('rb') as stream:
+                os.fsync(stream.fileno())
+        _sync_directory(staged)
+        name = uuid4().hex
+        os.rename(staged, backups / name)
+        _sync_directory(backups)
+    backup = backups / name
+    marker = directory / 'export-switch.json'
+    write_json(marker, {'backup': name, 'descriptor_sha256': digest(backup / 'download.json'),
+                        'partial_sha256': digest(backup / 'download.partial')})
+    with marker.open('rb') as stream:
+        os.fsync(stream.fileno())
+    _sync_directory(directory)
+    _finish_export_switch(directory)
+
+
+def fetch_resumable(client, jid, directory, state=None, *, known_inventory=None, refresh_export=False):
     """Keep a verified export identity and durable byte offset across disconnects."""
     descriptor = directory / 'download.json'
     partial = directory / 'download.partial'
+    pending_switch = (directory / 'export-switch.json').exists()
+    _finish_export_switch(directory)
+    if refresh_export and not pending_switch:
+        _refresh_export(directory, state)
     if descriptor.exists() and state is not None:
         saved = read_json(descriptor)
         if export_identity(saved.get('state', {})) != export_identity(state):
@@ -52,7 +123,13 @@ def fetch_resumable(client, jid, directory, state=None):
     if descriptor.exists():
         info = read_json(descriptor)
     else:
-        info = client.request({'action': 'fetch-start', 'job_id': jid}, timeout=TRANSFER_TIMEOUT)
+        request = {'action': 'fetch-start', 'job_id': jid}
+        if known_inventory is not None:
+            known = known_inventory()
+            # The worker caps requests at 16 MiB. Fall back to a full export.
+            if len(json.dumps(known).encode()) < 8 * 1024 * 1024:
+                request['known_inventory'] = known
+        info = client.request(request, timeout=TRANSFER_TIMEOUT)
         if (not isinstance(info.get('size'), int) or info['size'] < 0 or
                 not isinstance(info.get('token'), str)):
             raise ValueError('Invalid remote export descriptor')
@@ -116,25 +193,34 @@ def outbox(workflow, job):
     return final
 
 
-def run_job(workflow, job, stop):
+def run_job(workflow, job, stop, refresh_export=False):
     client = SSHClient(workflow.settings['vps']['host'])
     client.stop_event = stop
     jid = job['id']
+    transport_only = refresh_export
     try:
-        directory = outbox(workflow, job)
+        if refresh_export:
+            directory = workflow.store.root / 'remote-outbox' / jid
+            if not directory.is_dir():
+                raise ValueError('No saved remote outbox for export refresh')
+        else:
+            directory = outbox(workflow, job)
     except Exception as exc:
         workflow.update(jid, state='failed', detail='Could not stage remote inputs (' + type(exc).__name__ + ')')
         return
-    workflow.update(jid, state='running', stage='connecting to VPS', detail='')
+    if not refresh_export:
+        workflow.update(jid, state='running', stage='connecting to VPS', detail='')
     while not stop.is_set():
         try:
             try:
                 state = client.request({'action': 'status', 'job_id': jid})
             except RemoteError as exc:
-                if exc.code != 'FileNotFoundError':
+                if transport_only or exc.code != 'FileNotFoundError':
                     raise
                 upload_resumable(client, jid, directory)
                 continue
+            if transport_only and state['state'] not in ('completed', 'failed', 'interrupted'):
+                return
             if state['state'] in ('receiving', 'ready'):
                 upload_resumable(client, jid, directory)
                 continue
@@ -146,7 +232,11 @@ def run_job(workflow, job, stop):
                 workflow.update(jid, state='interrupted', detail='Remote job state is uncertain; inspect the VPS before retrying.')
                 return
             workflow.update(jid, stage='downloading VPS evidence', detail='Resuming verified export.')
-            result, downloaded = fetch_resumable(client, jid, directory, state)
+            refreshing = refresh_export
+            refresh_export = False
+            result, downloaded = fetch_resumable(client, jid, directory, state,
+                known_inventory=lambda: transfer.local_inventory(workflow.store, job['task'], jid),
+                refresh_export=refreshing)
             latest = client.request({'action': 'status', 'job_id': jid})
             if export_identity(latest) != export_identity(result['state']):
                 (directory / 'download.json').unlink(missing_ok=True)
@@ -161,6 +251,8 @@ def run_job(workflow, job, stop):
                 shutil.copyfile(downloaded, archive)
                 write_json(receipt, result['receipt'])
                 verified = transfer.verify(archive, receipt, temp / 'data')
+                if 'delta' in result:
+                    transfer.reconstruct_delta(temp / 'data', result['delta'], verified, workflow.store, job['task'], jid)
                 receipts = directory / 'receipts'
                 receipts.mkdir(exist_ok=True, mode=0o700)
                 saved_receipt = receipts / (verified['archive_sha256'] + '.json')
@@ -170,6 +262,16 @@ def run_job(workflow, job, stop):
                 else:
                     write_json(saved_receipt, verified)
                     saved_receipt.chmod(0o444)
+                provenance = directory / 'export-descriptors'
+                provenance.mkdir(exist_ok=True, mode=0o700)
+                from .preparation import identifier
+                descriptor_path = provenance / (identifier(result['token']) + '.json')
+                if descriptor_path.exists():
+                    if read_json(descriptor_path) != result:
+                        raise ValueError('Remote export descriptor conflicts with saved evidence')
+                else:
+                    write_json(descriptor_path, result)
+                    descriptor_path.chmod(0o444)
                 if job['kind'] == 'prepare':
                     checkpoint = directory / 'synced-baseline.json'
                     baseline = read_json(checkpoint if checkpoint.exists() else directory / 'input/baseline.json')
@@ -235,21 +337,23 @@ def run_job(workflow, job, stop):
             workflow.update(jid, stage='VPS connection unavailable', detail='Reconnecting without restarting the remote job.')
             stop.wait(3)
         except Exception as exc:
+            from .devlog import failure
+            failure('remote.import.failed', exc, job_id=jid)
             workflow.update(jid, state='interrupted', stage='remote import needs attention',
                             detail='Remote result could not be imported (' + type(exc).__name__ + '); evidence remains on the VPS.')
             return
 
 
-def dispatch(workflow, stop):
+def dispatch(workflow, stop, job_id=None, refresh_export=False):
     try:
         with lock(workflow.store.root / 'remote-dispatcher.lock'):
             with ThreadPoolExecutor(max_workers=16, thread_name_prefix='mineval-vps') as pool:
                 active = {}
                 while not stop.is_set():
                     for job in reversed(workflow.jobs()):
-                        if (job['state'] in ('queued', 'running') and job['payload'].get('execution_host') == 'vps'
+                        if ((job_id is None or job['id'] == job_id) and job['state'] in (('queued', 'running', 'interrupted') if refresh_export else ('queued', 'running')) and job['payload'].get('execution_host') == 'vps'
                                 and job['id'] not in active):
-                            active[job['id']] = pool.submit(run_job, workflow, job, stop)
+                            active[job['id']] = pool.submit(run_job, workflow, job, stop, refresh_export) if refresh_export else pool.submit(run_job, workflow, job, stop)
                     if not active:
                         return
                     done, _ = wait(active.values(), timeout=0.5, return_when=FIRST_COMPLETED)
@@ -257,6 +361,8 @@ def dispatch(workflow, stop):
                         if future in done:
                             del active[jid]
                             future.result()
+                    if refresh_export and not active:
+                        return
     except ValueError as exc:
         if str(exc) != 'Task is busy in another preparation operation':
             raise

@@ -5,11 +5,12 @@ accidental corruption and makes a received bundle independently inspectable.
 Bundles are staged before publication and never overwrite an existing file.
 """
 import os
+import re
 from pathlib import Path
 import shutil
 import tempfile
 
-from .artifacts import digest, inventory, pack, unpack, write_json, read_json
+from .artifacts import digest, inventory, lock, pack, unpack, relative, write_json, read_json
 
 
 def create(source, archive, manifest):
@@ -39,6 +40,92 @@ def verify(archive, manifest, destination):
         shutil.rmtree(destination)
         raise
     return receipt
+
+
+def validate_inventory(files, *, prefixes=None):
+    if not isinstance(files, dict) or len(files) > 100_000:
+        raise ValueError('Invalid export inventory')
+    for name, entry in files.items():
+        relative(name)
+        if prefixes is not None and not any(name.startswith(prefix) for prefix in prefixes):
+            raise ValueError('Export inventory outside job scope')
+        if (not isinstance(entry, dict) or set(entry) != {'sha256', 'executable'} or
+                not isinstance(entry['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', entry['sha256']) or
+                type(entry['executable']) is not bool):
+            raise ValueError('Invalid export inventory entry')
+    return files
+
+
+def local_inventory(store, task, job_id):
+    from .preparation import identifier
+    task, job_id = identifier(task), identifier(job_id)
+    result = {}
+    with lock(store.root / 'locks' / (task + '.lock'), shared=True):
+        marker = store.root / 'remote-imports' / (task + '.json')
+        if marker.exists() and read_json(marker).get('job_id') != job_id:
+            raise ValueError('Another remote preparation import needs recovery')
+        for namespace, source in (('tasks', store.task(task)), ('drafts', store.draft(task))):
+            if source.exists():
+                result.update({f'{namespace}/{task}/{name}': value for name, value in inventory(source).items()})
+    return result
+
+
+def create_delta(source, archive, receipt, known, task):
+    """Pack changed files, retaining the authoritative complete inventory."""
+    from .preparation import identifier
+    task = identifier(task)
+    known = validate_inventory(known, prefixes=(f'tasks/{task}/', f'drafts/{task}/'))
+    source = Path(source)
+    full = inventory(source)
+    reused = {name: value for name, value in full.items() if known.get(name) == value}
+    for name in reused:
+        (source / relative(name)).unlink()
+    subset = create(source, archive, receipt)
+    if subset['files'] != {name: value for name, value in full.items() if name not in reused}:
+        raise ValueError('Delta export inventory changed')
+    return {'schema_version': 1, 'full_inventory': full}
+
+
+def reconstruct_delta(destination, descriptor, receipt, store, task, job_id):
+    """Rebuild a verified subset using only currently identical local job files."""
+    from .preparation import identifier
+    task, job_id = identifier(task), identifier(job_id)
+    if not isinstance(descriptor, dict) or set(descriptor) != {'schema_version', 'full_inventory'} or descriptor['schema_version'] != 1:
+        raise ValueError('Invalid delta descriptor')
+    full = validate_inventory(descriptor['full_inventory'])
+    if any(not (name.startswith((f'tasks/{task}/', f'drafts/{task}/', f'resource-usage/{job_id}-'))
+                    or name == 'observations.json') for name in full):
+        raise ValueError('Export inventory outside job scope')
+    subset = validate_inventory(receipt['files'])
+    if any(full.get(name) != entry for name, entry in subset.items()):
+        raise ValueError('Delta archive disagrees with full inventory')
+    missing = {name: value for name, value in full.items() if name not in subset}
+    prefixes = (f'tasks/{task}/', f'drafts/{task}/')
+    validate_inventory(missing, prefixes=prefixes)
+    destination = Path(destination)
+    with lock(store.root / 'locks' / (task + '.lock'), shared=True):
+        marker = store.root / 'remote-imports' / (task + '.json')
+        if marker.exists() and read_json(marker).get('job_id') != job_id:
+            raise ValueError('Another remote preparation import needs recovery')
+        roots = {'tasks': store.task(task), 'drafts': store.draft(task)}
+        before = {key: inventory(path) for key, path in roots.items() if path.exists()}
+        for name, entry in missing.items():
+            parts = relative(name).parts
+            if before.get(parts[0], {}).get('/'.join(parts[2:])) != entry:
+                raise ValueError('Reused local evidence changed or is missing')
+        for name in missing:
+            parts = relative(name).parts
+            namespace = parts[0]
+            source = roots[namespace].joinpath(*parts[2:])
+            target = destination.joinpath(*parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                raise ValueError('Unexpected file in delta archive')
+            shutil.copy2(source, target, follow_symlinks=False)
+        after = {key: inventory(path) for key, path in roots.items() if path.exists()}
+        if before != after or inventory(destination) != full:
+            raise ValueError('Reconstructed export inventory mismatch')
+    return full
 
 
 def import_benchmark(store, incoming, job):
@@ -193,7 +280,9 @@ def import_preparation(store, incoming, job, baseline):
             for manifest in remote_task.glob(pattern):
                 checked(manifest.parent)
         old = baseline['task']
-        mutable = {'status.json', 'cleanup-latest.json', 'verify-latest.json'}
+        # Checkpoints are a mutable index into sealed evidence, not a receipt.
+        # The three-way reconciliation below still rejects concurrent local edits.
+        mutable = {'status.json', 'cleanup-latest.json', 'verify-latest.json', 'preparation-progress.json'}
         for name, value in old.items():
             if name not in remote_files['task'] or (name not in mutable and remote_files['task'][name] != value):
                 raise ValueError('Remote preparation changed existing evidence')

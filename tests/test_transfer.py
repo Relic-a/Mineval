@@ -188,7 +188,87 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual({path for _, path in seen}, {root / 'jobs/job1/input/data', root / 'jobs/job2/input/data'})
 
 
+class DeltaTransferTests(HistoryFixture):
+    def delta(self):
+        import os
+        from mineval.artifacts import inventory, read_json
+        large = self.store.task('example') / 'private/large-fixture.bin'
+        large.write_bytes(os.urandom(1024 * 1024))
+        job = {'id': 'job1', 'kind': 'prepare', 'task': 'example', 'payload': {}}
+        source = self.root / 'prep-delta'
+        transfer.preparation_input(self.store, job, source, {})
+        selected = source / 'data'
+        (selected / 'tasks/example/new-evidence').write_text('new')
+        full = inventory(selected)
+        known = transfer.local_inventory(self.store, 'example', 'job1')
+        archive, receipt = self.root / 'delta.tar.gz', self.root / 'delta-receipt.json'
+        descriptor = transfer.create_delta(selected, archive, receipt, known, 'example')
+        self.assertLess(archive.stat().st_size, large.stat().st_size // 4)
+        destination = self.root / 'received'
+        subset = transfer.verify(archive, receipt, destination)
+        return destination, descriptor, subset, full, large
+
+    def test_delta_roundtrip_and_unchanged_resume(self):
+        from mineval.artifacts import inventory
+        destination, descriptor, subset, full, large = self.delta()
+        from mineval.artifacts import write_json
+        marker = self.store.root / 'remote-imports/example.json'
+        write_json(marker, {'job_id': 'job1'})
+        self.assertTrue(transfer.local_inventory(self.store, 'example', 'job1'))
+        with self.assertRaisesRegex(ValueError, 'Another remote'):
+            transfer.local_inventory(self.store, 'example', 'job2')
+        transfer.reconstruct_delta(destination, descriptor, subset, self.store, 'example', 'job1')
+        self.assertEqual(inventory(destination), full)
+        self.assertEqual((destination / 'tasks/example/private/large-fixture.bin').read_bytes(), large.read_bytes())
+
+    def test_delta_rejects_unsafe_mismatch_missing_and_symlink(self):
+        from copy import deepcopy
+        destination, descriptor, subset, full, large = self.delta()
+        for name in ('../escape', 'tasks/other/file'):
+            bad = deepcopy(descriptor)
+            bad['full_inventory'][name] = {'sha256': '0' * 64, 'executable': False}
+            with self.assertRaises(ValueError):
+                transfer.reconstruct_delta(destination, bad, subset, self.store, 'example', 'job1')
+        bad = deepcopy(descriptor)
+        key = next(iter(subset['files']))
+        bad['full_inventory'][key]['sha256'] = '0' * 64
+        with self.assertRaisesRegex(ValueError, 'disagrees'):
+            transfer.reconstruct_delta(destination, bad, subset, self.store, 'example', 'job1')
+        original = large.read_bytes()
+        large.write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'changed or is missing'):
+            transfer.reconstruct_delta(destination, descriptor, subset, self.store, 'example', 'job1')
+        large.write_bytes(original)
+        large.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, 'changed or is missing'):
+            transfer.reconstruct_delta(destination, descriptor, subset, self.store, 'example', 'job1')
+        large.unlink()
+        with self.assertRaisesRegex(ValueError, 'changed or is missing'):
+            transfer.reconstruct_delta(destination, descriptor, subset, self.store, 'example', 'job1')
+        large.symlink_to(self.root / 'elsewhere')
+        with self.assertRaises(ValueError):
+            transfer.reconstruct_delta(destination, descriptor, subset, self.store, 'example', 'job1')
+        large.unlink()
+        large.write_bytes(original)
+
+
 class PreparationImportTests(HistoryFixture):
+    def test_checkpoint_changes_reconcile_but_concurrent_edits_conflict(self):
+        from mineval.artifacts import write_json
+        job = {'id': 'job1', 'kind': 'prepare', 'task': 'example', 'payload': {}}
+        progress = self.store.task('example') / 'preparation-progress.json'
+        write_json(progress, {'old': True})
+        snapshot = self.root / 'prep-input'
+        transfer.preparation_input(self.store, job, snapshot, {})
+        baseline = json.loads((snapshot / 'baseline.json').read_text())
+        remote_progress = snapshot / 'data/tasks/example/preparation-progress.json'
+        write_json(remote_progress, {'new': True})
+        transfer.import_preparation(self.store, snapshot / 'data', job, baseline)
+        self.assertEqual(json.loads(progress.read_text()), {'new': True})
+        write_json(progress, {'local': True})
+        with self.assertRaisesRegex(ValueError, 'task changed'):
+            transfer.import_preparation(self.store, snapshot / 'data', job, baseline)
+
     def test_completed_remote_revision_import_and_conflict(self):
         job = {'id': 'job1', 'kind': 'prepare', 'task': 'example', 'payload': {}}
         snapshot = self.root / 'prep-input'
@@ -209,6 +289,22 @@ class PreparationImportTests(HistoryFixture):
 
 
 class DispatchTests(HistoryFixture):
+    def test_retry_reconciles_download_before_retrying_remote_job(self):
+        from unittest.mock import patch
+        from mineval.workflows import Workflows
+        flow = Workflows(self.store, {'vps': {'host': 'test@example.test'}})
+        flow.enqueue('prepare', [{'task_id': 'example'}], execution_host='vps')
+        job = flow.jobs()[0]
+        flow.update(job['id'], state='interrupted')
+        directory = self.store.root / 'remote-outbox' / job['id']
+        directory.mkdir(parents=True)
+        (directory / 'download.json').write_text('{}')
+        (directory / 'download.partial').write_bytes(b'partial')
+        with patch('mineval.remote.SSHClient', side_effect=AssertionError('must reconcile first')):
+            flow.retry(job['id'])
+        resumed = flow.jobs()[0]
+        self.assertEqual((resumed['state'], resumed['stage']), ('queued', 'resuming remote import'))
+
     def test_download_resumes_after_disconnection_without_new_export(self):
         import base64
         from mineval.remote import RemoteError
@@ -230,7 +326,9 @@ class DispatchTests(HistoryFixture):
         client = Client()
         with self.assertRaises(RemoteError):
             fetch_resumable(client, 'job1', self.root)
-        info, partial = fetch_resumable(client, 'job1', self.root)
+        def must_not_recompute():
+            self.fail('Resuming must retain the original descriptor')
+        info, partial = fetch_resumable(client, 'job1', self.root, known_inventory=must_not_recompute)
         self.assertEqual(client.starts, 1)
         self.assertEqual(info['token'], 'export1')
         self.assertEqual(partial.read_bytes(), content)
@@ -305,6 +403,12 @@ class DispatchTests(HistoryFixture):
                 thread.join()
         self.assertEqual(Client.submissions, 1)
         self.assertTrue(list((self.store.root / 'remote-outbox/job1/receipts').glob('*.json')))
+        descriptors = list((self.store.root / 'remote-outbox/job1/export-descriptors').glob('*.json'))
+        self.assertEqual(len(descriptors), 1)
+        descriptor = json.loads(descriptors[0].read_text())
+        self.assertIn('full_inventory', descriptor['delta'])
+        self.assertIn('archive_sha256', descriptor['receipt'])
+        self.assertEqual(descriptors[0].stat().st_mode & 0o222, 0)
         self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
         self.assertEqual(self.store.inspect_run('example', 'local-run')['status'], 'completed')
         self.assertEqual(self.store.inspect_run('example', 'dispatch-run')['status'], 'completed')
@@ -315,6 +419,58 @@ class DispatchTests(HistoryFixture):
 
 
 class RetryTests(HistoryFixture):
+    def test_remote_reevaluation_allocates_once_and_keeps_saved_run(self):
+        from unittest.mock import patch
+        from mineval import evaluation, remote_api, remote_coordinator
+        from mineval.artifacts import digest, write_json
+        from mineval.workflows import Workflows
+        from test_evaluation import EvaluationRunner
+        version = self.freeze('example', self.review)['version']
+        revision = self.store.inspect_revision('example', version)
+        benchmark.run(self.store, 'example', version, run_id='saved', adapter=FakeAdapter(effort='medium'), sandbox=SimulatedDocker())
+        config = self.root / 'reeval-config.json'
+        write_json(config, {'image': 'local:test', 'commands': [{'name': 'private', 'kind': 'tests',
+                    'argv': ['python3', 'tests/test_answer.py']}]})
+        evaluation.evaluate(self.store, 'example', 'saved', config, evaluation_id='old-eval', sandbox=EvaluationRunner())
+        old = self.store.task('example') / 'evaluations/old-eval.json'
+        before = digest(old)
+        payload = {'run_id': 'saved', 'evaluation_id': 'old-eval', 'phase': 'review', 'revision': revision,
+                   'execution_host': 'vps', 'configuration': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'}}
+        job = {'id': 'job1', 'kind': 'benchmark', 'task': 'example', 'payload': payload}
+        worker = self.root / 'reeval-worker'
+        input_dir = worker / 'jobs/job1/input'
+        input_dir.mkdir(parents=True)
+        shutil.copytree(self.store.root, input_dir / 'data')
+        remote_coordinator.enqueue(worker, job)
+        remote_coordinator.Coordinator(worker).update('job1', state='completed')
+        flow = Workflows(self.store, {'vps': {'host': 'test@example.test'}})
+        with flow.db() as db:
+            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)', ('job1', 'benchmark', 'example', json.dumps(payload),
+                       'completed', 'completed', '', 1, 1, 'dedup'))
+        requests = []
+        class Client:
+            def __init__(self, host): pass
+            def request(self, request, timeout=60):
+                requests.append(request)
+                return remote_api.dispatch(worker, request)
+        with patch('mineval.workflows.SSHClient', Client, create=True), \
+             patch('mineval.remote.SSHClient', Client), patch('mineval.remote_coordinator.start'), \
+             patch('mineval.benchmark.run', side_effect=AssertionError('benchmark must not rerun')):
+            flow.retry('job1', reevaluate=True)
+            retried = flow.jobs()[0]
+            again = remote_api.dispatch(worker, requests[0])
+        self.assertEqual(retried['payload']['run_id'], 'saved')
+        self.assertEqual(retried['payload']['phase'], 'evaluation')
+        self.assertNotEqual(retried['payload']['evaluation_id'], 'old-eval')
+        self.assertEqual(retried['payload']['evaluation_id'], again['payload']['evaluation_id'])
+        self.assertEqual(retried['payload']['internal_evaluation_ids'], ['old-eval'])
+        self.assertEqual(digest(old), before)
+        self.assertEqual(requests[0]['action'], 'retry')
+        self.assertEqual(requests[0]['expected_evaluation_id'], 'old-eval')
+        self.assertEqual(self.store.inspect_run('example', 'saved')['status'], 'completed')
+        with self.assertRaisesRegex(ValueError, 'combine'):
+            flow.retry('job1', reevaluate=True, new_attempt=True)
+
     def test_remote_retry_keeps_saved_attempt_and_replaces_uncertain_evaluation(self):
         from unittest.mock import patch
         from mineval import remote_api, remote_coordinator
@@ -492,6 +648,66 @@ class ResumableProtocolTests(unittest.TestCase):
                 remote_api.dispatch(worker, {'action': 'upload-finish', 'job_id': 'job1'})
                 remote_api.dispatch(worker, {'action': 'upload-finish', 'job_id': 'job1'})
                 self.assertEqual(len(remote_coordinator.Coordinator(worker).jobs()), 1)
+
+    def test_refresh_preserves_legacy_and_resumes_new_delta(self):
+        import base64
+        from mineval.remote import RemoteError
+        from mineval.remote_dispatch import fetch_resumable
+        from mineval.artifacts import write_json
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = {'state': 'failed', 'updated': 1, 'payload': {}}
+            legacy = {'token': 'old', 'size': 10, 'state': state, 'receipt': {}}
+            write_json(root / 'download.json', legacy)
+            (root / 'download.partial').write_bytes(b'old-bytes')
+            class Client:
+                starts = 0
+                requests = []
+                def request(inner, request, timeout=60):
+                    inner.requests.append(request)
+                    if request['action'] == 'fetch-start':
+                        inner.starts += 1
+                        self.assertEqual(request['known_inventory'], {'known': 'inventory'})
+                        return {'token': 'new', 'size': 3, 'state': state, 'receipt': {},
+                                'delta': {'schema_version': 1, 'full_inventory': {}}}
+                    if len(inner.requests) == 2:
+                        raise RemoteError('connection lost')
+                    return {'offset': request['offset'], 'total': 3, 'data': base64.b64encode(b'new').decode()}
+            client = Client()
+            with self.assertRaises(RemoteError):
+                fetch_resumable(client, 'job1', root, state, known_inventory=lambda: {'known': 'inventory'}, refresh_export=True)
+            backups = list((root / 'export-backups').iterdir())
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(json.loads((backups[0] / 'download.json').read_text()), legacy)
+            self.assertEqual((backups[0] / 'download.partial').read_bytes(), b'old-bytes')
+            result, partial = fetch_resumable(client, 'job1', root, state, refresh_export=True)
+            self.assertEqual((result['token'], partial.read_bytes(), client.starts), ('new', b'new', 1))
+            self.assertEqual(len(list((root / 'export-backups').iterdir())), 1)
+            self.assertEqual([r['action'] for r in client.requests], ['fetch-start', 'fetch-chunk', 'fetch-chunk'])
+
+    def test_refresh_switch_recovers_after_interrupted_unlink(self):
+        from unittest.mock import patch
+        from mineval.remote_dispatch import fetch_resumable
+        from mineval.artifacts import write_json
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = {'state': 'failed', 'updated': 1, 'payload': {}}
+            write_json(root / 'download.json', {'token': 'old', 'size': 10, 'state': state, 'receipt': {}})
+            (root / 'download.partial').write_bytes(b'old')
+            with patch('mineval.remote_dispatch._finish_export_switch', side_effect=[None, RuntimeError('crash')]):
+                with self.assertRaises(RuntimeError):
+                    fetch_resumable(None, 'job1', root, state, refresh_export=True)
+            self.assertTrue((root / 'export-switch.json').exists())
+            (root / 'download.json').unlink()
+            class Client:
+                def request(inner, request, timeout=60):
+                    self.assertEqual(request['action'], 'fetch-start')
+                    return {'token': 'new', 'size': 0, 'state': state, 'receipt': {}}
+            result, partial = fetch_resumable(Client(), 'job1', root, state)
+            self.assertEqual(result['token'], 'new')
+            self.assertEqual(partial.read_bytes(), b'')
+            self.assertFalse((root / 'export-switch.json').exists())
+            self.assertEqual(next((root / 'export-backups').iterdir()).joinpath('download.partial').read_bytes(), b'old')
 
     def test_stale_attempt_discards_partial_export(self):
         import base64

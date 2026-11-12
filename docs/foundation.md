@@ -271,7 +271,15 @@ and calls diagnostics without updating the cleanup's latest report. Append-only
 private/validations/<extraction>/<id> receipts retain inputs, configuration, image and
 command outcomes. Environment failures are distinct from behavioral failures; neither
 base failure nor future success is automatic approval. Validation is optional where
-infeasible. Future checks use original future trees without cleanup adaptations.
+infeasible. A base collection or interface failure is not an assertion failure or,
+by itself, proof that behavior is absent. When inspection of source, diff, and the
+independent assessment establishes that the feature and any legitimate alternative
+interface are absent, review may consider credible future-executed checks with that
+base limitation recorded; it must not claim base assertions ran or invent production
+code or stubs to run them. Review still assesses test provenance, alternative
+interfaces, future execution, and coverage; passing on both trees is nondiscriminating,
+and broken future checks or future environment failures remain blockers. Future checks
+use original future trees without cleanup adaptations.
 
 Private review reports bind exact cleanup/extraction manifests, current diagnostic,
 metadata and validation receipts. Approve/revise/reject and reasons are mandatory.

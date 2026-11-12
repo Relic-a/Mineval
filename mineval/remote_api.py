@@ -60,17 +60,31 @@ def dispatch(root, request):
     if action == 'retry':
         coordinator = remote_coordinator.Coordinator(root)
         job = next((j for j in coordinator.jobs() if j['id'] == job_id), None)
+        reevaluate = request.get('reevaluate', False)
+        if reevaluate and request.get('new_attempt'):
+            raise ValueError('Cannot combine a new attempt with reevaluation')
+        expected = identifier(request.get('expected_evaluation_id')) if reevaluate else None
+        if reevaluate and job is not None:
+            if job['kind'] != 'benchmark':
+                raise ValueError('Reevaluation requires a benchmark job')
+            payload = job['payload']
+            prior = payload.get('internal_evaluation_ids', [])
+            if prior and prior[-1] == expected and payload.get('evaluation_id') != expected:
+                return job  # Idempotent after a lost retry response.
         if job is None:
-            if request.get('new_attempt') or read_json(directory / 'state.json').get('state') != 'ready':
+            if reevaluate or request.get('new_attempt') or read_json(directory / 'state.json').get('state') != 'ready':
                 raise ValueError('Remote submission cannot be safely resumed')
             remote_coordinator.enqueue(root, read_json(directory / 'input/job.json'))
         else:
+            if reevaluate and (directory / 'stage-active').exists():
+                raise ValueError('Remote job stage is still active')
             from .workflows import Workflows
             from .preparation import Store
             child = Workflows(Store(directory / 'input/data'))
             child.remote_coordinator = True
             child.path = coordinator.path
-            child.retry(job_id, new_attempt=bool(request.get('new_attempt')))
+            child.retry(job_id, new_attempt=bool(request.get('new_attempt')), reevaluate=reevaluate,
+                        expected_evaluation_id=expected)
         (directory / 'cancel').unlink(missing_ok=True)
         remote_coordinator.start(root)
         return next(j for j in coordinator.jobs() if j['id'] == job_id)
@@ -148,7 +162,11 @@ def dispatch(root, request):
                 observations = [item for item in Memory(Store(data)).history(model, archive=True)
                                 if item['event_key'] == key]
                 write_json(selected / 'observations.json', observations)
-            transfer.create(selected, archive, receipt)
+            delta = None
+            if action == 'fetch-start' and 'known_inventory' in request:
+                delta = transfer.create_delta(selected, archive, receipt, request['known_inventory'], task)
+            else:
+                transfer.create(selected, archive, receipt)
             if action == 'fetch-start':
                 token = uuid4().hex
                 exports = directory / 'exports'
@@ -158,8 +176,11 @@ def dispatch(root, request):
                 os.replace(archive, saved)
                 saved.chmod(0o400)
                 start_export_reaper(root)
-                return {'state': state, 'token': token, 'size': saved.stat().st_size,
-                        'receipt': read_json(receipt)}
+                result = {'state': state, 'token': token, 'size': saved.stat().st_size,
+                          'receipt': read_json(receipt)}
+                if delta is not None:
+                    result['delta'] = delta
+                return result
             return {'state': state, 'archive': base64.b64encode(archive.read_bytes()).decode(),
                     'receipt': read_json(receipt)}
     raise ValueError('Unknown remote action')
