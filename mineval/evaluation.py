@@ -1,7 +1,8 @@
 """Independent assessments of saved trees; no coding-model reruns or transcripts."""
 from pathlib import Path
+import hashlib
+import json
 import re
-import shutil
 import tempfile
 import time
 from uuid import uuid4
@@ -14,7 +15,7 @@ from .review import checked, seal, strings
 from .sandbox import DockerSandbox, Limits, SandboxSpec
 from .verification import load_config
 
-POLICY = 'behavior-preserving-private-checks-v3-source-assessment'
+POLICY = 'isolated-argv-v1'
 PROMPT = """You are an independent evaluator of a saved candidate, not its coding agent.
 Start with /mineval-input/baseline-results.json and task.json. Inspect only failing
 checks and the candidate code they exercise; consult verification/extraction-manifest.json
@@ -115,36 +116,44 @@ def inspect(store, task_id, evaluation_id):
 def execute_checks(source_tree, destination, staged, verification, artifacts, adaptations, config, image, runner):
     report = {'commands': [], 'verdict': 'error', 'explanation': 'Verification infrastructure failed.'}
     staged.mkdir()
+    if config.get('grading_type') != 'isolated-argv-v1':
+        report.update(error_kind='unsupported_grading_type',
+                      explanation='This grading type is unsupported for isolated grading; shared-environment tests cannot run safely.')
+        write_json(staged / 'execution.json', report)
+        return report
     try:
         workspace = destination
         copy_tree(source_tree, workspace)
         adapted = {a['path']: a for a in adaptations}
-        original_inventory = inventory(verification)
         selected = []
+        cases = []
+        if sum(step['kind'] == 'tests' for step in config['commands']) != 1:
+            raise ValueError('Isolated grading requires exactly one tests command')
         for item in artifacts:
             path = str(relative(item['path']))
-            target = workspace / path
-            # Candidate may replace a test directory with a regular file (or vice versa).
-            current = workspace
-            for part in relative(path).parts[:-1]:
-                current = current / part
-                if current.is_file():
-                    current.unlink()
-                current.mkdir(exist_ok=True)
-            if target.is_dir():
-                shutil.rmtree(target)
             source = verification / relative(item['stored_path'])
             if path in adapted:
-                target.write_text(adapted[path]['content'])
+                raw = adapted[path]['content'].encode()
             else:
-                shutil.copyfile(source, target)
-            target.chmod(0o755 if original_inventory[item['stored_path']]['executable'] else 0o644)
-            selected.append(item | {'executed_sha256': digest(target), 'adapted': path in adapted})
+                raw = source.read_bytes()
+            if len(raw) > 1024 * 1024:
+                raise ValueError('Isolated test file is too large')
+            document = json.loads(raw)
+            if not isinstance(document, dict) or set(document) != {'cases'} or not isinstance(document['cases'], list) or not document['cases']:
+                raise ValueError('Expected a nonempty isolated test case list')
+            for case in document['cases']:
+                if (not isinstance(case, dict) or set(case) != {'input', 'expected'} or
+                        any(not isinstance(case[k], str) or '\0' in case[k] or len(case[k].encode()) > 32768 for k in ('input', 'expected'))):
+                    raise ValueError('Invalid isolated test case')
+                cases.append(case)
+            selected.append(item | {'executed_sha256': hashlib.sha256(raw).hexdigest(), 'adapted': path in adapted})
+        if not cases or len(cases) > 1000:
+            raise ValueError('Isolated grading requires between 1 and 1000 cases')
         write_json(staged / 'selected-checks.json', selected)
         limits = Limits(**config.get('limits', {}))
         spec = SandboxSpec(image, ('/bin/sh', '-c', 'while :; do sleep 1; done'), limits,
             workspace=workspace, network=config.get('network', 'bridge'),
-            workdir=config.get('workdir', '/workspace'), readonly_paths=tuple(a['path'] for a in artifacts))
+            workdir=config.get('workdir', '/workspace'))
         with runner.container(spec) as container:
             container.start()
             report.update(image_id=container.image_id, container_id=container.id)
@@ -153,26 +162,29 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
                 report['download_cache'] = cache_stats
             deadline = time.monotonic() + limits.timeout_seconds
             for step in config['commands']:
-                budget = min(step.get('timeout_seconds', limits.timeout_seconds), deadline - time.monotonic())
-                if budget <= 0:
-                    raise TimeoutError('Evaluation deadline exhausted')
-                result = container.exec(step['argv'], timeout=budget, workdir=spec.workdir)
-                code = result['exit_code']
-                status = ('error' if result['timed_out'] or result['oom_killed'] else
-                          'passed' if code == 0 else
-                          'failed' if step['kind'] == 'tests' and code in step.get('failure_exit_codes', [1]) else
-                          'inconclusive' if step['kind'] == 'tests' and code in step.get('inconclusive_exit_codes', [2]) else 'error')
-                reason = ('timeout' if result['timed_out'] else 'oom' if result['oom_killed'] else
-                          'exit_code')
-                event('evaluation.command.classified', container_id=container.id, command_index=len(report['commands']),
-                      kind=step['kind'], status=status, reason=reason, exit_code=code,
-                      timeout_seconds=budget, timed_out=result['timed_out'], oom_killed=result['oom_killed'],
-                      resources=result.get('resources', {}), pressure_stall_us=result.get('pressure_stall_us'), limits=vars(limits),
-                      started_at_monotonic=result.get('started_at_monotonic'),
-                      ended_at_monotonic=result.get('ended_at_monotonic'))
-                report['commands'].append({'name': step['name'], 'kind': step['kind'], 'status': status, **result})
-                if status == 'error' or not container.inspect()['Running']:
-                    raise ValueError('Verification execution failed')
+                for case in cases if step['kind'] == 'tests' else [None]:
+                    budget = min(step.get('timeout_seconds', limits.timeout_seconds), deadline - time.monotonic())
+                    if budget <= 0:
+                        raise TimeoutError('Evaluation deadline exhausted')
+                    result = container.exec(step['argv'] + ([case['input']] if case is not None else []), timeout=budget, workdir=spec.workdir)
+                    code = result['exit_code']
+                    status = ('error' if result['timed_out'] or result['oom_killed'] else
+                              'passed' if code == 0 else
+                              'failed' if step['kind'] == 'tests' and code in step.get('failure_exit_codes', [1]) else
+                              'inconclusive' if step['kind'] == 'tests' and code in step.get('inconclusive_exit_codes', [2]) else 'error')
+                    if case is not None and status == 'passed':
+                        status = 'error' if result['logs_truncated'] else 'passed' if result['stdout'] == case['expected'] else 'failed'
+                    reason = ('timeout' if result['timed_out'] else 'oom' if result['oom_killed'] else
+                              'exit_code')
+                    event('evaluation.command.classified', container_id=container.id, command_index=len(report['commands']),
+                          kind=step['kind'], status=status, reason=reason, exit_code=code,
+                          timeout_seconds=budget, timed_out=result['timed_out'], oom_killed=result['oom_killed'],
+                          resources=result.get('resources', {}), pressure_stall_us=result.get('pressure_stall_us'), limits=vars(limits),
+                          started_at_monotonic=result.get('started_at_monotonic'),
+                          ended_at_monotonic=result.get('ended_at_monotonic'))
+                    report['commands'].append({'name': step['name'], 'kind': step['kind'], 'status': status, **result})
+                    if status == 'error' or not container.inspect()['Running']:
+                        raise ValueError('Verification execution failed')
         failed = any(c['status'] == 'failed' for c in report['commands'])
         uncertain = any(c['status'] == 'inconclusive' for c in report['commands'])
         report.update(verdict='inconclusive' if uncertain else 'fail' if failed else 'pass',
@@ -190,52 +202,8 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
 def assess_checks(candidate, verification, artifacts, config, image, runner, baseline,
                   temp, task_summary, *, command=None, adapter=None, auth_file=None,
                   evaluator_timeout=180, proposed_path=None, provenance_path=None):
-    """Run the shared isolated evaluator; validate citations before any rerun."""
-    from .agents import CodexAdapter, provision_auth
-    if adapter and (command or not isinstance(adapter, CodexAdapter)):
-        raise ValueError('Use explicit evaluator argv or the dedicated Codex adapter')
-    if auth_file and not isinstance(adapter, CodexAdapter):
-        raise ValueError('Only Codex may receive authentication')
-    copy_tree(candidate, temp / 'agent')
-    control = temp / 'control'; control.mkdir()
-    inputs = temp / 'inputs'; inputs.mkdir()
-    copy_tree(verification, inputs / 'verification')
-    write_json(inputs / 'task.json', {'task_summary': task_summary})
-    write_json(inputs / 'config.json', config)
-    write_json(inputs / 'baseline-results.json', baseline)
-    (inputs / 'prompt.txt').write_text(PROMPT)
-    if adapter:
-        command = adapter.stage(inputs, required_files=('assessment.json',))
-    if auth_file:
-        provision_auth(auth_file, inputs / 'auth.json')
-    agent_limits = config.get('limits', {}) | {'timeout_seconds': evaluator_timeout}
-    spec = SandboxSpec(image, tuple(command), Limits(**agent_limits),
-        workspace=temp / 'agent', control=control, inputs=inputs, network='bridge', retain_logs=False)
-    evaluator = {'session_id': uuid4().hex, 'harness': adapter.name if adapter else 'explicit-command',
-                 'model': adapter.model if adapter else 'unspecified',
-                 'instructions_sha256': digest(inputs / 'prompt.txt')}
-    if adapter and getattr(adapter, 'effort', None):
-        evaluator['effort'] = adapter.effort
-    if provenance_path is not None:
-        write_json(provenance_path, evaluator)
-    with runner.container(spec) as container:
-        evaluator['image_id'] = container.image_id
-        if provenance_path is not None:
-            write_json(provenance_path, evaluator)
-        container.start()
-        timed_out = container.wait(spec.limits.timeout_seconds)
-        state = container.inspect()
-        if timed_out or state.get('OOMKilled') or state['Running'] or state['ExitCode']:
-            from .sandbox import log_agent_failure
-            log_agent_failure('evaluator.failed', container, state, timed_out)
-            if timed_out:
-                raise TimeoutError('Evaluator timed out')
-            raise ValueError('Evaluator did not complete')
-    proposal = read_json(control / 'assessment.json')
-    if proposed_path is not None:
-        write_json(proposed_path, proposal)
-    assessment = validate_assessment(proposal, artifacts, candidate)
-    return assessment, evaluator
+    """Reject the legacy evaluator, which shared candidate code and private files."""
+    raise ValueError('Evaluator assessment is unsupported for isolated grading: it combines candidate code and private files')
 
 
 def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox=None,
@@ -317,7 +285,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                     verification, artifacts, [], config, image, runner)
                 report.update(baseline)
                 assessment = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None}
-                if (command or adapter) and baseline['verdict'] in ('fail', 'inconclusive'):
+                if (command or adapter) and baseline['verdict'] in ('fail', 'inconclusive') and config.get('grading_type') != 'isolated-argv-v1':
                     assessment, report['evaluator'] = assess_checks(
                         temp / 'candidate', verification, artifacts, config, image, runner, baseline,
                         temp, run['task_instructions'], command=command, adapter=adapter,
@@ -353,8 +321,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
             # No raw infrastructure exceptions/session output in durable records.
             report.update(verdict='error', explanation='Verification or evaluation infrastructure failed.',
                           error_kind=type(exc).__name__)
-        report['limitations'].append('Read-only checks prevent file replacement, not adversarial runtime manipulation. '
-            'Command selection and behavioral equivalence of adaptations require inspection; provenance is validated, semantics are not mechanically proved.')
+        report['limitations'].append('Command selection and behavioral equivalence of adaptations require inspection; provenance is validated, semantics are not mechanically proved. False-positive grading is tracked separately.')
         write_json(staged / 'report.json', report)
         target = task / 'evaluation-evidence' / evaluation_id
         seal(staged, target)

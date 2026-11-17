@@ -12,8 +12,10 @@ from .sandbox import DockerSandbox, Limits, SandboxError, SandboxSpec
 
 def load_config(path, *, evaluation=False):
     config = read_json(path)
-    if set(config) - {'image', 'network', 'workdir', 'limits', 'commands'}:
+    if set(config) - {'image', 'network', 'workdir', 'limits', 'commands', 'grading_type'}:
         raise ValueError('Unknown verification configuration fields')
+    if 'grading_type' in config and (not evaluation or config['grading_type'] != 'isolated-argv-v1'):
+        raise ValueError('Unsupported grading type')
     limits = Limits(**config.get('limits', {}))
     SandboxSpec(config['image'], ('/bin/sh',), limits, network=config.get('network', 'bridge'), workdir=config.get('workdir', '/workspace'))
     commands = config.get('commands')
@@ -47,6 +49,8 @@ def load_config(path, *, evaluation=False):
         timeout = step.get('timeout_seconds', limits.timeout_seconds)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= limits.timeout_seconds:
             raise ValueError('Step timeout must be positive and within the sandbox deadline')
+    if config.get('grading_type') == 'isolated-argv-v1' and sum(c['kind'] == 'tests' for c in commands) != 1:
+        raise ValueError('isolated-argv-v1 requires exactly one tests command')
     return config
 
 

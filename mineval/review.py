@@ -410,7 +410,7 @@ def validate(store, task_id, extraction_id, config_path, *, future_commit=None, 
         report = dict(baseline)
         adapted = None
         if baseline['verdict'] in ('fail', 'inconclusive'):
-            if command or adapter:
+            if (command or adapter) and config.get('grading_type') != 'isolated-argv-v1':
                 try:
                     metadata = read_json(task / 'metadata.json')
                     assessment, evaluator = assess_checks(
