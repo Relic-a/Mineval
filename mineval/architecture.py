@@ -72,7 +72,9 @@ def record(store, task, run_id, **options):
                     raise ValueError('Architecture observations require existing source evidence')
             staged = root / 'record'; staged.mkdir()
             value = {'run_id': run_id, 'prepared_revision': run['prepared_revision'], 'created_at': now(), 'observations': observations}
-            write_json(staged / 'record.json', value); seal(staged, target)
+            write_json(staged / 'record.json', value)
+            with lock(store.root / 'locks' / (task + '.lock'), wait=True):
+                seal(staged, target)
             return value
 
 
@@ -115,5 +117,6 @@ def compare(store, task, version, **options):
             staged = root / 'comparison'; staged.mkdir()
             value = {'comparison_id': uuid4().hex, 'created_at': now(), 'version': version, 'candidates': mapping, **result}
             write_json(staged / 'comparison.json', value)
-            seal(staged, store.task(task) / 'architecture/comparisons' / value['comparison_id'])
+            with lock(store.root / 'locks' / (task + '.lock'), wait=True):
+                seal(staged, store.task(task) / 'architecture/comparisons' / value['comparison_id'])
             return value

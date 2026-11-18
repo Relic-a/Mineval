@@ -45,6 +45,13 @@ are recreated on the next download. Retrying a failed job is explicit. The worke
 holds private task data and job evidence until manually removed; retain it while
 reconciliation may still be necessary.
 
+When the VPS seals a functional grade, Mineval imports it into Activity while
+the optional qualitative reviewer can still be running. The final import brings
+back qualitative observations and resource usage. With `architecture_review`
+enabled, the local worker reviews the imported attempt against available
+architecture records for the same revision. This review runs separately from
+grade delivery. Early grades require the current package on both hosts.
+
 ## Target host prerequisites
 
 The target was inspected with Debian 13, Docker CE 29.5.2, cgroup v2, user systemd,

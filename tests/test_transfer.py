@@ -372,7 +372,7 @@ class DispatchTests(HistoryFixture):
         self.assertEqual(info['token'], 'export1')
         self.assertEqual(partial.read_bytes(), content)
 
-    def test_remote_dispatch_executes_and_imports_fake_attempt(self):
+    def test_remote_dispatch_imports_grade_before_review_finishes(self):
         from unittest.mock import patch
         from mineval import remote_api, remote_coordinator, remote_dispatch
         from mineval.workflows import Workflows
@@ -385,13 +385,14 @@ class DispatchTests(HistoryFixture):
         revision = self.store.inspect_revision('example', version)
         payload = {'run_id': 'dispatch-run', 'evaluation_id': 'dispatch-eval',
                    'revision': revision, 'selection': {'task_id': 'example', 'version': version},
-                   'configuration': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'},
+                   'configuration': {'model': 'test-model', 'effort': 'medium', 'adapter': 'codex'},
                    'model_settings': {'preparation': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'},
                                       'evaluation': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'}},
                    'execution_host': 'vps', 'evaluation_config': {}}
         from mineval.memory import Memory
-        Memory(self.store).append('fake', ['Prior observation'], [{'task_id': 'example'}], 'prior')
+        Memory(self.store).append('test-model', ['Prior observation'], [{'task_id': 'example'}], 'prior')
         flow = Workflows(self.store, {'vps': {'host': 'test@example.test'}, 'qualitative_review': False,
+                                      'architecture_review': True, 'review_image': 'local:test',
                                       'resources': {'admission_interval_seconds': 0.01}})
         with flow.db() as db:
             db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)', ('job1', 'benchmark', 'example', json.dumps(payload),
@@ -403,6 +404,11 @@ class DispatchTests(HistoryFixture):
         remote.mkdir()
         (remote / 'settings.json').write_text(json.dumps({'resources': {'admission_interval_seconds': 0.01}}))
         threads = []
+        grade_imported = threading.Event()
+        architecture_started = threading.Event()
+        terminal_imported = threading.Event()
+        grade_tokens = set()
+        case = self
         class Client:
             submissions = 0
             def __init__(self, host): pass
@@ -413,18 +419,45 @@ class DispatchTests(HistoryFixture):
                         Client.submissions += 1
                         from mineval.remote import RemoteError
                         raise RemoteError('connection lost after submission')
+                    if request['action'] == 'fetch-grade-start':
+                        grade_tokens.add(result['token'])
+                    if request['action'] == 'fetch-delete':
+                        if request['token'] in grade_tokens:
+                            imported = flow.store.inspect_evaluation('example', 'dispatch-eval')
+                            case.assertEqual((imported['run_id'], imported['verdict']), ('dispatch-run', 'pass'))
+                            local_job = next(j for j in flow.jobs() if j['id'] == 'job1')
+                            case.assertEqual(local_job['state'], 'running')
+                            case.assertFalse(any(item['body'] == ['Evidence-backed review']
+                                                 for item in Memory(flow.store).history('test-model')))
+                            grade_imported.set()
+                        else:
+                            terminal_imported.set()
                     return result
                 except FileNotFoundError:
                     from mineval.remote import RemoteError
                     raise RemoteError('missing', 'FileNotFoundError')
         def start(root):
+            if threads:
+                return
             thread = threading.Thread(target=lambda: remote_coordinator.Coordinator(root).work())
             threads.append(thread)
             thread.start()
+        from contextlib import contextmanager
+        class Candidate(SimulatedDocker):
+            @contextmanager
+            def container(self, spec):
+                with super().container(spec) as container:
+                    start = container.start.side_effect
+                    def solve():
+                        start()
+                        (spec.workspace / 'app.py').write_text('def answer(): return 42\n')
+                    container.start.side_effect = solve
+                    yield container
         def run_stage(workflow, jid, task, p, *, phase=None):
             if phase == 'benchmark':
                 benchmark.run(workflow.store, task, version, run_id=p['run_id'],
-                              adapter=FakeAdapter(effort='medium'), sandbox=SimulatedDocker())
+                              adapter=FakeAdapter(model='test-model', name='codex', effort='medium'),
+                              sandbox=Candidate())
             elif phase == 'evaluation':
                 from mineval import evaluation
                 from test_evaluation import EvaluationRunner
@@ -432,13 +465,24 @@ class DispatchTests(HistoryFixture):
                 config.write_text(json.dumps(self.fixture_evaluation_config))
                 evaluation.evaluate(workflow.store, task, p['run_id'], config,
                                     evaluation_id=p['evaluation_id'], sandbox=EvaluationRunner())
-            elif phase == 'review':
+            elif phase == 'review' and p['execution_host'] == 'vps':
                 from mineval.memory import Memory, evaluation_source
-                self.assertTrue(any(item['body'] == ['Prior observation'] for item in Memory(workflow.store).history('fake')))
+                self.assertTrue(any(item['body'] == ['Prior observation'] for item in Memory(workflow.store).history('test-model')))
+                self.assertTrue(grade_imported.wait(20))
+                self.assertTrue(architecture_started.wait(20))
                 model, source, _ = evaluation_source(workflow.store, task, p['evaluation_id'])
                 Memory(workflow.store).append(model, ['Evidence-backed review'], [source],
                                               'qualitative:' + task + ':' + p['evaluation_id'])
-        with patch('mineval.remote_dispatch.SSHClient', Client), patch('mineval.remote_coordinator.start', start), \
+        def record_architecture(store, task, run_id, **options):
+            self.assertEqual((store, task, run_id), (self.store, 'example', 'dispatch-run'))
+            self.assertEqual(store.inspect_evaluation(task, 'dispatch-eval')['run_id'], run_id)
+            architecture_started.set()
+            self.assertTrue(terminal_imported.wait(20))
+        with patch('mineval.remote_dispatch.SSHClient', Client), \
+                patch('mineval.architecture.record', side_effect=record_architecture) as record, \
+                patch('mineval.architecture.compare') as compare, \
+                patch('mineval.remote_api.start_export_reaper'), \
+                patch('mineval.remote_coordinator.ensure_running', start), \
                 patch('mineval.workflows.Workflows.benchmark', run_stage), patch('mineval.resources.admits', return_value=True):
             flow.work()
             for thread in threads:
@@ -446,17 +490,27 @@ class DispatchTests(HistoryFixture):
         self.assertEqual(Client.submissions, 1)
         self.assertTrue(list((self.store.root / 'remote-outbox/job1/receipts').glob('*.json')))
         descriptors = list((self.store.root / 'remote-outbox/job1/export-descriptors').glob('*.json'))
-        self.assertEqual(len(descriptors), 1)
-        descriptor = json.loads(descriptors[0].read_text())
-        self.assertIn('full_inventory', descriptor['delta'])
-        self.assertIn('archive_sha256', descriptor['receipt'])
-        self.assertEqual(descriptors[0].stat().st_mode & 0o222, 0)
+        self.assertEqual(len(descriptors), 2)
+        for path in descriptors:
+            descriptor = json.loads(path.read_text())
+            self.assertIn('full_inventory', descriptor['delta'])
+            self.assertIn('archive_sha256', descriptor['receipt'])
+            self.assertEqual(path.stat().st_mode & 0o222, 0)
+            files = descriptor['delta']['full_inventory']
+            if descriptor['state']['state'] == 'graded':
+                self.assertTrue(all(name.startswith('tasks/example/') for name in files))
+            else:
+                self.assertIn('observations.json', files)
+        record.assert_called_once()
+        compare.assert_called_once()
+        worker_settings = remote / 'jobs/job1/input/settings.json'
+        self.assertNotIn('architecture_review', json.loads(worker_settings.read_text()))
         self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
         self.assertEqual(self.store.inspect_run('example', 'local-run')['status'], 'completed')
         self.assertEqual(self.store.inspect_run('example', 'dispatch-run')['status'], 'completed')
         self.assertEqual(self.store.inspect_evaluation('example', 'dispatch-eval')['run_id'], 'dispatch-run')
         from mineval.memory import Memory
-        self.assertTrue(any(item['body'] == ['Evidence-backed review'] for item in Memory(self.store).history('fake'))) 
+        self.assertTrue(any(item['body'] == ['Evidence-backed review'] for item in Memory(self.store).history('test-model')))
         self.assertTrue(list((self.store.root / 'resource-usage').glob('job1-*.json')))
 
 

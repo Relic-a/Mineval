@@ -15,6 +15,23 @@ from .agents import provision_auth
 from .artifacts import read_json, write_json, lock, digest
 from .preparation import identifier
 from . import remote_worker, remote_coordinator, transfer
+from .remote_protocol import grade_snapshot
+
+
+def _copy_grade(data, selected, task, payload):
+    """Stage only sealed artifacts for the current run and evaluation."""
+    source, target = data / 'tasks' / task, selected / 'tasks' / task
+    version = identifier(payload['revision']['version'])
+    run_id = identifier(payload['run_id'])
+    evaluation_id = identifier(payload['evaluation_id'])
+    for name in ('metadata.json', 'status.json', f'runs/{run_id}.json', f'runs/{run_id}.sha256',
+                 f'evaluations/{evaluation_id}.json', f'evaluations/{evaluation_id}.sha256'):
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / name, path, follow_symlinks=False)
+    for name in (f'versions/{version}', f'evaluation-evidence/{evaluation_id}', f'run-outputs/{run_id}'):
+        if (source / name).exists():
+            shutil.copytree(source / name, target / name, symlinks=True)
 
 
 def dispatch(root, request):
@@ -56,7 +73,10 @@ def dispatch(root, request):
             job['state'] = 'running'
         if job['state'] in ('queued', 'running'):
             remote_coordinator.ensure_running(root)
-        return {key: job[key] for key in ('id', 'state', 'stage', 'detail', 'payload', 'updated')}
+        state = {key: job[key] for key in ('id', 'state', 'stage', 'detail', 'payload', 'updated')}
+        if job['kind'] == 'benchmark' and grade_snapshot(state) is not None:
+            state['grade_ready'] = True
+        return state
     if action == 'retry':
         coordinator = remote_coordinator.Coordinator(root)
         job = next((j for j in coordinator.jobs() if j['id'] == job_id), None)
@@ -130,9 +150,15 @@ def dispatch(root, request):
             stream.seek(offset)
             chunk = stream.read(size)
         return {'offset': offset, 'total': total, 'data': base64.b64encode(chunk).decode()}
-    if action in ('fetch', 'fetch-start'):
+    if action in ('fetch', 'fetch-start', 'fetch-grade-start'):
         state = dispatch(root, {'action': 'status', 'job_id': job_id})
-        if state['state'] not in ('completed', 'failed', 'interrupted'):
+        grade_only = action == 'fetch-grade-start'
+        if grade_only:
+            snapshot = grade_snapshot(state) if state.get('grade_ready') else None
+            if snapshot is None:
+                return {'state': state}  # The attempt changed before snapshot creation.
+            state = snapshot
+        elif state['state'] not in ('completed', 'failed', 'interrupted'):
             raise ValueError('Job has not reached a terminal state')
         with tempfile.TemporaryDirectory(dir=root) as temp:
             archive, receipt = Path(temp) / 'output.tar.gz', Path(temp) / 'receipt.json'
@@ -142,19 +168,22 @@ def dispatch(root, request):
             data = directory / 'input/data'
             selected = Path(temp) / 'selected'
             selected.mkdir(mode=0o700)
-            for namespace in ('tasks', 'drafts'):
-                source = data / namespace / task
-                if source.exists():
-                    (selected / namespace).mkdir()
-                    shutil.copytree(source, selected / namespace / task, symlinks=True)
+            if grade_only:
+                _copy_grade(data, selected, task, job['payload'])
+            else:
+                for namespace in ('tasks', 'drafts'):
+                    source = data / namespace / task
+                    if source.exists():
+                        (selected / namespace).mkdir()
+                        shutil.copytree(source, selected / namespace / task, symlinks=True)
             usage = data / 'resource-usage'
-            if usage.exists():
+            if not grade_only and usage.exists():
                 for path in usage.glob(job_id + '-*.json'):
                     if read_json(path).get('job_id') != job_id:
                         raise ValueError('Resource telemetry identity mismatch')
                     (selected / 'resource-usage').mkdir(exist_ok=True)
                     shutil.copy2(path, selected / 'resource-usage' / path.name, follow_symlinks=False)
-            if job['kind'] == 'benchmark' and (data / 'model-reviews.sqlite3').exists():
+            if not grade_only and job['kind'] == 'benchmark' and (data / 'model-reviews.sqlite3').exists():
                 from .memory import Memory
                 from .preparation import Store
                 model = job['payload']['configuration']['model']
@@ -163,11 +192,11 @@ def dispatch(root, request):
                                 if item['event_key'] == key]
                 write_json(selected / 'observations.json', observations)
             delta = None
-            if action == 'fetch-start' and 'known_inventory' in request:
+            if action != 'fetch' and 'known_inventory' in request:
                 delta = transfer.create_delta(selected, archive, receipt, request['known_inventory'], task)
             else:
                 transfer.create(selected, archive, receipt)
-            if action == 'fetch-start':
+            if action != 'fetch':
                 token = uuid4().hex
                 exports = directory / 'exports'
                 exports.mkdir(exist_ok=True, mode=0o700)
