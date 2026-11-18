@@ -1,4 +1,5 @@
 """Admission accounting and bounded concurrency; no Docker or model calls."""
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -8,7 +9,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 from mineval import resources
-from mineval.artifacts import read_json
+from mineval.artifacts import write_json
+from mineval.preparation import Store
+from mineval.remote_coordinator import Coordinator
 from mineval.workflows import Workflows
 from mineval.sandbox import Container, DockerSandbox, SandboxError
 
@@ -163,11 +166,76 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(len(usage.snapshot()), 1)
 
     def test_limits_are_not_reservations_and_prepare_includes_broker(self):
-        flow = Workflows.__new__(Workflows)
-        flow.settings = {'resources': {'memory_mb_per_job': 1200, 'cpus_per_job': 1}}
-        job = {'payload': {'evaluation_config': {'limits': {'memory_mb': 8192, 'tmp_mb': 8192}}}}
-        self.assertEqual(flow.resource_request(job, 'evaluation'), (1, 1200))
-        self.assertEqual(flow.resource_request(job, 'prepare'), (1, 2400))
+        with tempfile.TemporaryDirectory() as tmp:
+            flow = Workflows(Store(tmp), {'resources': {'memory_mb_per_job': 1200, 'cpus_per_job': 1}})
+            job = {'task': 'fixture', 'payload': {'evaluation_config': {'limits': {'memory_mb': 8192, 'tmp_mb': 8192}}}}
+            self.assertEqual(flow.resource_request(job, 'evaluation'), (1, 1200))
+            self.assertEqual(flow.resource_request(job, 'prepare'), (1, 2400))
+
+
+class ServiceReservationTests(unittest.TestCase):
+    def setUp(self):
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(tmp)
+        self.config = {'limits': {'cpus': 3, 'memory_mb': 4096}, 'services': [
+            {'name': 'postgres', 'limits': {'cpus': .5, 'memory_mb': 512}},
+            {'name': 'redis'},  # Runtime default quotas also apply to services.
+        ]}
+        self.job = {'id': 'job1', 'kind': 'benchmark', 'task': 'fixture', 'payload': {
+            'selection': {'version': 'v1'}, 'evaluation_config': self.config}}
+
+    def scheduler(self, remote):
+        if remote:
+            write_json(self.root / 'settings.json', {'resources': {'reservation_percent': 50}})
+            return Coordinator(self.root), Store(self.root / 'jobs/job1/input/data')
+        store = Store(self.root / 'local')
+        return Workflows(store), store
+
+    def install_configs(self, store):
+        draft = store.draft('fixture') / 'control/verify.json'
+        frozen = store.task('fixture') / 'versions/v1/verify-config.json'
+        for path in (draft, frozen):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(draft, self.config | {'services': self.config['services'][:1]})
+        write_json(frozen, self.config)
+
+    def test_stage_reservations_include_explicit_and_default_service_limits(self):
+        for remote, benchmark, evaluation, prepare, review in (
+                (False, (4.5, 4608), (4, 4096), (3, 5120), (2, 2048)),
+                (True, (2.75, 3328), (2.5, 3072), (3.5, 4608), (1, 1024))):
+            with self.subTest(remote=remote):
+                flow, store = self.scheduler(remote)
+                self.install_configs(store)
+                evaluation_config = self.config | {'services': self.config['services'][1:]}
+                job = self.job | {'payload': self.job['payload'] | {'evaluation_config': evaluation_config}}
+                self.assertEqual(flow.resource_request(job, 'benchmark'), benchmark)
+                self.assertEqual(flow.resource_request(job, 'evaluation'), evaluation)
+                self.assertEqual(flow.resource_request(self.job, 'prepare'), prepare)
+                self.assertEqual(flow.resource_request(self.job, 'review'), review)
+
+    def test_local_and_vps_admission_wait_for_service_cpu_and_memory(self):
+        for remote, cpu, memory in ((False, 4.5, 4608), (True, 2.75, 3328)):
+            with self.subTest(remote=remote):
+                flow, store = self.scheduler(remote)
+                self.install_configs(store)
+                job = self.job
+                with flow.db() as db:
+                    db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)',
+                               (job['id'], job['kind'], job['task'], json.dumps(job['payload']),
+                                'queued', 'queued', '', 0, 0, job['id']))
+                def complete(job, phase, usage):
+                    flow.update(job['id'], state='completed')
+                with patch.object(flow, '_measured_stage', side_effect=complete) as stage, \
+                     patch.object(resources, 'capacity') as capacity:
+                    for too_small in ((cpu - .25, memory + 512), (cpu, memory + 511)):
+                        capacity.return_value = too_small
+                        flow._local_work()
+                        self.assertEqual(flow.jobs()[0]['state'], 'queued')
+                        stage.assert_not_called()
+                    capacity.return_value = (cpu, memory + 512)
+                    flow._local_work()
+                    stage.assert_called_once()
+                    self.assertEqual(flow.jobs()[0]['state'], 'completed')
 
 
 class ProgressiveWorkTests(unittest.TestCase):

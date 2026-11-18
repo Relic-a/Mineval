@@ -401,12 +401,13 @@ class Workflows:
                 # Keep requests: future appends and expired reservations need no re-enqueue.
 
     def resource_request(self, job, phase):
-        from .resources import options
+        from .resources import options, service_budget, stage_config
         values = options(self.settings)
-        # Estimates are independent of Docker ceilings, including tmpfs (which is
-        # charged inside the container's memory limit).
+        # Keep the configured estimates for the primary sandboxes. The separate
+        # service containers have their own quotas and memory limits.
         count = 2 if phase == 'prepare' else 1  # Agent plus broker verification.
-        return values['cpus_per_job'], count * values['memory_mb_per_job']
+        service_cpu, service_memory = service_budget(stage_config(self.store.root, job, phase), count)
+        return values['cpus_per_job'] + service_cpu, count * values['memory_mb_per_job'] + service_memory
 
     def concurrency(self):
         values = {'prepare': 1, 'benchmark': 2, 'evaluation': 1, 'review': 1,
@@ -468,7 +469,14 @@ class Workflows:
                                         (not getattr(self, 'remote_coordinator', False) and job['payload'].get('execution_host') == 'vps')):
                                     continue
                                 phase = 'prepare' if job['kind'] == 'prepare' else job['payload'].get('phase', 'benchmark')
-                                cpu, memory = self.resource_request(job, phase)
+                                try:
+                                    cpu, memory = self.resource_request(job, phase)
+                                except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                                    with self.db() as db:
+                                        db.execute("UPDATE jobs SET state='failed',detail=?,updated=? WHERE id=? AND state='queued'",
+                                                   ('Invalid resource configuration. Inspect the task configuration, then retry.',
+                                                    time.time(), job['id']))
+                                    continue
                                 # Soft estimates control parallelism, never all preparation
                                 # progress. Runtime checks and hard limits still apply.
                                 first_preparation = phase == 'prepare' and not active

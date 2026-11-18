@@ -21,25 +21,16 @@ class Coordinator(Workflows):
                          auth_file=self.worker_root / 'auth.json')
 
     def resource_request(self, job, phase):
-        from .resources import options
+        from .resources import options, service_budget, stage_config
         from .sandbox import Limits
         values = options(self.settings)
-        task, payload = job['task'], job['payload']
-        store = Store(self.worker_root / 'jobs' / identifier(job['id']) / 'input' / 'data')
-        config = {}
-        if phase == 'prepare':
-            path = store.draft(task) / 'control/verify.json'
-            if path.exists():
-                config = read_json(path)
-        elif phase == 'benchmark':
-            path = store.task(task) / 'versions' / payload['selection']['version'] / 'verify-config.json'
-            config = read_json(path)
-        elif phase == 'evaluation':
-            config = payload.get('evaluation_config', {})
+        root = self.worker_root / 'jobs' / identifier(job['id']) / 'input' / 'data'
+        config = stage_config(root, job, phase)
         limits = Limits(**config.get('limits', {}))
         count = 2 if phase == 'prepare' else 1
+        service_cpu, service_memory = service_budget(config, count)
         fraction = values['reservation_percent'] / 100
-        return count * limits.cpus * fraction, count * limits.memory_mb * fraction
+        return (count * limits.cpus + service_cpu) * fraction, (count * limits.memory_mb + service_memory) * fraction
 
     def _measured_stage(self, job, phase, usage):
         # Each execution has its own staged task data, but all stage transitions

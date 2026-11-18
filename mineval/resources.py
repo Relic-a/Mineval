@@ -85,6 +85,35 @@ def slots(settings):
                       int((memory - values['reserve_memory_mb']) / values['memory_mb_per_job'])))
 
 
+def stage_config(root, job, phase):
+    """Read the configuration used by this stage in its execution store."""
+    from .artifacts import read_json
+    from .preparation import identifier
+
+    if phase == 'evaluation':
+        return job['payload'].get('evaluation_config', {})
+    if phase == 'prepare':
+        path = root / 'drafts' / identifier(job['task']) / 'control/verify.json'
+    elif phase == 'benchmark' and job['payload'].get('selection'):
+        version = identifier(job['payload']['selection']['version'])
+        path = root / 'tasks' / identifier(job['task']) / 'versions' / version / 'verify-config.json'
+    else:
+        return {}
+    try:
+        return read_json(path)
+    except FileNotFoundError:
+        # Missing task data is handled by the stage itself.
+        return {}
+
+
+def service_budget(config, count):
+    """Each overlapping project sandbox starts its own service group."""
+    from .sandbox import Limits
+
+    limits = [Limits(**service.get('limits', {})) for service in config.get('services', ())]
+    return count * sum(limit.cpus for limit in limits), count * sum(limit.memory_mb for limit in limits)
+
+
 def pressure_sources(container_group=None):
     """Bounded PSI samples; labels identify scope without exposing cgroup paths."""
     result = {}
