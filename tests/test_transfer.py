@@ -122,6 +122,45 @@ import shutil
 
 
 class BenchmarkImportTests(HistoryFixture):
+    def test_imports_sealed_architecture_evidence_from_existing_remote_attempt(self):
+        from unittest.mock import patch
+        from mineval import architecture
+        from mineval.artifacts import inventory, write_json
+
+        task = 'example'
+        version = self.freeze(task, self.review)['version']
+        revision = self.store.inspect_revision(task, version)
+        options = {'image': 'local:test', 'model': 'reviewer', 'effort': 'low'}
+        observations = {'observations': [{'description': 'Answer function', 'evidence': ['app.py']}]}
+        with patch('mineval.architecture._infer', return_value=observations):
+            benchmark.run(self.store, task, version, run_id='peer', adapter=FakeAdapter(model='peer'),
+                          sandbox=SimulatedDocker())
+            architecture.record(self.store, task, 'peer', **options)
+            remote_root = self.root / 'remote'
+            shutil.copytree(self.store.root, remote_root)
+            remote = Store(remote_root)
+            benchmark.run(remote, task, version, run_id='remote-run', adapter=FakeAdapter(effort='medium'),
+                          sandbox=SimulatedDocker())
+            record = architecture.record(remote, task, 'remote-run', **options)
+        ranking = {'ranking': [{'candidates': ['C1', 'C2'], 'explanation': 'Same interface',
+                                'evidence': [{'candidate': 'C1', 'path': 'app.py'}]}], 'uncertainty': ''}
+        with patch('mineval.architecture._infer', return_value=ranking):
+            comparison = architecture.compare(remote, task, version, **options)
+        job = {'task': task, 'payload': {'run_id': 'remote-run', 'evaluation_id': 'eval1',
+               'revision': revision, 'configuration': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'}}}
+        paths = ('architecture/records/remote-run', 'architecture/comparisons/' + comparison['comparison_id'])
+        source_record = remote.task(task) / paths[0] / 'record.json'
+        source_record.chmod(0o600)
+        source_record.write_text(json.dumps(record | {'run_id': 'wrong-run'}))
+        with self.assertRaisesRegex(ValueError, 'artifact hash mismatch'):
+            transfer.import_benchmark(self.store, remote.root, job)
+        self.assertFalse((self.store.task(task) / 'runs/remote-run.json').exists())
+        write_json(source_record, record)
+        for _ in range(2):
+            transfer.import_benchmark(self.store, remote.root, job)
+            for path in paths:
+                self.assertEqual(inventory(self.store.task(task) / path), inventory(remote.task(task) / path))
+
     def test_remote_attempt_import_is_idempotent_and_rejects_conflict(self):
         version = self.freeze('example', self.review)['version']
         revision = self.store.inspect_revision('example', version)

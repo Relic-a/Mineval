@@ -134,6 +134,31 @@ def reconstruct_delta(destination, descriptor, receipt, store, task, job_id):
     return full
 
 
+def _architecture_items(task_path, run):
+    from .preparation import identifier
+    from .review import checked
+
+    run_id = run['run_id']
+    revision = run['prepared_revision']
+    records = 'architecture/records'
+    comparisons = 'architecture/comparisons'
+    record_path = task_path / records / run_id
+    if record_path.exists() or record_path.is_symlink():
+        checked(record_path)
+        record = read_json(record_path / 'record.json')
+        if (record['run_id'] != run_id or record['prepared_revision'] != revision
+                or not run.get('output_available')):
+            raise ValueError('Remote architecture record identity mismatch')
+        yield records, run_id
+    for directory in sorted((task_path / comparisons).glob('*')):
+        checked(directory)
+        comparison = read_json(directory / 'comparison.json')
+        if comparison['version'] == revision['version'] and run_id in comparison['candidates'].values():
+            if comparison['comparison_id'] != identifier(directory.name):
+                raise ValueError('Remote architecture comparison identity mismatch')
+            yield comparisons, directory.name
+
+
 def import_benchmark(store, incoming, job):
     """Validate and import a remote attempt without replacing local evidence.
 
@@ -163,6 +188,7 @@ def import_benchmark(store, incoming, job):
         if evaluation_path.exists():
             items += [('evaluation-evidence', evaluation_id), ('evaluations', evaluation_id + '.json'),
                       ('evaluations', evaluation_id + '.sha256')]
+        items.extend(_architecture_items(source.task(task), run))
         pairs = [(source.task(task) / namespace / name, store.task(task) / namespace / name)
                  for namespace, name in items]
         pairs = [(src, dst) for src, dst in pairs if src.exists()]
@@ -172,7 +198,7 @@ def import_benchmark(store, incoming, job):
             with tempfile.TemporaryDirectory(dir=store.root) as temp:
                 staged = []
                 for index, (src, dst) in enumerate(pairs):
-                    if src.is_symlink():
+                    if src.is_symlink() or dst.is_symlink():
                         raise ValueError('Linked artifact is forbidden')
                     if dst.exists():
                         if src.is_dir() != dst.is_dir() or (inventory(src) != inventory(dst) if src.is_dir() else digest(src) != digest(dst)):
