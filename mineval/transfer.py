@@ -246,9 +246,12 @@ def benchmark_input(store, job, destination, settings):
                 {key: item[key] for key in ('model', 'body', 'sources', 'event_key')} for item in history])
         # Only execution settings travel; paths and model credentials never do.
         allowed = ('concurrency', 'model_concurrency', 'resources', 'evaluator_agent',
-                   'evaluator_timeout_seconds', 'qualitative_review', 'review_image',
+                   'evaluator_timeout_seconds', 'review_image',
                    'preparation_image', 'review_model', 'review_effort')
-        write_json(destination / 'settings.json', {key: settings[key] for key in allowed if key in settings})
+        execution_settings = {key: settings[key] for key in allowed if key in settings}
+        # Older VPS workers still consult this setting before generating AI notes.
+        execution_settings['qualitative_review'] = False
+        write_json(destination / 'settings.json', execution_settings)
         inventory(destination)
     except BaseException:
         shutil.rmtree(destination)

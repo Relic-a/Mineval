@@ -32,10 +32,6 @@
    then `mineval workflow retry JOB`. Usable saved runs are reused; interrupted evaluations
    get new immutable IDs. Use `--new-attempt` only when there is no usable run output and
    the user authorizes another benchmark. Review failure requires only a review retry.
-8. Run `mineval workflow maintain` independently (for example from a user timer) to drain
-   durable memory compaction requests. It uses the worker's saved model-only authentication.
-   Failures preserve observations; expired reservations can be reclaimed on a later run.
-   This command is separate from result publication and benchmark workers.
 
 For cache issues use `mineval cache status`. Pruning with `mineval cache prune --max-mb N`
 removes reusable entries, not benchmark evidence. Integrity mismatches require investigation;

@@ -134,7 +134,6 @@ regardless of soft resource estimates, including after each completion.
 Additional concurrent jobs still require resource admission. Docker limits, runtime
 checks and isolation always apply; execution failures are reported rather than left
 queued. Other jobs that do not fit remain queued until capacity is available. Provider limits are operator configured.
-Run `mineval workflow maintain` in a separate process for background compaction.
 
 ## Python distribution and development
 

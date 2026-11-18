@@ -27,9 +27,9 @@ a historical base failing a behavioral check is not a reason to reject automatic
 
 Choose one or several discovered model/effort choices (or saved host presets), or enter explicit model identifiers
 (one per line) and an effort. Run automatically evaluates the saved candidate,
-records a factual model observation and, for Codex attempts by default, runs a
-separate qualitative review. Compaction is independent maintenance. The fake adapter is available
-through settings/CLI for fixtures; its reviews are factual only. It never calls a model.
+records a factual model observation and runs architecture review for Codex attempts
+when enabled. The fake adapter is available through settings or CLI for fixtures
+and makes no model calls.
 
 ## Application navigation and benchmark configuration
 
@@ -56,7 +56,7 @@ unsuccessful attempts. Automatic private evaluation remains part of every run.
 Preparation and benchmark submission open Activity with per-task submission outcomes,
 durable stages, saved result links and appropriate retry actions. Activity has state
 filters; refresh retrieves current progress. Settings expose effective preparation,
-AI-assisted evaluation and qualitative review roles, including read-only host review
+and architecture review roles, including read-only host review
 overrides. Private checks themselves do not require an AI model. Settings changes
 apply only to newly queued jobs; the existing model snapshots and retry semantics
 are preserved.
@@ -72,9 +72,9 @@ read-only and explain how to open the trusted operational observe server.
 
 Open **Settings → Agents & models** in the historical dashboard to select the **Prep / extract** and
 **Evaluation** model and reasoning effort. Prep applies to cleanup, extraction and
-independent preparation review. Evaluation applies to the evaluator, qualitative
-review. Memory compaction uses the separate maintenance queue. The trusted host `review_model` / `review_effort`
-settings can override the review sessions, and are called out on the settings page.
+independent preparation review. Evaluation supplies the defaults for optional
+architecture review. The trusted host `review_model` and `review_effort` settings
+can override review settings and appear on the settings page.
 
 Choices are saved atomically in `DATA/historical-model-settings.json` and override
 the corresponding host defaults for web and CLI workflow queues. Delete that file
@@ -279,12 +279,13 @@ selects another trusted host JSON file. Example:
 `evaluation_configs` overrides it per task. Paths resolve relative to the settings
 file. Settings contain configuration, never credentials. Supply authentication only
 through the explicit launcher flag. `--image` overrides the default preparation image
-for this server/worker. `review_image` selects the trusted Codex-capable image for
-qualitative review and compaction. It defaults to `preparation_image`, then the saved
-benchmark's configured agent image, independently of the private test image. Review
-failures are labeled separately and preserve benchmark and evaluation results;
-retrying them reuses both saved artifacts. Set `architecture_review: true` to queue architecture records and comparisons, or `false` to disable them. Set `qualitative_review: false` to disable the separate legacy qualitative memory review. Separate sessions and frozen independent review are always required to
-prepare tasks, regardless of these evaluation/review options.
+for this server/worker. Set `architecture_review: true` to record design evidence
+for each submission and compare recorded submissions for the same prepared task.
+`review_image` selects the trusted Codex-capable image for architecture review.
+It defaults to `preparation_image`, then the saved benchmark's configured agent
+image. Architecture review failures preserve benchmark and evaluation results.
+A retry reuses both saved artifacts. Preparation still requires separate sessions
+and frozen independent review.
 
 The extractor is asked to supply a structured `evaluation_config` in its private
 plan, including a tests command, known runtime, private paths, exit-code semantics
@@ -323,7 +324,7 @@ separately, and later completions trigger a fresh comparison across available re
 
 `historical-jobs.sqlite3` stores the queue and execution phases, with WAL and full
 synchronous commits. One coordinator owns crash recovery and schedules bounded
-stage workers. Benchmark execution, evaluation, and qualitative review
+stage workers. Benchmark execution, evaluation, and review
 have separate configurable limits and return to the queue between phases. Inference
 does not hold a database transaction. Multiple models can run the same prepared task
 concurrently; per-run ownership excludes duplicate launches and unsafe recovery.
@@ -352,7 +353,7 @@ explicit new attempt and adds `--effort` for both dedicated adapters.
 
 On worker restart, previously running jobs become interrupted and require an explicit
 retry. Finished runs are reused for evaluation retries; published assessments are
-reused when only model review failed. Uncertain/orphan evaluator evidence reserves its
+reused when only architecture review failed. Uncertain/orphan evaluator evidence reserves its
 ID: retries allocate a new assessment ID. A run left `running` by host loss is sealed
 using existing `bench recover`, then the job reports that a new explicit rerun is
 needed. Attempts without collected output cannot be retried toward evaluation.
@@ -418,11 +419,9 @@ and display as uncategorized; arbitrary labels in existing records are retained
 without pretending they belong to the new taxonomy. No historical metadata or receipt is rewritten or inferred from a title.
 
 Workflow runs stay out of summaries and explicit comparisons until required
-evaluation and qualitative review finish. Failed reviews keep their
-benchmark/evaluation evidence for retry without publishing a final result. Raw
-evidence and progress remain inspectable. Legacy and standalone CLI assessments
-retain their existing publication behavior. Qualitative observations cannot change
-a behavioral verdict.
+workflow stages finish. Architecture review failures preserve the benchmark and
+evaluation evidence for retry. Raw evidence and progress remain inspectable.
+Legacy and standalone CLI assessments retain their existing publication behavior.
 
 Models and results shows each model/effort/harness configuration's all-evidence
 performance and category average. Each dedicated model profile shows pass/fail/inconclusive/error,
@@ -453,19 +452,11 @@ Each observation retains model/effort/harness, exact revision, run/evaluation ID
 evaluation hash and verdict. Direct CLI evaluations append a conservative factual
 observation too. `model-review record TASK EVALUATION` repairs a missing observation
 idempotently after a host interruption. Detailed task evaluation remains authoritative.
-Qualitative inference sees the saved independent evaluation, agent completion report,
-selected-check evidence, task statement, bounded code diff and prior active model
-observations; it may describe recurring behavior only when current evidence supports
-it. Textual observations cannot change an independent verdict.
+Existing AI notes and summaries are available in the model profile and
+`model-review history MODEL --archive`. Benchmarks append factual observations
+based on their saved evaluations.
 
-At 24 active observations the worker folds the oldest two into one summary until
-the active list is below 24. A separate review model does this outside a transaction.
-The summary takes their oldest position, unions source references and records parent
-IDs. A failed inference releases its reservation immediately so retry need not wait
-for expiration. Originals never disappear; The model profile exposes the full archive and CLI can
-retrieve it. Reservations last 15 minutes by default, with a maximum of one hour.
-
-The CLI is also a compaction protocol for independent review agents:
+The CLI also accepts externally supplied summaries through its reservation protocol:
 
 ```sh
 mineval --data DATA model-review history MODEL --archive
@@ -478,13 +469,11 @@ mineval --data DATA model-review commit RESERVATION_ID summary-bullets.json
 claim returns the reserved original contents and references. `commit` accepts a JSON
 array of 1–8 concise bullets; only a live reservation can atomically deactivate those
 two active inputs and publish its summary. Another agent cannot claim the same pair.
-Appends continue during inference and are preserved. Expired claims can be reclaimed;
+Appends continue while a reservation is open and are preserved. Expired claims can be reclaimed;
 a stale holder cannot commit. Identical repeated commits return the existing result;
-different content for a committed reservation is rejected. No global inference lock
-is held. Observation rows and event provenance are append-only; only the active
-projection and reservation lifecycle mutate. Use `model-review review` or `compact`
-with an explicit trusted `--image` and optional model-only auth file to invoke the
-same sandboxed review model outside the workflow.
+different content for a committed reservation is rejected. Observation rows and
+event provenance are append-only. Only the active projection and reservation
+lifecycle mutate.
 
 ## Security and validation limits
 
@@ -509,15 +498,6 @@ made by the tests. Rootless Docker cold/warm and batch measurements are document
 in [Incremental pipeline validation](incremental-pipeline.md); no live-model smoke
 test was performed for this change. Existing
 opt-in rootless runtime tests remain available.
-
-### Independent memory maintenance
-
-Required qualitative review queues a durable, deduplicated request per observed model.
-Run `mineval workflow maintain` in a separate process or user timer. Publication
-does not wait for compaction. Requests survive restarts; SQLite reservations serialize
-the oldest inputs and expire after interruption. Failed inference leaves observations
-active and does not require a benchmark rerun. Maintenance uses the invoking worker’s
-authentication file; credentials are never stored in the queue.
 
 Resource admission also checks available host/cgroup memory and CPU capacity. Configure
 `resources` budgets as described in [installation](installation.md). Optional

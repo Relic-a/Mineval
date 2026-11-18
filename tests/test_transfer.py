@@ -184,9 +184,11 @@ class BenchmarkImportTests(HistoryFixture):
             outbox(Workflows(self.store, {}), staged_job)
         snapshot = self.root / 'input'
         transfer.benchmark_input(self.store, job | {'id': 'job1', 'kind': 'benchmark'}, snapshot,
-                                 {'auth_file': '/secret', 'qualitative_review': False})
+                                 {'auth_file': '/secret', 'qualitative_review': True})
         self.assertFalse((snapshot / 'data/tasks/example/private').exists())
-        self.assertNotIn('auth_file', json.loads((snapshot / 'settings.json').read_text()))
+        execution_settings = json.loads((snapshot / 'settings.json').read_text())
+        self.assertNotIn('auth_file', execution_settings)
+        self.assertFalse(execution_settings['qualitative_review'])
         self.assertEqual(Store(snapshot / 'data').inspect_revision('example', version), revision)
         transfer.import_benchmark(self.store, remote_root, job)
         self.assertEqual(self.store.inspect_run('example', 'remote-run')['status'], 'completed')
@@ -372,7 +374,7 @@ class DispatchTests(HistoryFixture):
         self.assertEqual(info['token'], 'export1')
         self.assertEqual(partial.read_bytes(), content)
 
-    def test_remote_dispatch_imports_grade_before_review_finishes(self):
+    def test_remote_dispatch_imports_grade_before_terminal_state(self):
         from unittest.mock import patch
         from mineval import remote_api, remote_coordinator, remote_dispatch
         from mineval.workflows import Workflows
@@ -390,8 +392,7 @@ class DispatchTests(HistoryFixture):
                                       'evaluation': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'}},
                    'execution_host': 'vps', 'evaluation_config': {}}
         from mineval.memory import Memory
-        Memory(self.store).append('test-model', ['Prior observation'], [{'task_id': 'example'}], 'prior')
-        flow = Workflows(self.store, {'vps': {'host': 'test@example.test'}, 'qualitative_review': False,
+        flow = Workflows(self.store, {'vps': {'host': 'test@example.test'},
                                       'architecture_review': True, 'review_image': 'local:test',
                                       'resources': {'admission_interval_seconds': 0.01}})
         with flow.db() as db:
@@ -404,7 +405,6 @@ class DispatchTests(HistoryFixture):
         remote.mkdir()
         (remote / 'settings.json').write_text(json.dumps({'resources': {'admission_interval_seconds': 0.01}}))
         threads = []
-        grade_imported = threading.Event()
         architecture_started = threading.Event()
         terminal_imported = threading.Event()
         grade_tokens = set()
@@ -419,6 +419,10 @@ class DispatchTests(HistoryFixture):
                         Client.submissions += 1
                         from mineval.remote import RemoteError
                         raise RemoteError('connection lost after submission')
+                    # Hold terminal delivery until dispatch observes the sealed grade.
+                    if (request['action'] == 'status' and result.get('grade_ready')
+                            and not architecture_started.is_set()):
+                        return result | {'state': 'running', 'stage': 'finalizing evidence'}
                     if request['action'] == 'fetch-grade-start':
                         grade_tokens.add(result['token'])
                     if request['action'] == 'fetch-delete':
@@ -427,9 +431,6 @@ class DispatchTests(HistoryFixture):
                             case.assertEqual((imported['run_id'], imported['verdict']), ('dispatch-run', 'pass'))
                             local_job = next(j for j in flow.jobs() if j['id'] == 'job1')
                             case.assertEqual(local_job['state'], 'running')
-                            case.assertFalse(any(item['body'] == ['Evidence-backed review']
-                                                 for item in Memory(flow.store).history('test-model')))
-                            grade_imported.set()
                         else:
                             terminal_imported.set()
                     return result
@@ -453,6 +454,7 @@ class DispatchTests(HistoryFixture):
                         (spec.workspace / 'app.py').write_text('def answer(): return 42\n')
                     container.start.side_effect = solve
                     yield container
+        run_benchmark = Workflows.benchmark
         def run_stage(workflow, jid, task, p, *, phase=None):
             if phase == 'benchmark':
                 benchmark.run(workflow.store, task, version, run_id=p['run_id'],
@@ -465,14 +467,8 @@ class DispatchTests(HistoryFixture):
                 config.write_text(json.dumps(self.fixture_evaluation_config))
                 evaluation.evaluate(workflow.store, task, p['run_id'], config,
                                     evaluation_id=p['evaluation_id'], sandbox=EvaluationRunner())
-            elif phase == 'review' and p['execution_host'] == 'vps':
-                from mineval.memory import Memory, evaluation_source
-                self.assertTrue(any(item['body'] == ['Prior observation'] for item in Memory(workflow.store).history('test-model')))
-                self.assertTrue(grade_imported.wait(20))
-                self.assertTrue(architecture_started.wait(20))
-                model, source, _ = evaluation_source(workflow.store, task, p['evaluation_id'])
-                Memory(workflow.store).append(model, ['Evidence-backed review'], [source],
-                                              'qualitative:' + task + ':' + p['evaluation_id'])
+            elif p['execution_host'] == 'vps':
+                run_benchmark(workflow, jid, task, p, phase=phase)
         def record_architecture(store, task, run_id, **options):
             self.assertEqual((store, task, run_id), (self.store, 'example', 'dispatch-run'))
             self.assertEqual(store.inspect_evaluation(task, 'dispatch-eval')['run_id'], run_id)
@@ -509,8 +505,8 @@ class DispatchTests(HistoryFixture):
         self.assertEqual(self.store.inspect_run('example', 'local-run')['status'], 'completed')
         self.assertEqual(self.store.inspect_run('example', 'dispatch-run')['status'], 'completed')
         self.assertEqual(self.store.inspect_evaluation('example', 'dispatch-eval')['run_id'], 'dispatch-run')
-        from mineval.memory import Memory
-        self.assertTrue(any(item['body'] == ['Evidence-backed review'] for item in Memory(self.store).history('test-model')))
+        self.assertCountEqual([item['event_key'] for item in Memory(self.store).history('test-model')],
+                              ['evaluation:example:dispatch-eval', 'evaluation:example:local-eval'])
         self.assertTrue(list((self.store.root / 'resource-usage').glob('job1-*.json')))
 
 

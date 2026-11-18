@@ -378,28 +378,6 @@ class Workflows:
         SSHClient(self.settings.get('vps', {}).get('host')).request({'action': 'cancel', 'job_id': jid})
         self.update(jid, detail='Cancellation requested on VPS')
 
-    def schedule_compaction(self, model, options):
-        # One durable request per model. Authentication stays in the worker, never the DB.
-        safe = {k: v for k, v in options.items() if k != 'auth_file'}
-        with self.db() as db:
-            db.execute("CREATE TABLE IF NOT EXISTS maintenance(model TEXT PRIMARY KEY, options TEXT NOT NULL)")
-            db.execute("INSERT INTO maintenance VALUES(?,?) ON CONFLICT(model) DO UPDATE SET options=excluded.options",
-                       (model, encoded(safe)))
-
-    def maintain(self):
-        from .model_review import compact
-        from .memory import Memory
-        with lock(self.store.root / 'maintenance-worker.lock'):
-            with self.db() as db:
-                db.execute("CREATE TABLE IF NOT EXISTS maintenance(model TEXT PRIMARY KEY, options TEXT NOT NULL)")
-                requests = list(db.execute('SELECT * FROM maintenance'))
-            for request in requests:
-                options = json.loads(request['options']) | {'auth_file': self.auth_file}
-                while len(Memory(self.store).history(request['model'])) >= Memory.threshold:
-                    if compact(self.store, request['model'], **options) is None:
-                        break
-                # Keep requests: future appends and expired reservations need no re-enqueue.
-
     def resource_request(self, job, phase):
         from .resources import options, service_budget, stage_config
         values = options(self.settings)
@@ -729,7 +707,7 @@ class Workflows:
                 return
         else:
             assessed = self.store.inspect_evaluation(task, p['evaluation_id'])
-        self.stage(jid, 'model review')
+        self.stage(jid, 'recording evaluation')
         from .memory import record_evaluation
         record_evaluation(self.store, task, assessed['evaluation_id'])
         if p['configuration']['adapter'] != 'fake' and self.settings.get('architecture_review', False):
@@ -747,19 +725,6 @@ class Workflows:
                 architecture_compare(self.store, task, record['prepared_revision']['version'], **options)
             except Exception as exc:
                 raise WorkflowFailure('Architecture review failed (' + type(exc).__name__ + '); functional results remain available. Retry review separately.') from exc
-        if p['configuration']['adapter'] != 'fake' and self.settings.get('qualitative_review', True):
-            from .model_review import review_evaluation
-            image = self.settings.get('review_image') or self.settings.get('preparation_image') or record.get('operation', {}).get('configured_image')
-            if not image:
-                raise WorkflowFailure('Qualitative review failed; benchmark and evaluation results are preserved. Configure review_image or preparation_image, then retry the review.')
-            options = dict(image=image, context=self.context, auth_file=self.auth_file,
-                           model=self.settings.get('review_model', self.role_adapter('evaluation', p).model),
-                           effort=self.settings.get('review_effort', self.role_adapter('evaluation', p).effort))
-            try:
-                review_evaluation(self.store, task, assessed['evaluation_id'], **options)
-                self.schedule_compaction(p['configuration']['model'], options)
-            except Exception as exc:
-                raise WorkflowFailure('Qualitative review failed (' + type(exc).__name__ + '); benchmark and evaluation results are preserved. Check the trusted review image and configuration, then retry the review.') from exc
 
 
 class WorkflowFailure(ValueError):

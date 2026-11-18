@@ -80,14 +80,12 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(set(sources), {str(x) for x in range(33)})
         self.assertEqual(len(sources), 33)
 
-    def test_failed_compaction_releases_claim_without_losing_observations(self):
-        from mineval.model_review import compact
+    def test_releasing_reservation_preserves_observations(self):
         for n in range(24):
             self.append(n)
         before = self.memory.history('model/a')
-        with patch('mineval.model_review.infer', side_effect=ValueError('fixture failure')):
-            with self.assertRaises(ValueError):
-                compact(self.store, 'model/a', image='local:test')
+        claim = self.memory.claim('model/a')
+        self.memory.release(claim['reservation_id'])
         self.assertEqual(self.memory.history('model/a'), before)
         self.assertIsNotNone(self.memory.claim('model/a'))
 
@@ -148,8 +146,7 @@ class WorkflowTests(HistoryFixture):
 
     def test_evaluation_uses_queued_model_and_effort(self):
         flow = Workflows(self.store, {'evaluation_config': str(self.config),
-            'evaluation_model': 'eval-selected', 'evaluation_effort': 'ultra',
-            'qualitative_review': False})
+            'evaluation_model': 'eval-selected', 'evaluation_effort': 'ultra'})
         flow.enqueue('benchmark', [{'task_id': 'example', 'version': self.version}],
                      [{'model': 'candidate', 'effort': 'low', 'adapter': 'codex'}])
         job = flow.jobs()[0]
@@ -262,36 +259,63 @@ class WorkflowTests(HistoryFixture):
         self.assertEqual(self.store.inspect_run('example', p['run_id']), recovered)
 
 
-    def test_review_image_and_failure_are_independent_of_evaluation(self):
-        config = read_json(self.config)
-        write_json(self.config, config | {'image': 'private-tests:local'})
-        for settings, expected in [({'review_image': 'review:local', 'preparation_image': 'prep:local'}, 'review:local'),
-                                   ({'preparation_image': 'prep:local'}, 'prep:local'),
-                                   ({}, 'local:test')]:
-            with self.subTest(settings=settings):
-                flow = self.flow()
-                flow.settings.update(settings)
-                result = flow.enqueue('benchmark', [{'task_id': 'example', 'version': self.version}],
-                    [{'model': 'sample', 'effort': 'high', 'adapter': 'codex'}], exclude=False)
-                jid = result[0]['id']
-                with patch('mineval.workflows.adapter', return_value=FakeAdapter(model='sample', effort='high', name='codex')), \
-                     patch('mineval.benchmark.run_agent', side_effect=self._run_agent), \
-                     patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()), \
-                     patch('mineval.model_review.review_evaluation', side_effect=ValueError('secret output')) as review:
-                    flow.work()
-                job = next(j for j in flow.jobs() if j['id'] == jid)
-                self.assertEqual(review.call_args.kwargs['image'], expected)
-                self.assertEqual(job['stage'], 'model review')
-                self.assertIn('Qualitative review failed', job['detail'])
-                self.assertNotIn('secret output', job['detail'])
-                assessment = self.store.inspect_evaluation('example', job['payload']['evaluation_id'])
-                flow.retry(jid)
-                with patch('mineval.workflows.benchmark.run', side_effect=AssertionError('saved run')) , \
-                     patch('mineval.workflows.evaluation.evaluate', side_effect=AssertionError('saved evaluation')), \
-                     patch('mineval.model_review.review_evaluation'):
-                    flow.work()
-                self.assertEqual(next(j for j in flow.jobs() if j['id'] == jid)['state'], 'completed')
-                self.assertEqual(self.store.inspect_evaluation('example', assessment['evaluation_id']), assessment)
+    def test_benchmarks_keep_architecture_review_without_generating_ai_notes(self):
+        from mineval import architecture
+        from mineval.memory import evaluation_source
+
+        flow = self.flow()
+        flow.settings.update({'qualitative_review': True, 'review_image': 'review:local'})
+        selection = [{'task_id': 'example', 'version': self.version}]
+        configurations = [{'model': 'sample', 'effort': 'high', 'adapter': 'codex'}]
+        task_root = self.store.task('example')
+        architecture_root = task_root / 'architecture'
+
+        def infer(store, workspace, prompt, **options):
+            self.assertEqual(options['image'], 'review:local')
+            if prompt == architecture.RECORD_PROMPT:
+                return {'observations': [{'description': 'Answer function', 'evidence': ['app.py']}]}
+            labels = sorted(path.name for path in (workspace / 'candidates').iterdir())
+            return {'ranking': [{'candidates': labels, 'explanation': 'Equivalent interfaces',
+                                 'evidence': [{'candidate': label, 'path': 'app.py'} for label in labels]}],
+                    'uncertainty': 'Similar structure'}
+
+        with patch('mineval.workflows.adapter', side_effect=lambda config: FakeAdapter(
+                 model=config['model'], effort=config['effort'], name='codex')), \
+             patch('mineval.benchmark.run_agent', side_effect=self._run_agent), \
+             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()), \
+             patch('mineval.architecture._infer', side_effect=infer) as architecture_infer:
+            flow.enqueue('benchmark', selection, configurations)
+            flow.work()
+            first, = flow.jobs()
+            self.assertEqual(first['state'], 'completed', first)
+            evaluation_id = first['payload']['evaluation_id']
+            history = Memory(self.store)
+            self.assertEqual([item['event_key'] for item in history.history('sample')],
+                             [f'evaluation:example:{evaluation_id}'])
+            model, source, _ = evaluation_source(self.store, 'example', evaluation_id)
+            legacy_note = history.append(model, ['Historical AI note'], [source], f'qualitative:example:{evaluation_id}')
+            architecture_infer.assert_not_called()
+
+            flow.settings['architecture_review'] = True
+            for effort in ('high', 'low'):
+                flow.enqueue('benchmark', selection, [configurations[0] | {'effort': effort}], exclude=False)
+                flow.work()
+
+        jobs = flow.jobs()
+        self.assertEqual(len(jobs), 3)
+        for job in jobs:
+            self.assertEqual(job['state'], 'completed', job)
+            assessed = self.store.inspect_evaluation('example', job['payload']['evaluation_id'])
+            self.assertEqual(assessed['run_id'], job['payload']['run_id'])
+        expected_runs = {job['payload']['run_id'] for job in jobs if job['id'] != first['id']}
+        self.assertEqual({path.name for path in (architecture_root / 'records').iterdir()}, expected_runs)
+        comparison, = (architecture_root / 'comparisons').glob('*/comparison.json')
+        self.assertEqual(set(read_json(comparison)['candidates'].values()), expected_runs)
+        self.assertEqual(architecture_infer.call_count, 3)
+        self.assertCountEqual([item['event_key'] for item in history.history('sample', archive=True)],
+                              [f"evaluation:example:{job['payload']['evaluation_id']}" for job in jobs]
+                              + [legacy_note['event_key']])
+        self.assertIn('Historical AI note', Pages(self.store, workflows=flow).render('/models', {'model': ['sample']}))
 
     def test_coverage_separates_multiple_conditions_from_unique_tasks(self):
         self.saved('one'); self.assess('one', 'first')
@@ -658,44 +682,6 @@ class CLIConcurrencyTests(unittest.TestCase):
             results = list(pool.map(commit, range(2)))
         self.assertEqual(results[0]['id'], results[1]['id'])
         self.assertEqual(len(Memory(self.store).history('model/a')), 23)
-
-
-class ModelReviewTests(HistoryFixture):
-    def setUp(self):
-        super().setUp()
-        self.fixture_generated_cases = True
-        self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
-            'commands': [{'name': 'answer-regression', 'kind': 'tests',
-                          'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}
-        self.version = self.freeze('example', self.review)['version']
-        self.config = self.root / 'evaluation.json'
-        write_json(self.config, self.fixture_evaluation_config)
-    saved = fixtures.EvaluationTests.saved
-    assess = fixtures.EvaluationTests.assess
-    def test_review_receives_prior_evidence_and_code_without_changing_verdict(self):
-        from mineval.model_review import review_evaluation
-        self.saved('one'); self.assess('one', 'first')
-        self.saved('two', 'def answer(): return 7\n'); self.assess('two', 'second')
-        captured = {}
-        class EvidenceAgent(ReportAgent):
-            @contextmanager
-            def container(inner, spec):
-                captured.update(read_json(spec.workspace / 'input.json'))
-                with super().container(spec) as container:
-                    yield container
-        agent = EvidenceAgent('observations.json', ['example/second: saved implementation returned 7; the private answer regression failed.'])
-        with patch('mineval.model_review.DockerSandbox', return_value=agent):
-            result = review_evaluation(self.store, 'example', 'second', image='local:test')
-        self.assertIn('return 7', captured['code_diff'])
-        self.assertIn('42', captured['selected_verification'][0]['bounded_content'])
-        self.assertTrue(captured['prior'])
-        self.assertEqual(captured['source']['evaluation_id'], 'second')
-        self.assertEqual(result['sources'][0]['verdict'], 'fail')
-        self.assertEqual(self.store.inspect_evaluation('example', 'second')['verdict'], 'fail')
-        self.assertEqual(len(Memory(self.store).history('fake')), 3)
-        with patch('mineval.model_review.infer', side_effect=AssertionError('duplicate review must not spend another inference')):
-            duplicate = review_evaluation(self.store, 'example', 'second', image='local:test')
-        self.assertEqual(result['id'], duplicate['id'])
 
 
 def setUpModule():

@@ -75,7 +75,7 @@ shows category performance and accumulated model reviews behind More details.
 Use **Settings** to choose prep/extract and evaluation models and reasoning efforts.
 Mineval discovers Codex models through the installed CLI, with manual identifiers available.
 See [historical workflows](docs/historical-workflows.md) for reusable settings,
-evaluation command selection, CLI equivalents, compaction and recovery. Follow task → prepared revision → suite/run →
+evaluation command selection, architecture review, CLI equivalents and recovery. Follow task → prepared revision → suite/run →
 evaluation links to inspect cleanup, independent review, private verification
 provenance and limitations, output diffs, commands and assessment adaptations.
 The Compare page accepts explicit run or assessment selections and shows exact
@@ -449,8 +449,7 @@ benchmark outcomes. These diagnostics cannot recover output discarded by older v
 
 For Codex stages, a successful process exit with missing required output files
 triggers one follow-up prompt in the same Codex session. This covers completion,
-cleanup, extraction, review, evaluation assessment, and qualitative observation
-reports. All missing files are listed in one reminder; there is no retry loop.
+cleanup, extraction, independent review, and architecture review reports. All missing files are listed in one reminder; there is no retry loop.
 Both turns share the existing container timeout and resource limits. Nonzero
 exits, timeouts, and out-of-memory failures are not retried. Files still missing
 after the reminder fail the stage; existing report validation remains mandatory.

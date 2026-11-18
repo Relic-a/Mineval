@@ -103,10 +103,13 @@ def agent_summary(pages, preparation=False):
         review_effort = w.settings.get('review_effort', config['effort'])
 
     text = ('Cleanup & extraction: ' + esc(config['model'] + ' · ' + config['effort'])) if preparation else 'Fixed functional grading'
-    text += '. ' + ('Independent preparation review: ' if preparation else 'Qualitative review & compaction: ')
-    text += esc(str(review_model) + ' · ' + str(review_effort)) if preparation or w.settings.get('qualitative_review', True) else 'disabled'
-    if w.settings.get('review_model') or (not preparation and w.settings.get('review_effort')):
-        text += ' (host-controlled review override)'
+    text += '. ' + ('Independent preparation review: ' if preparation else 'Architecture review: ')
+    if preparation or w.settings.get('architecture_review', False):
+        text += esc(str(review_model) + ' · ' + str(review_effort))
+        if w.settings.get('review_model') or (not preparation and w.settings.get('review_effort')):
+            text += ' (host-controlled review override)'
+    else:
+        text += 'disabled'
     return '<p class="notice">' + text + '. ' + pages.link('Agents & models settings', 'settings') + '</p>'
 
 
@@ -213,7 +216,7 @@ def benchmarks(pages, query, new=False):
         except (ValueError, OSError) as exc:
             outcomes.append((pages.task_link(t['task_id']), 'Unavailable', esc(exc)))
     body += '<p>' + str(len(chosen)) + ' tasks × ' + str(len(configs)) + ' configurations. Queue submission rechecks eligibility and active work.</p>' + table(['Task', 'Configuration', 'Planned outcome'], outcomes)
-    body += '<p>Saved private checks run automatically after each attempt. Deterministic checks do not require an AI model. Optional qualitative review follows the effective settings below; functional results are available as soon as grading finishes.</p>' + agent_summary(pages)
+    body += '<p>Saved private checks run automatically after each attempt. Deterministic checks do not require an AI model. Optional architecture review follows the effective settings below; functional results are available as soon as grading finishes.</p>' + agent_summary(pages)
     body += '<p>' + str(runnable) + (' attempt' if runnable == 1 else ' attempts') + ' ready to queue. Unavailable tasks and prior attempts above are excluded or reported individually; other tasks continue.</p>'
     content = carry + hidden('attempts', attempts) + hidden('operation', 'benchmark') + ''.join(hidden('configuration', json.dumps(c)) for c in configs)
     if query.get('exclude') == ['yes']:
@@ -291,7 +294,7 @@ def jobs(pages, query=None):
     query = query or {}
     if not pages.workflows:
         return pages.page('Work queue', '<p>Start <code>mineval observe</code> to enable historical workflows.</p>')
-    body = '<p>Preparation stages: cleanup → diagnostics → extraction → validation → independent review → freeze. Benchmark stages: attempt → private evaluation → observations and configured qualitative review.</p><p>Refresh for progress. Stages and IDs are durable. Retry preserves saved attempts and assessments. An interrupted benchmark is sealed as an infrastructure error before a new explicit rerun.</p><p>' + pages.link('Refresh queue', 'jobs') + '</p>'
+    body = '<p>Preparation stages: cleanup → diagnostics → extraction → validation → independent review → freeze. Benchmark stages: attempt → private evaluation → factual observation and optional architecture review.</p><p>Refresh for progress. Stages and IDs are durable. Retry preserves saved attempts and assessments. An interrupted benchmark is sealed as an infrastructure error before a new explicit rerun.</p><p>' + pages.link('Refresh queue', 'jobs') + '</p>'
     state_filter = query.get('state', [''])[0]
     body += '<div class="tabs">' + ' '.join(pages.link(label, 'jobs', state=value) for value, label in [('', 'All'), ('queued', 'Queued'), ('running', 'Running'), ('completed', 'Completed'), ('failed', 'Failed'), ('interrupted', 'Interrupted')]) + '</div>'
     rows = []
@@ -304,7 +307,7 @@ def jobs(pages, query=None):
         if job['state'] in ('failed', 'interrupted'):
             new_attempt = pages.workflows.needs_new_attempt(job)
             route = 'new-attempt' if new_attempt else 'retry'
-            label = 'Start new benchmark attempt' if new_attempt else ('Retry qualitative review' if job['stage'] in ('model review', 'review compaction') else 'Retry remaining stages')
+            label = 'Start new benchmark attempt' if new_attempt else 'Retry remaining stages'
             detail += form(pages, route, hidden('job', job['id']) + '<button>' + label + '</button>')
         if job['state'] == 'running' and p.get('execution_host') == 'vps':
             detail += form(pages, 'cancel', hidden('job', job['id']) + '<button>Cancel VPS job</button>')
@@ -393,7 +396,7 @@ def settings(pages, *, refreshed=False, saved=False):
     content = '<datalist id="codex-models">' + options + '</datalist>'
     for role, title, explanation in (
             ('preparation', 'Preparation agents · Prep / extract', 'Cleanup and private verification extraction. Independent preparation review uses this model unless the host review override below applies.'),
-            ('evaluation', 'Evaluation and review agents', 'Qualitative review and memory compaction use this default unless the host review override applies. Fixed private checks run without an AI model.')):
+            ('evaluation', 'Architecture review agent', 'Architecture review uses this default unless the host review override applies. Fixed private checks run without an AI model.')):
         config = current[role]
         content += '<fieldset><legend>' + title + '</legend><p>' + explanation + '</p>'
         content += '<label>Model <input name="' + role + '_model" list="codex-models" value="' + esc(config['model']) + '" required maxlength="200" spellcheck="false"></label>'
@@ -405,7 +408,7 @@ def settings(pages, *, refreshed=False, saved=False):
     body += '<h2>Available Codex models</h2><div class="model-catalog">' + table(['Model', 'Identifier', 'Reasoning efforts', 'Default effort'], (
         (esc(m['name']), '<code>' + esc(m['model']) + '</code>', esc(', '.join(m['efforts']) or 'Not reported'), esc(m['default_effort']))
         for m in catalog['models'])) + '</div>'
-    body += '<p>Host-controlled environment: preparation runtime ' + ('configured' if workflow.settings.get('preparation_image') else 'not configured') + '; fixed functional grading enabled; architecture review ' + ('enabled' if workflow.settings.get('architecture_review', False) else 'disabled') + '; qualitative review ' + ('enabled' if workflow.settings.get('qualitative_review', True) else 'disabled') + '. Runtime images, private commands and credentials are managed by the trusted launcher.</p>'
+    body += '<p>Host-controlled environment: preparation runtime ' + ('configured' if workflow.settings.get('preparation_image') else 'not configured') + '; fixed functional grading enabled; architecture review ' + ('enabled' if workflow.settings.get('architecture_review', False) else 'disabled') + '. Runtime images, private commands and credentials are managed by the trusted launcher.</p>'
     return pages.page('Settings · Agents & models', body)
 
 

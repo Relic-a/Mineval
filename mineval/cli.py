@@ -188,7 +188,6 @@ def _main(argv: list[str] | None = None) -> int:
     flows = workflow.add_subparsers(dest='workflow_action', required=True)
     submit = flows.add_parser('submit', help='enqueue JSON {kind,selections,configurations,exclude}')
     submit.add_argument('definition')
-    flows.add_parser('maintain', help='process durable model memory compaction independently')
     flows.add_parser('list')
     work = flows.add_parser('work', help='process queued tasks; independent failures do not stop the queue')
     work.add_argument('--job-id', help='process only this job')
@@ -215,16 +214,6 @@ def _main(argv: list[str] | None = None) -> int:
     remember.add_argument('task_id')
     remember.add_argument('evaluation_id')
     remember.add_argument('--bullets', help='JSON bullet array; omitted records the factual verdict and explanation')
-    for name in ('review', 'compact'):
-        operation = memories.add_parser(name, help='run a separate sandboxed review model')
-        if name == 'review':
-            operation.add_argument('task_id')
-            operation.add_argument('evaluation_id')
-        else:
-            operation.add_argument('model_name')
-        operation.add_argument('--image', required=True)
-        operation.add_argument('--model', default='gpt-6-luna')
-        operation.add_argument('--auth-file')
     args = parser.parse_args(argv)
     if args.action == 'workflow' and args.workflow_action == 'work' and args.refresh_export and not args.job_id:
         parser.error('--refresh-export requires --job-id')
@@ -234,7 +223,7 @@ def _main(argv: list[str] | None = None) -> int:
             # adapters, explicit commands or evaluation without an AI evaluator.
             if name == 'auth_file' and not (
                     getattr(args, 'adapter', None) == 'codex'
-                    or args.action in ('setup', 'models', 'observe', 'workflow', 'model-review')
+                    or args.action in ('setup', 'models', 'observe', 'workflow')
                     or (args.action == 'arena' and args.arena_action == 'serve')):
                 continue
             setattr(args, name, saved.get(name))
@@ -330,9 +319,6 @@ def _main(argv: list[str] | None = None) -> int:
                 if args.workflow_action == 'submit':
                     definition = read_json(args.definition)
                     result = flow.enqueue(**definition)
-                elif args.workflow_action == 'maintain':
-                    flow.maintain()
-                    result = {'maintenance': 'completed'}
                 elif args.workflow_action == 'list':
                     result = flow.jobs()
                 elif args.workflow_action == 'retry':
@@ -359,11 +345,6 @@ def _main(argv: list[str] | None = None) -> int:
                 elif args.memory_action == 'record':
                     result = record_evaluation(store, args.task_id, args.evaluation_id,
                                                read_json(args.bullets) if args.bullets else None)
-                else:
-                    from .model_review import review_evaluation, compact
-                    options = dict(image=args.image, model=args.model, context=args.context, auth_file=args.auth_file)
-                    result = (review_evaluation(store, args.task_id, args.evaluation_id, **options)
-                              if args.memory_action == 'review' else compact(store, args.model_name, **options))
             print(json.dumps(result, indent=2))
             return 0
         if args.action == 'observe':

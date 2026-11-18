@@ -1,12 +1,11 @@
 """Failure diagnostics stay private and preserve evaluator provenance."""
 from contextlib import contextmanager
 import json
-from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from mineval import devlog, model_review
+from mineval import devlog
 from mineval.artifacts import write_json
 from mineval.sandbox import log_agent_failure
 import test_evaluation as fixtures
@@ -68,21 +67,3 @@ class PrivateFailureTests(unittest.TestCase):
             finally:
                 for handler in devlog._streams.values():
                     handler.close()
-
-    def test_qualitative_failure_categories_are_distinct_and_public_error_is_generic(self):
-        for reason in ('nonzero_exit', 'timeout', 'oom'):
-            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temp:
-                store = Mock(root=Path(temp))
-                container = Mock(id='review-container', image_id='image')
-                container.wait.return_value = reason == 'timeout'
-                container.inspect.return_value = {'Running': False, 'ExitCode': 9,
-                                                   'OOMKilled': reason == 'oom', 'Error': 'secret'}
-                sandbox = Mock()
-                sandbox.container.return_value.__enter__ = Mock(return_value=container)
-                sandbox.container.return_value.__exit__ = Mock(return_value=False)
-                with patch('mineval.sandbox.event') as logged:
-                    with self.assertRaisesRegex(ValueError, '^Qualitative review did not complete; retry separately$'):
-                        model_review.infer(store, {}, image='local:test', sandbox=sandbox)
-                event = next(c for c in logged.call_args_list if c.args[0] == 'qualitative_review.failed')
-                self.assertEqual(event.kwargs['reason'], reason)
-                self.assertEqual(event.kwargs['sensitive']['state']['Error'], 'secret')
