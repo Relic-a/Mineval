@@ -547,7 +547,7 @@ mineval --context rootless --data mineval-data verification-extract external-tas
 # Use the returned extraction_id; config uses the same schema as verify.json.
 mineval --context rootless --data mineval-data verification-check external-task-001 --extraction-id EXTRACTION --config private-checks.json
 mineval --context rootless --data mineval-data verification-check external-task-001 --extraction-id EXTRACTION --config private-checks.json --future-commit FULL_SHA
-mineval --context rootless --data mineval-data review external-task-001 --extraction-id EXTRACTION --command /path/in/image/to/reviewer
+mineval --context rootless --data mineval-data review external-task-001 --extraction-id EXTRACTION --base-validation-id BASE_VALIDATION --reference-validation-id REFERENCE_VALIDATION --command /path/in/image/to/reviewer
 mineval --data mineval-data finalize external-task-001 --review-id REVIEW
 ```
 
@@ -574,6 +574,11 @@ failure can be legitimate; a future pass supports the checks without declaring t
 historical patch the only correct implementation. Future checks use the original
 future tree without cleanup adaptations; reviewers must assess any resulting setup
 limitations. Validation is optional where infeasible, and limitations require review.
+Use the `validation_id` returned by each check to select the base and reference runs
+for review. After a retry, use the new run's ID for that state. Freeze uses the
+selected runs sealed in the approval and retains the full validation history.
+Omit the reference flag for tasks without a reference commit. If an older approval
+included a failed run, submit a new review with the chosen IDs.
 
 The reviewer writes [review.json](examples/review.json), returning approve, revise or
 reject with reasons. It assesses every cleanup edit, leakage, test relevance, arbitrary

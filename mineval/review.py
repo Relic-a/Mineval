@@ -80,9 +80,14 @@ Read task-brief.md when present. Check that it describes the required behavior,
 public interfaces, defaults, and material edge cases and invariants, without
 prescribing an implementation or disclosing a solution. Check that each mandatory
 test is supported by the brief and that material requirements are covered.
-Review the actual evaluation_config and private base/future validation results. Require selected tests to execute and finish, detect skips and missing coverage, and assess their relevance to the task and alternative legitimate implementations. Broken future checks or future environment failures remain blockers. Record any base execution limitations and coverage gaps. Passing on both trees is nondiscriminating; broken future checks or
-future environment failures remain blockers. Do not approve misleading or unjustified
-commands or treat uncovered obligations as tested. No outcome is automatic approval.
+Review the actual evaluation_config and the private base/future validation
+results identified in evidence-index.json. Approval binds the supplied validation
+runs. Require selected tests to execute and finish. Detect skips and missing coverage
+and assess relevance to the task and alternative legitimate implementations.
+Record base execution limitations and coverage gaps. Passing on both trees is
+nondiscriminating. Broken future checks and future environment failures remain
+blockers. Do not approve misleading or unjustified commands or treat uncovered
+obligations as tested. No outcome is automatic approval.
 Write /mineval-control/review.json: {verdict: approve|revise|reject, reasons: [nonempty
 strings], objective_preserved: boolean, snapshot_reviewed: boolean, changes:
 [{path, reason}]}. Account for exactly each cleanup change. Approve only credible
@@ -108,15 +113,16 @@ def seal(staged, target):
             path.chmod(0o444)
 
 
-def inputs(store, task_id, extraction_id):
+def inputs(store, task_id, extraction_id, validation_selection=None):
     task, draft = store.task(task_id), store.draft(task_id)
     cleanup = read_json(task / 'cleanup-latest.json')
     attempt = task / 'cleanups' / identifier(cleanup['cleanup_id'])
     cleanup_hash = checked(attempt)
+    current = inventory(draft / 'workspace')
     from .verification import load_config
     if (cleanup != read_json(attempt / 'cleanup-report.json') or
             cleanup['disposition'] != 'ready-for-review' or
-            inventory(draft / 'workspace') != read_json(attempt / 'tree-hashes.json') or
+            current != read_json(attempt / 'tree-hashes.json') or
             load_config(draft / 'control/verify.json') != read_json(attempt / 'verify-config.json')):
         raise ValueError('Require a current ready-for-review cleanup')
     extraction = task / 'private/extractions' / identifier(extraction_id)
@@ -130,11 +136,36 @@ def inputs(store, task_id, extraction_id):
         from .intake import read_brief
         read_brief(brief)
         brief_receipt = {'task_brief_sha256': digest(brief)}
+    validations = task / 'private/validations' / extraction_id
+    if validation_selection is None:
+        receipts = {p.parent.name: checked(p.parent)
+                    for p in sorted(validations.glob('*/artifact-hashes.json'))}
+    else:
+        metadata = read_json(task / 'metadata.json')
+        states = {'base': 'cleaned-base'}
+        if metadata.get('head_commit'):
+            states['reference'] = metadata['head_commit']
+        if set(validation_selection) != set(states):
+            raise ValueError('Select a base validation and a reference validation when the task has a reference')
+        receipts = {}
+        for role, state in states.items():
+            validation_id = identifier(validation_selection[role])
+            directory = validations / validation_id
+            if not (directory / 'artifact-hashes.json').is_file():
+                raise ValueError(f'Unknown {role} validation for this extraction: {validation_id}')
+            receipts[validation_id] = checked(directory)
+            record = read_json(directory / 'validation.json')
+            if (record['state'] != state or record['extraction_id'] != extraction_id
+                    or record['extraction_sha256'] != extraction_hash):
+                raise ValueError(f'Selected {role} validation does not match the review inputs')
+            if role == 'base' and record['source_hashes'] != current:
+                raise ValueError('Selected base validation did not run on the current cleaned base')
     return {**brief_receipt, 'cleanup_id': cleanup['cleanup_id'], 'cleanup_sha256': cleanup_hash,
             'extraction_id': extraction_id, 'extraction_sha256': extraction_hash,
             'diagnostic_sha256': digest(task / 'verify-latest.json'),
             'metadata_sha256': digest(task / 'metadata.json'),
-            'validation': {p.parent.name: checked(p.parent) for p in sorted((task / 'private/validations' / extraction_id).glob('*/artifact-hashes.json'))}}
+            'validation': receipts,
+            **({'validation_selection': validation_selection} if validation_selection is not None else {})}
 
 
 def approved(store, task_id, review_id):
@@ -143,7 +174,8 @@ def approved(store, task_id, review_id):
     record = read_json(directory / 'review.json')
     if record['report']['verdict'] != 'approve':
         raise ValueError('Independent review did not approve preparation')
-    if record['inputs'] != inputs(store, task_id, record['inputs']['extraction_id']):
+    bound = record['inputs']
+    if bound != inputs(store, task_id, bound['extraction_id'], bound.get('validation_selection')):
         raise ValueError('Independent review is stale; run a new review session')
     return record, directory
 
@@ -155,7 +187,8 @@ def revision_evidence(store, task_id, review_id):
     record = read_json(directory / 'review.json')
     if record['report']['verdict'] != 'revise':
         raise ValueError('Extraction revision requires a revise verdict')
-    if record['inputs'] != inputs(store, task_id, record['inputs']['extraction_id']):
+    bound = record['inputs']
+    if bound != inputs(store, task_id, bound['extraction_id'], bound.get('validation_selection')):
         raise ValueError('Extraction revision evidence is stale')
     return record
 
@@ -204,7 +237,7 @@ def evidence_index(workspace):
 
 def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None,
             context=None, sandbox=None, extraction_id=None, revision_id=None,
-            require_evaluation_config=False):
+            require_evaluation_config=False, validation_selection=None):
     """Every invocation creates a fresh session; only disposable private copies mount."""
     from .agents import CodexAdapter, provision_auth
     from .verification import load_config
@@ -220,7 +253,9 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
         identity = uuid4().hex
         if revision_id and stage != 'extraction':
             raise ValueError('Revision evidence is only for extraction')
-        bound = inputs(store, task_id, extraction_id) if stage == 'review' else None
+        if validation_selection is not None and stage != 'review':
+            raise ValueError('Validation selection is only for independent review')
+        bound = inputs(store, task_id, extraction_id, validation_selection) if stage == 'review' else None
         revision = revision_evidence(store, task_id, revision_id) if revision_id else None
         # Extraction follows a completed producer, even if it later reports unavailable.
         cleanup = read_json(task / 'cleanup-latest.json')
@@ -254,8 +289,8 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
         if bound:
             copy_tree(private / 'extractions' / extraction_id, workspace / 'extraction')
             validations = private / 'validations' / extraction_id
-            if validations.exists():
-                copy_tree(validations, workspace / 'validations')
+            for validation_id in bound['validation']:
+                copy_tree(validations / validation_id, workspace / 'validations' / validation_id)
         if revision:
             previous = revision['inputs']['extraction_id']
             revision_dir = workspace / 'revision'
@@ -263,8 +298,8 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
             write_json(revision_dir / 'review.json', revision)
             copy_tree(private / 'extractions' / previous, revision_dir / 'extraction')
             validations = private / 'validations' / previous
-            if validations.exists():
-                copy_tree(validations, revision_dir / 'validations')
+            for validation_id in revision['inputs']['validation']:
+                copy_tree(validations / validation_id, revision_dir / 'validations' / validation_id)
         write_json(workspace / 'evidence-index.json', evidence_index(workspace))
         prompt = REVIEW if stage == 'review' else EXTRACTION
         (prompts / 'prompt.txt').write_text(prompt)
@@ -326,7 +361,7 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
             validate_report({'disposition': 'ready-for-review', 'summary': '; '.join(report['reasons']),
                 'objective_preserved': report['objective_preserved'], 'changes': report['changes'],
                 'environment': cleanup['report']['environment']}, cleanup['changed_paths'])
-        if bound != inputs(store, task_id, extraction_id):
+        if bound != inputs(store, task_id, extraction_id, validation_selection):
             raise ValueError('Review inputs changed during session')
         staged = temp / 'review'; staged.mkdir()
         write_json(staged / 'review.json', {'review_id': identity, 'inputs': bound,

@@ -157,6 +157,8 @@ def _main(argv: list[str] | None = None) -> int:
         private.add_argument('task_id')
         if name == 'review':
             private.add_argument('--extraction-id', required=True)
+            private.add_argument('--base-validation-id', help='exact cleaned-base validation run to review')
+            private.add_argument('--reference-validation-id', help='exact reference validation run to review')
         private.add_argument('--adapter', choices=('codex',))
         private.add_argument('--model', default='gpt-6-luna')
         private.add_argument('--auth-file')
@@ -482,10 +484,15 @@ def _main(argv: list[str] | None = None) -> int:
                 elif args.action in ('verification-extract', 'review'):
                     from .review import session as private_session
                     from .agents import CodexAdapter
+                    validation_selection = {
+                        role: validation_id for role in ('base', 'reference')
+                        if (validation_id := getattr(args, role + '_validation_id', None))
+                    }
                     result = private_session(store, args.task_id,
                         stage='review' if args.action == 'review' else 'extraction',
                         command=args.command, adapter=CodexAdapter(args.model) if args.adapter else None,
-                        auth_file=args.auth_file, context=args.context, extraction_id=getattr(args, 'extraction_id', None))
+                        auth_file=args.auth_file, context=args.context, extraction_id=getattr(args, 'extraction_id', None),
+                        validation_selection=validation_selection or None)
                 elif args.action == "finalize":
                     result = store.finalize(args.task_id, review_id=args.review_id)
                 elif args.action == "reject":

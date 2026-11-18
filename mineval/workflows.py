@@ -672,11 +672,15 @@ class Workflows:
                     raise WorkflowFailure('Private checks must execute and fail on the unsolved base before freezing.')
                 if future and future_validation['report']['verdict'] != 'pass':
                     raise WorkflowFailure('Private checks must execute and pass on the reference implementation before freezing.')
+        validation_selection = {'base': base_validation['validation_id']}
+        if future:
+            validation_selection['reference'] = future_validation['validation_id']
         self.stage(jid, 'independent review')
         review_adapter = CodexAdapter(self.settings['review_model'], effort=self.settings.get('review_effort')) if self.settings.get('review_model') else prep_adapter
-        approval = progress.run('review', [review.inputs(self.store, task, extraction_id), progress.state(),
+        approval = progress.run('review', [review.inputs(self.store, task, extraction_id, validation_selection), progress.state(),
             p.get('model_settings', {}).get('preparation'), self.settings.get('review_model'), self.settings.get('review_effort'), review.REVIEW],
             lambda: review.session(self.store, task, stage='review', extraction_id=extraction_id,
+                validation_selection=validation_selection,
                 **(options | {'adapter': review_adapter, 'auth_file': self.auth_file if isinstance(review_adapter, CodexAdapter) else None})), progress.approval)
         if approval['verdict'] != 'approve':
             raise WorkflowFailure('Independent review: ' + approval['verdict'] + '. ' + '; '.join(approval['reasons']))

@@ -555,9 +555,16 @@ class PreparationWorkflowTests(HistoryFixture):
         calls = []
         original_session = review.session
         original_validate = review.validate
+        reference_attempts = []
         def validate_fixture(*args, **kwargs):
-            kwargs['sandbox'] = EvaluationRunner()
-            return original_validate(*args, **kwargs)
+            runner = EvaluationRunner()
+            if args[1] == 'example' and kwargs.get('future_commit'):
+                if not reference_attempts:
+                    runner = EvaluationRunner(mode='command-error')
+                result = original_validate(*args, **(kwargs | {'sandbox': runner}))
+                reference_attempts.append(result['report']['verdict'])
+                return result
+            return original_validate(*args, **(kwargs | {'sandbox': runner}))
         def private(store, tid, **kwargs):
             self.assertEqual(kwargs['adapter'].model, 'prep-selected')
             self.assertEqual(kwargs['adapter'].effort, 'ultra')
@@ -578,7 +585,15 @@ class PreparationWorkflowTests(HistoryFixture):
              patch('mineval.workflows.review.session', side_effect=private), \
              patch('mineval.workflows.review.validate', side_effect=validate_fixture), \
              patch('mineval.workflows.DockerSandbox', return_value=FakeRunner([step()])):
+            example_job = next(j['id'] for j in flow.jobs() if j['task'] == 'example')
+            flow.work(job_id=example_job)
+            self.assertEqual(reference_attempts, ['error'])
+            self.assertEqual(calls, ['extraction'])
+            self.assertEqual(next(j['state'] for j in flow.jobs() if j['id'] == example_job), 'failed')
+            flow.retry(example_job)
+            flow.work(job_id=example_job)
             flow.work()
+        self.assertEqual(reference_attempts, ['error', 'pass'])
         self.assertEqual(calls, ['extraction', 'review', 'extraction', 'review'])
         self.assertEqual({j['task']: j['state'] for j in flow.jobs()},
                          {'example': 'completed', 'rejected-task': 'failed'})
@@ -589,6 +604,12 @@ class PreparationWorkflowTests(HistoryFixture):
         self.assertFalse((frozen / 'tests/test_answer.py').exists())
         self.assertTrue((frozen / 'private/verification/extraction-manifest.json').exists())
         self.assertEqual(flow.eval_config('example', state['version'])['commands'][0]['name'], 'private')
+        validations = frozen / 'private/validations'
+        receipt = read_json(frozen / 'approval.json')['inputs']
+        self.assertEqual(set(receipt['validation']), set(receipt['validation_selection'].values()))
+        unselected = {path.name for path in validations.iterdir()} - set(receipt['validation'])
+        self.assertEqual(len(unselected), 1)
+        self.assertEqual(read_json(validations / unselected.pop() / 'validation.json')['report']['verdict'], 'error')
         failed = next(j for j in flow.jobs() if j['task'] == 'rejected-task')
         flow.retry(failed['id'])
         def approved(store, tid, **kwargs):

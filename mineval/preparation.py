@@ -492,8 +492,8 @@ class Store:
             validations = task / 'private/validations' / approval['inputs']['extraction_id']
             if validations.exists():
                 copy_tree(validations, staged / 'private/validations')
-            # The independent review attests to these exact validation receipts.
-            # Pin their common configuration for all future attempts.
+            # Use the exact validation receipts the independent reviewer saw
+            # to check eligibility and pin the evaluation configuration.
             reviewed = [read_json(validations / key / 'validation.json')
                         for key in approval['inputs']['validation']]
             base_checks = [item for item in reviewed if item.get('state') == 'cleaned-base']

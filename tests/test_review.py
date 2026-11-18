@@ -33,12 +33,13 @@ class ReviewTests(HistoryFixture):
         return session(self.store, 'example', stage='extraction', command=['fake-extractor'],
                        sandbox=ReportAgent('selection.json', selection))
 
-    def review_extraction(self, extraction_id, verdict='approve', reasons=None):
+    def review_extraction(self, extraction_id, verdict='approve', reasons=None, *, validation_selection=None):
         response = report(self.review) | {'verdict': verdict}
         if reasons:
             response['reasons'] = reasons
         return session(self.store, 'example', stage='review', extraction_id=extraction_id,
-                       command=['fake-reviewer'], sandbox=ReportAgent('review.json', response))
+                       command=['fake-reviewer'], sandbox=ReportAgent('review.json', response),
+                       validation_selection=validation_selection)
 
     def test_private_agent_copies_cannot_change_draft_or_selected_original_bytes(self):
         before = inventory(self.workspace)
@@ -268,6 +269,53 @@ class ReviewTests(HistoryFixture):
         approval = self.review_extraction(extraction)
         frozen = self.store.finalize('example', review_id=approval['review_id'])
         self.assertTrue((self.store.task('example') / 'versions' / frozen['version'] / 'private/validations').exists())
+
+    def test_selected_review_pins_validation_receipts_across_later_runs(self):
+        from test_evaluation import EvaluationRunner
+        extraction, config = self.behavioral_checks()
+        base = validate(self.store, 'example', extraction, config, sandbox=EvaluationRunner())
+        failed = validate(self.store, 'example', extraction, config, future_commit=self.head,
+                          sandbox=EvaluationRunner(mode='command-error'))
+        reference = validate(self.store, 'example', extraction, config, future_commit=self.head,
+                             sandbox=EvaluationRunner())
+        selection = {'base': base['validation_id'], 'reference': reference['validation_id']}
+        marker = self.workspace / 'temporary.txt'
+        marker.write_text('Different validation workspace')
+        previous_base = validate(self.store, 'example', extraction, config, sandbox=EvaluationRunner())
+        marker.unlink()
+        with self.assertRaisesRegex(ValueError, 'did not run on the current cleaned base'):
+            self.review_extraction(extraction, validation_selection=selection | {'base': previous_base['validation_id']})
+        with self.assertRaisesRegex(ValueError, 'Selected reference validation does not match'):
+            self.review_extraction(extraction, validation_selection=selection | {'reference': base['validation_id']})
+
+        class SelectedAgent(ReportAgent):
+            @contextmanager
+            def container(agent_self, spec):
+                index = read_json(spec.workspace / 'evidence-index.json')
+                self.assertEqual({Path(item['record']).parent.name for item in index['validations']},
+                                 set(selection.values()))
+                with super().container(spec) as agent:
+                    yield agent
+
+        approval = session(self.store, 'example', stage='review', extraction_id=extraction,
+                           validation_selection=selection, command=['review'],
+                           sandbox=SelectedAgent('review.json', report(self.review)))
+        later = validate(self.store, 'example', extraction, config, future_commit=self.head,
+                         sandbox=EvaluationRunner(mode='timeout'))
+        version = self.store.finalize('example', review_id=approval['review_id'])['version']
+        task = self.store.task('example')
+        frozen = task / 'versions' / version
+        receipts = read_json(frozen / 'approval.json')['inputs']['validation']
+        self.assertEqual(set(receipts), set(selection.values()))
+        history = frozen / 'private/validations'
+        self.assertEqual({path.name for path in history.iterdir()},
+                         set(selection.values()) |
+                         {failed['validation_id'], later['validation_id'], previous_base['validation_id']})
+        selected_record = task / 'private/validations' / extraction / selection['reference'] / 'validation.json'
+        selected_record.chmod(0o644)
+        selected_record.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+            self.store.finalize('example', review_id=approval['review_id'])
 
     def test_validation_executes_fixed_checks_without_evaluator_inputs(self):
         from test_evaluation import EvaluationRunner
