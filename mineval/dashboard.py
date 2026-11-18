@@ -290,6 +290,8 @@ def overview(pages):
 
 
 def jobs(pages, query=None):
+    from .remote_dispatch import pending_grade
+
     pages.active = 'jobs'
     query = query or {}
     if not pages.workflows:
@@ -313,8 +315,14 @@ def jobs(pages, query=None):
             detail += form(pages, 'cancel', hidden('job', job['id']) + '<button>Cancel VPS job</button>')
         detail += '<details><summary>Queued agent configuration</summary>' + pretty(p.get('model_settings', {'note': 'Legacy job resolves defaults when executed'})) + '</details>'
         refs = pages.task_link(tid)
+        grade = pending_grade(pages.store, job)
         for field, route in (('run_id', 'runs'), ('evaluation_id', 'evaluations')):
-            if (pages.store.task(tid) / route / (p[field] + '.json')).exists():
+            if route == 'evaluations' and grade is not None:
+                refs += '<br>Evaluation ' + esc(grade['evaluation_id']) + ' · ' + status(grade['verdict'])
+                refs += '<br><small>VPS evidence pending</small>'
+                continue
+            path = pages.store.task(tid) / route / (p[field] + '.json')
+            if path.exists() and path.with_suffix('.sha256').exists():
                 refs += '<br>' + pages.link(field.removesuffix('_id'), 'tasks', tid, route, p[field])
                 if route == 'evaluations':
                     assessment = pages.store._inspect_record(tid, 'evaluations', p[field])

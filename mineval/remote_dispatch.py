@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from .artifacts import digest, inventory, lock, read_json, write_json
 from .remote import RemoteError, SSHClient
-from .remote_protocol import grade_snapshot
+from .remote_protocol import GRADE_FORMAT, grade_snapshot
 from .preparation import identifier
 from . import transfer
 
@@ -23,7 +23,8 @@ CHUNK_SIZE = 512 * 1024
 
 def export_identity(state):
     payload = state.get('payload', {})
-    return (state.get('state'), state.get('updated'), payload.get('run_id'), payload.get('evaluation_id'))
+    grade_format = state.get('grade_format') if state.get('state') == 'graded' else None
+    return (state.get('state'), state.get('updated'), grade_format, payload.get('run_id'), payload.get('evaluation_id'))
 
 
 def upload_resumable(client, jid, directory):
@@ -127,6 +128,8 @@ def fetch_resumable(client, jid, directory, state=None, *, known_inventory=None,
     else:
         action = 'fetch-grade-start' if state is not None and state.get('state') == 'graded' else 'fetch-start'
         request = {'action': action, 'job_id': jid}
+        if action == 'fetch-grade-start':
+            request['grade_format'] = GRADE_FORMAT
         if known_inventory is not None:
             known = known_inventory()
             # The worker caps requests at 16 MiB. Fall back to a full export.
@@ -196,6 +199,31 @@ def outbox(workflow, job):
     return final
 
 
+def _grade_for_job(path, job):
+    if not path.is_file():
+        return None
+    grade = read_json(path)
+    snapshot = grade['snapshot']
+    payload = job['payload']
+    if snapshot['id'] == job['id'] and all(snapshot['payload'][key] == payload.get(key)
+            for key in ('run_id', 'evaluation_id', 'revision', 'configuration')):
+        return grade
+
+
+def pending_grade(store, job):
+    """Return the published verdict while the immutable assessment is in transit."""
+    payload = job['payload']
+    if job['kind'] != 'benchmark' or payload.get('execution_host') != 'vps':
+        return None
+    task, evaluation_id = identifier(job['task']), identifier(payload['evaluation_id'])
+    assessment = store.task(task) / 'evaluations' / f'{evaluation_id}.sha256'
+    if not assessment.exists():
+        path = store.root / 'remote-outbox' / identifier(job['id']) / 'synced-grade-summary.json'
+        grade = _grade_for_job(path, job)
+        if grade is not None:
+            return {'evaluation_id': evaluation_id, 'verdict': grade['summary']['verdict'], 'evidence_pending': True}
+
+
 def run_job(workflow, job, stop, refresh_export=False, *, schedule_review=None):
     client = SSHClient(workflow.settings['vps']['host'])
     client.stop_event = stop
@@ -213,10 +241,12 @@ def run_job(workflow, job, stop, refresh_export=False, *, schedule_review=None):
         return
     if not refresh_export:
         workflow.update(jid, state='running', stage='connecting to VPS', detail='')
+    grade_checkpoint = directory / 'synced-grade-summary.json'
+    status_request = {'action': 'status', 'job_id': jid, 'grade_format': GRADE_FORMAT}
     while not stop.is_set():
         try:
             try:
-                state = client.request({'action': 'status', 'job_id': jid})
+                state = client.request(status_request)
             except RemoteError as exc:
                 if transport_only or exc.code != 'FileNotFoundError':
                     raise
@@ -228,13 +258,13 @@ def run_job(workflow, job, stop, refresh_export=False, *, schedule_review=None):
                 upload_resumable(client, jid, directory)
                 continue
             active = state['state'] in ('queued', 'running')
-            grade = grade_snapshot(state) if active and state.get('grade_ready') else None
-            grade_checkpoint = directory / 'synced-grade.json'
-            grade_synced = grade is not None and grade_checkpoint.exists() and read_json(grade_checkpoint) == grade
-            if active and (grade is None or grade_synced):
-                if (grade_synced and schedule_review is not None and
-                        not read_json(directory / 'input/settings.json').get('architecture_review')):
-                    schedule_review(job | {'payload': grade['payload']})
+            result_job = job | {'payload': state.get('payload', job['payload'])}
+            saved_grade = _grade_for_job(grade_checkpoint, result_job)
+            grade = None
+            if (not transport_only and saved_grade is None and state.get('grade_ready')
+                    and state.get('grade_format') == GRADE_FORMAT):
+                grade = grade_snapshot(state)
+            if active and grade is None:
                 workflow.update(jid, stage='VPS: ' + state.get('stage', state['state']), detail=state.get('detail', ''))
                 stop.wait(5)
                 continue
@@ -245,19 +275,21 @@ def run_job(workflow, job, stop, refresh_export=False, *, schedule_review=None):
             workflow.update(jid, stage=stage, detail='Resuming verified export.')
             refreshing = refresh_export
             refresh_export = False
-            result, downloaded = fetch_resumable(client, jid, directory, grade or state,
-                known_inventory=lambda: transfer.local_inventory(workflow.store, job['task'], jid),
+            download_dir = directory / 'grade-download' if grade else directory
+            if grade:
+                download_dir.mkdir(exist_ok=True, mode=0o700)
+            result, downloaded = fetch_resumable(client, jid, download_dir, grade or state,
+                known_inventory=None if grade else lambda: transfer.local_inventory(workflow.store, job['task'], jid),
                 refresh_export=refreshing)
-            latest = client.request({'action': 'status', 'job_id': jid})
-            if grade is not None:
-                latest = grade_snapshot(latest) or {}
-            if export_identity(latest) != export_identity(result['state']):
-                (directory / 'download.json').unlink(missing_ok=True)
+            latest = client.request(status_request)
+            if (grade_snapshot(latest) != result['state'] if grade else
+                    export_identity(latest) != export_identity(result['state'])):
+                (download_dir / 'download.json').unlink(missing_ok=True)
                 downloaded.unlink(missing_ok=True)
                 continue
             state = result['state']
             result_job = job | {'payload': state.get('payload', job['payload'])}
-            imported_grade = False
+            imported_evaluation = False
             with tempfile.TemporaryDirectory(dir=workflow.store.root) as temp:
                 temp = Path(temp)
                 archive, receipt = temp / 'output.tar.gz', temp / 'receipt.json'
@@ -265,7 +297,7 @@ def run_job(workflow, job, stop, refresh_export=False, *, schedule_review=None):
                 shutil.copyfile(downloaded, archive)
                 write_json(receipt, result['receipt'])
                 verified = transfer.verify(archive, receipt, temp / 'data')
-                if 'delta' in result:
+                if 'delta' in result and not grade:
                     transfer.reconstruct_delta(temp / 'data', result['delta'], verified, workflow.store, job['task'], jid)
                 receipts = directory / 'receipts'
                 receipts.mkdir(exist_ok=True, mode=0o700)
@@ -285,7 +317,15 @@ def run_job(workflow, job, stop, refresh_export=False, *, schedule_review=None):
                 else:
                     write_json(descriptor_path, result)
                     descriptor_path.chmod(0o444)
-                if job['kind'] == 'prepare':
+                if grade:
+                    if (result['state'] != grade or grade['id'] != jid or 'delta' in result
+                            or any(grade['payload'].get(key) != job['payload'].get(key)
+                                   for key in ('revision', 'configuration'))):
+                        raise ValueError('Remote grade does not match the queued benchmark')
+                    summary = transfer.verify_grade(temp / 'data', verified, result_job)
+                    workflow.update(jid, payload=grade['payload'])
+                    write_json(grade_checkpoint, {'summary': summary, 'snapshot': grade})
+                elif job['kind'] == 'prepare':
                     checkpoint = directory / 'synced-baseline.json'
                     baseline = read_json(checkpoint if checkpoint.exists() else directory / 'input/baseline.json')
                     transfer.import_preparation(workflow.store, temp / 'data', job, baseline)
@@ -293,14 +333,15 @@ def run_job(workflow, job, stop, refresh_export=False, *, schedule_review=None):
                                             'draft': inventory(temp / 'data/drafts' / job['task'])})
                 elif job['kind'] == 'benchmark':
                     run = temp / 'data/tasks' / job['task'] / 'runs' / (result_job['payload']['run_id'] + '.json')
-                    if run.exists():
-                        transfer.import_benchmark(workflow.store, temp / 'data', result_job)
+                    if run.exists() or saved_grade is not None:
+                        transfer.import_benchmark(workflow.store, temp / 'data', result_job,
+                                                  grade=saved_grade['summary'] if saved_grade else None)
                         evaluation_id = state.get('payload', job['payload'])['evaluation_id']
                         evaluation_path = workflow.store.task(job['task']) / 'evaluations' / (evaluation_id + '.json')
                         if evaluation_path.exists():
                             from .memory import Memory, evaluation_source, record_evaluation
                             record_evaluation(workflow.store, job['task'], evaluation_id)
-                            imported_grade = True
+                            imported_evaluation = True
                             observations = temp / 'data/observations.json'
                             if observations.exists():
                                 model, source, _ = evaluation_source(workflow.store, job['task'], evaluation_id)
@@ -334,20 +375,14 @@ def run_job(workflow, job, stop, refresh_export=False, *, schedule_review=None):
                             finally:
                                 if os.path.exists(name):
                                     os.unlink(name)
-            if grade is not None:
-                if not imported_grade:
-                    raise ValueError('Remote grade export is missing its evaluation')
-                workflow.update(jid, payload=grade['payload'])
-                write_json(grade_checkpoint, grade)
-            if (imported_grade and schedule_review is not None and
-                    (grade is None or not read_json(directory / 'input/settings.json').get('architecture_review'))):
+            if imported_evaluation and schedule_review is not None:
                 schedule_review(result_job)
             try:
                 client.request({'action': 'fetch-delete', 'job_id': jid, 'token': result['token']})
             except RemoteError:
                 pass  # Expiration removes abandoned exports.
             downloaded.unlink(missing_ok=True)
-            (directory / 'download.json').unlink(missing_ok=True)
+            (download_dir / 'download.json').unlink(missing_ok=True)
             if grade is not None:
                 continue
             workflow.update(jid, state=state['state'], stage=state.get('stage', state['state']),

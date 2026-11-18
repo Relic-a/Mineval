@@ -374,14 +374,18 @@ class DispatchTests(HistoryFixture):
         self.assertEqual(info['token'], 'export1')
         self.assertEqual(partial.read_bytes(), content)
 
-    def test_remote_dispatch_imports_grade_before_terminal_state(self):
+    def test_remote_dispatch_publishes_grade_before_downloading_full_evidence(self):
+        import subprocess
+        import sys
+        import threading
         from unittest.mock import patch
         from mineval import remote_api, remote_coordinator, remote_dispatch
+        from mineval.observation import Pages
         from mineval.workflows import Workflows
-        import threading
         self.fixture_generated_cases = True
         self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
-            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+            'commands': [{'name': 'setup-output', 'kind': 'setup', 'argv': ['python3', '-c', 'print("x" * 262144)']},
+                         {'name': 'answer-regression', 'kind': 'tests',
                           'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}
         version = self.freeze('example', self.review)['version']
         revision = self.store.inspect_revision('example', version)
@@ -405,34 +409,45 @@ class DispatchTests(HistoryFixture):
         remote.mkdir()
         (remote / 'settings.json').write_text(json.dumps({'resources': {'admission_interval_seconds': 0.01}}))
         threads = []
-        architecture_started = threading.Event()
-        terminal_imported = threading.Event()
         grade_tokens = set()
+        grade_downloaded = threading.Event()
         case = self
         class Client:
             submissions = 0
             def __init__(self, host): pass
             def request(self, request, timeout=60):
                 try:
+                    if request['action'] == 'fetch-start':
+                        case.assertTrue(grade_downloaded.is_set())
+                        record.assert_not_called()
                     result = remote_api.dispatch(remote, request)
                     if request['action'] == 'upload-finish' and not Client.submissions:
                         Client.submissions += 1
                         from mineval.remote import RemoteError
                         raise RemoteError('connection lost after submission')
-                    # Hold terminal delivery until dispatch observes the sealed grade.
-                    if (request['action'] == 'status' and result.get('grade_ready')
-                            and not architecture_started.is_set()):
-                        return result | {'state': 'running', 'stage': 'finalizing evidence'}
+                    # Exercise a job that reached its terminal state between polls.
+                    if request['action'] == 'status' and result.get('grade_ready'):
+                        threads[0].join(timeout=20)
+                        result = remote_api.dispatch(remote, request)
+                        case.assertEqual(result['state'], 'completed')
                     if request['action'] == 'fetch-grade-start':
                         grade_tokens.add(result['token'])
-                    if request['action'] == 'fetch-delete':
-                        if request['token'] in grade_tokens:
-                            imported = flow.store.inspect_evaluation('example', 'dispatch-eval')
-                            case.assertEqual((imported['run_id'], imported['verdict']), ('dispatch-run', 'pass'))
-                            local_job = next(j for j in flow.jobs() if j['id'] == 'job1')
-                            case.assertEqual(local_job['state'], 'running')
-                        else:
-                            terminal_imported.set()
+                        case.assertNotIn('known_inventory', request)
+                    if request['action'] == 'fetch-delete' and request['token'] in grade_tokens:
+                        local_job = next(j for j in flow.jobs() if j['id'] == 'job1')
+                        case.assertEqual(local_job['state'], 'running')
+                        case.assertEqual(remote_dispatch.pending_grade(flow.store, local_job),
+                            {'evaluation_id': 'dispatch-eval', 'verdict': 'pass', 'evidence_pending': True})
+                        activity = Pages(flow.store, workflows=flow).render('/jobs')
+                        case.assertIn('Evaluation dispatch-eval · <span class="status pass">pass</span>', activity)
+                        case.assertIn('VPS evidence pending', activity)
+                        jobs = json.loads(subprocess.check_output([
+                            sys.executable, '-m', 'mineval', '--data', str(flow.store.root), 'workflow', 'list']))
+                        case.assertEqual(next(j for j in jobs if j['id'] == 'job1')['grade']['verdict'], 'pass')
+                        case.assertFalse((flow.store.task('example') / 'run-outputs/dispatch-run').exists())
+                        case.assertFalse((flow.store.task('example') / 'evaluation-evidence/dispatch-eval').exists())
+                        record.assert_not_called()
+                        grade_downloaded.set()
                     return result
                 except FileNotFoundError:
                     from mineval.remote import RemoteError
@@ -444,6 +459,8 @@ class DispatchTests(HistoryFixture):
             threads.append(thread)
             thread.start()
         from contextlib import contextmanager
+        import os
+        changed_file = 'def answer(): return 42\n# ' + os.urandom(256 * 1024).hex() + '\n'
         class Candidate(SimulatedDocker):
             @contextmanager
             def container(self, spec):
@@ -451,7 +468,7 @@ class DispatchTests(HistoryFixture):
                     start = container.start.side_effect
                     def solve():
                         start()
-                        (spec.workspace / 'app.py').write_text('def answer(): return 42\n')
+                        (spec.workspace / 'app.py').write_text(changed_file)
                     container.start.side_effect = solve
                     yield container
         run_benchmark = Workflows.benchmark
@@ -472,8 +489,7 @@ class DispatchTests(HistoryFixture):
         def record_architecture(store, task, run_id, **options):
             self.assertEqual((store, task, run_id), (self.store, 'example', 'dispatch-run'))
             self.assertEqual(store.inspect_evaluation(task, 'dispatch-eval')['run_id'], run_id)
-            architecture_started.set()
-            self.assertTrue(terminal_imported.wait(20))
+            self.assertTrue((store.task(task) / 'run-outputs/dispatch-run/agent/workspace.tar.gz').is_file())
         with patch('mineval.remote_dispatch.SSHClient', Client), \
                 patch('mineval.architecture.record', side_effect=record_architecture) as record, \
                 patch('mineval.architecture.compare') as compare, \
@@ -487,16 +503,18 @@ class DispatchTests(HistoryFixture):
         self.assertTrue(list((self.store.root / 'remote-outbox/job1/receipts').glob('*.json')))
         descriptors = list((self.store.root / 'remote-outbox/job1/export-descriptors').glob('*.json'))
         self.assertEqual(len(descriptors), 2)
+        exports = {}
         for path in descriptors:
             descriptor = json.loads(path.read_text())
-            self.assertIn('full_inventory', descriptor['delta'])
+            exports[descriptor['state']['state']] = descriptor
             self.assertIn('archive_sha256', descriptor['receipt'])
             self.assertEqual(path.stat().st_mode & 0o222, 0)
-            files = descriptor['delta']['full_inventory']
-            if descriptor['state']['state'] == 'graded':
-                self.assertTrue(all(name.startswith('tasks/example/') for name in files))
-            else:
-                self.assertIn('observations.json', files)
+        self.assertEqual(set(exports['graded']['receipt']['files']), {'grade.json'})
+        self.assertLess(exports['graded']['size'], 1024)
+        self.assertGreater(exports['completed']['size'], 256 * 1024)
+        self.assertIn('observations.json', exports['completed']['delta']['full_inventory'])
+        self.assertIn('tasks/example/run-outputs/dispatch-run/agent/workspace.tar.gz',
+                      exports['completed']['receipt']['files'])
         record.assert_called_once()
         compare.assert_called_once()
         worker_settings = remote / 'jobs/job1/input/settings.json'
@@ -504,10 +522,20 @@ class DispatchTests(HistoryFixture):
         self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
         self.assertEqual(self.store.inspect_run('example', 'local-run')['status'], 'completed')
         self.assertEqual(self.store.inspect_run('example', 'dispatch-run')['status'], 'completed')
-        self.assertEqual(self.store.inspect_evaluation('example', 'dispatch-eval')['run_id'], 'dispatch-run')
+        assessment = self.store.inspect_evaluation('example', 'dispatch-eval')
+        self.assertEqual(assessment['run_id'], 'dispatch-run')
+        self.assertEqual(assessment['commands'][0]['stdout'], 'x' * 262144 + '\n')
+        self.assertNotIn('VPS evidence pending', Pages(self.store, workflows=flow).render('/jobs'))
         self.assertCountEqual([item['event_key'] for item in Memory(self.store).history('test-model')],
                               ['evaluation:example:dispatch-eval', 'evaluation:example:local-eval'])
         self.assertTrue(list((self.store.root / 'resource-usage').glob('job1-*.json')))
+        checkpoint = self.store.root / 'remote-outbox/job1/synced-grade-summary.json'
+        published = json.loads(checkpoint.read_text())
+        remote_data = remote / 'jobs/job1/input/data'
+        imported_job = next(j for j in flow.jobs() if j['id'] == 'job1')
+        with self.assertRaisesRegex(ValueError, 'disagrees with the published grade'):
+            transfer.import_benchmark(self.store, remote_data, imported_job,
+                                      grade=published['summary'] | {'verdict': 'fail'})
 
 
 class RetryTests(HistoryFixture):

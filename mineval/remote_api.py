@@ -15,23 +15,7 @@ from .agents import provision_auth
 from .artifacts import read_json, write_json, lock, digest
 from .preparation import identifier
 from . import remote_worker, remote_coordinator, transfer
-from .remote_protocol import grade_snapshot
-
-
-def _copy_grade(data, selected, task, payload):
-    """Stage only sealed artifacts for the current run and evaluation."""
-    source, target = data / 'tasks' / task, selected / 'tasks' / task
-    version = identifier(payload['revision']['version'])
-    run_id = identifier(payload['run_id'])
-    evaluation_id = identifier(payload['evaluation_id'])
-    for name in ('metadata.json', 'status.json', f'runs/{run_id}.json', f'runs/{run_id}.sha256',
-                 f'evaluations/{evaluation_id}.json', f'evaluations/{evaluation_id}.sha256'):
-        path = target / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source / name, path, follow_symlinks=False)
-    for name in (f'versions/{version}', f'evaluation-evidence/{evaluation_id}', f'run-outputs/{run_id}'):
-        if (source / name).exists():
-            shutil.copytree(source / name, target / name, symlinks=True)
+from .remote_protocol import GRADE_FORMAT, grade_snapshot
 
 
 def dispatch(root, request):
@@ -74,8 +58,10 @@ def dispatch(root, request):
         if job['state'] in ('queued', 'running'):
             remote_coordinator.ensure_running(root)
         state = {key: job[key] for key in ('id', 'state', 'stage', 'detail', 'payload', 'updated')}
-        if job['kind'] == 'benchmark' and grade_snapshot(state) is not None:
+        if (request.get('grade_format') == GRADE_FORMAT and job['kind'] == 'benchmark'
+                and grade_snapshot(state) is not None):
             state['grade_ready'] = True
+            state['grade_format'] = GRADE_FORMAT
         return state
     if action == 'retry':
         coordinator = remote_coordinator.Coordinator(root)
@@ -151,7 +137,7 @@ def dispatch(root, request):
             chunk = stream.read(size)
         return {'offset': offset, 'total': total, 'data': base64.b64encode(chunk).decode()}
     if action in ('fetch', 'fetch-start', 'fetch-grade-start'):
-        state = dispatch(root, {'action': 'status', 'job_id': job_id})
+        state = dispatch(root, {'action': 'status', 'job_id': job_id, 'grade_format': request.get('grade_format')})
         grade_only = action == 'fetch-grade-start'
         if grade_only:
             snapshot = grade_snapshot(state) if state.get('grade_ready') else None
@@ -169,7 +155,7 @@ def dispatch(root, request):
             selected = Path(temp) / 'selected'
             selected.mkdir(mode=0o700)
             if grade_only:
-                _copy_grade(data, selected, task, job['payload'])
+                write_json(selected / 'grade.json', transfer.grade_summary(data, job))
             else:
                 for namespace in ('tasks', 'drafts'):
                     source = data / namespace / task
@@ -192,7 +178,7 @@ def dispatch(root, request):
                                 if item['event_key'] == key]
                 write_json(selected / 'observations.json', observations)
             delta = None
-            if action != 'fetch' and 'known_inventory' in request:
+            if not grade_only and action != 'fetch' and 'known_inventory' in request:
                 delta = transfer.create_delta(selected, archive, receipt, request['known_inventory'], task)
             else:
                 transfer.create(selected, archive, receipt)

@@ -159,7 +159,46 @@ def _architecture_items(task_path, run):
             yield comparisons, directory.name
 
 
-def import_benchmark(store, incoming, job):
+def grade_summary(data, job):
+    """Project a sealed evaluation into a verdict and the record hashes it binds."""
+    from .preparation import Store, identifier
+    from .workflows import matches
+
+    task, payload = identifier(job['task']), job['payload']
+    source = Store(data)
+    run = source._inspect_record(task, 'runs', payload['run_id'])
+    assessed = source._inspect_record(task, 'evaluations', payload['evaluation_id'])
+    base = source.task(task)
+    run_sha = read_json(base / 'runs' / (payload['run_id'] + '.sha256'))['sha256']
+    evaluation_sha = read_json(base / 'evaluations' / (payload['evaluation_id'] + '.sha256'))['sha256']
+    if (not matches(run, payload['revision'], payload['configuration'])
+            or run['task_id'] != task or run['run_id'] != payload['run_id']
+            or assessed['schema_version'] != 2 or assessed['status'] != 'completed'
+            or assessed['task_id'] != task or assessed['run_id'] != payload['run_id']
+            or assessed['evaluation_id'] != payload['evaluation_id']
+            or assessed['prepared_revision'] != payload['revision']
+            or assessed['run_sha256'] != run_sha):
+        raise ValueError('Remote grade identity mismatch')
+    return {'task_id': task, 'run_id': run['run_id'], 'evaluation_id': assessed['evaluation_id'],
+            'verdict': assessed['verdict'], 'run_sha256': run_sha, 'evaluation_sha256': evaluation_sha}
+
+
+def verify_grade(incoming, receipt, job):
+    files = validate_inventory(receipt['files'])
+    if set(files) != {'grade.json'} or 'sha256' not in files['grade.json']:
+        raise ValueError('Unexpected files in remote grade export')
+    grade = read_json(Path(incoming) / 'grade.json')
+    identities = {key: job['payload'][key] for key in ('run_id', 'evaluation_id')} | {'task_id': job['task']}
+    hashes = ('run_sha256', 'evaluation_sha256')
+    if (set(grade) != set(identities) | set(hashes) | {'verdict'}
+            or any(grade[key] != value for key, value in identities.items())
+            or any(not isinstance(grade[key], str) or not re.fullmatch(r'[0-9a-f]{64}', grade[key]) for key in hashes)
+            or grade['verdict'] not in ('pass', 'fail', 'inconclusive', 'error')):
+        raise ValueError('Remote grade identity mismatch')
+    return grade
+
+
+def import_benchmark(store, incoming, job, *, grade=None):
     """Validate and import a remote attempt without replacing local evidence.
 
     Existing identical artifacts make a repeated import idempotent; any differing
@@ -180,10 +219,16 @@ def import_benchmark(store, incoming, job):
                 not matches(run, payload['revision'], payload['configuration'])):
             raise ValueError('Remote attempt identity mismatch')
         evaluation_path = source.task(task) / 'evaluations' / (evaluation_id + '.json')
+        if grade is not None and (not evaluation_path.exists() or
+                read_json(evaluation_path.with_suffix('.sha256'))['sha256'] != grade['evaluation_sha256']):
+            raise ValueError('Remote evidence disagrees with the published grade')
         if evaluation_path.exists():
             assessed = evaluation.inspect(source, task, evaluation_id)
             if assessed['run_id'] != run_id:
                 raise ValueError('Remote evaluation identity mismatch')
+            if grade is not None and (assessed['run_sha256'] != grade['run_sha256']
+                                      or assessed['verdict'] != grade['verdict']):
+                raise ValueError('Remote evidence disagrees with the published grade')
         items = [('run-outputs', run_id), ('runs', run_id + '.json'), ('runs', run_id + '.sha256')]
         if evaluation_path.exists():
             items += [('evaluation-evidence', evaluation_id), ('evaluations', evaluation_id + '.json'),

@@ -320,7 +320,12 @@ def _main(argv: list[str] | None = None) -> int:
                     definition = read_json(args.definition)
                     result = flow.enqueue(**definition)
                 elif args.workflow_action == 'list':
+                    from .remote_dispatch import pending_grade
                     result = flow.jobs()
+                    for job in result:
+                        grade = pending_grade(store, job)
+                        if grade is not None:
+                            job['grade'] = grade
                 elif args.workflow_action == 'retry':
                     result = flow.retry(args.job_id, new_attempt=args.new_attempt, reevaluate=args.reevaluate)
                 elif args.workflow_action == 'prepare-all':

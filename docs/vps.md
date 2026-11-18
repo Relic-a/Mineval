@@ -45,12 +45,13 @@ are recreated on the next download. Retrying a failed job is explicit. The worke
 holds private task data and job evidence until manually removed; retain it while
 reconciliation may still be necessary.
 
-When the VPS seals a functional grade, Mineval can import it into Activity before
-the VPS job finishes. The final import brings back resource usage and any saved
-legacy observations. With `architecture_review`
-enabled, the local worker reviews the imported attempt against available
-architecture records for the same revision. This review runs separately from
-grade delivery. Early grades require the current package on both hosts.
+When the VPS seals a functional grade, Activity and `mineval workflow list`
+show the verified verdict while the full evidence is in transit. The grade
+transfer contains only the verdict, record IDs, and record hashes.
+The final import verifies those hashes and brings back the saved
+workspace, evaluation artifacts, resource usage and any legacy observations.
+With `architecture_review` enabled, local review starts after the evidence
+arrives. Early grades require the current package on both hosts.
 
 ## Target host prerequisites
 
