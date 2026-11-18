@@ -10,10 +10,10 @@ Historical benchmarks let you compare models on the same real starting state, wi
 future regression checks kept private. Runs and evaluations retain immutable provenance.
 
 Start with [installation and setup](docs/installation.md). The
-[0.2.0a1 alpha release](https://github.com/Relic-a/Mineval/releases/tag/v0.2.0a1)
+[0.3.0a1 alpha release](https://github.com/Relic-a/Mineval/releases/tag/v0.3a)
 provides Python wheel and source packages. Standalone executable publication is blocked
 by GitHub's attestation restriction for user-owned private repositories. This is an early
-testing release. Two frozen Gretel tasks completed paid end-to-end VPS workflows
+testing release. In 0.2.0a1, two frozen Gretel tasks completed paid end-to-end VPS workflows
 for GPT-6 Luna medium and GPT-6.1 Terra medium; see the [validation details](docs/release-validation.md#020a1-vps-validation).
 Fresh-host acceptance remains unverified.
 
