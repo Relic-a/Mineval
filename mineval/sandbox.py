@@ -1,9 +1,10 @@
 """Rootless Docker lifecycle, with explicit managed workspace mounts and no pulls."""
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import replace, dataclass, field
 import json
 import math
+import re
 from pathlib import Path
 import shutil
 from . import processes as subprocess
@@ -52,8 +53,16 @@ class SandboxSpec:
     inputs: Path | None = None
     retain_logs: bool = True
     readonly_paths: tuple[str, ...] = ()
+    services: tuple[dict, ...] = ()
+    environment: dict[str, str] = field(default_factory=dict)
+    service_network: str | None = None
 
     def __post_init__(self) -> None:
+        if self.services:
+            from .service_dependencies import validate
+            validate(self.services)
+        if self.service_network and not re.fullmatch(r'mineval-[0-9a-f]{32}', self.service_network):
+            raise ValueError('Invalid service network')
         if self.network not in ("none", "bridge"):
             raise ValueError("network must be none or bridge")
         if not self.workdir.startswith("/workspace") or ".." in self.workdir.split("/") or (self.workdir != "/workspace" and not self.workdir.startswith("/workspace/")):
@@ -363,6 +372,13 @@ class DockerSandbox:
     @contextmanager
     def container(self, spec: SandboxSpec) -> Iterator[Container]:
         self.check()
+        if spec.services:
+            from .service_dependencies import group
+            with group(self, spec) as (network, service_images):
+                with self.container(replace(spec, services=(), service_network=network)) as container:
+                    container.service_images = service_images
+                    yield container
+            return
         image = self.image(spec.image)
         if self.dependency_cache is not None and spec.workspace is not None:
             labels = image.get('Config', {}).get('Labels') or {}
@@ -437,7 +453,7 @@ class DockerSandbox:
         name = "mineval-" + uuid4().hex
         limits = spec.limits
         args = ["create", "--name", name, "--label", "io.mineval.managed=true",
-                "--pull=never", "--user=0:0", f"--network={spec.network}", "--read-only", "--cap-drop=ALL",
+                "--pull=never", "--user=0:0", f"--network={spec.service_network or spec.network}", "--read-only", "--cap-drop=ALL",
                 "--security-opt=no-new-privileges=true", "--init",
                 "--restart=no", "--no-healthcheck", "--memory", f"{limits.memory_mb}m",
                 "--memory-swap", f"{limits.memory_mb}m", "--cpus", str(limits.cpus),
@@ -447,6 +463,8 @@ class DockerSandbox:
                 "--log-driver=local", "--log-opt=max-size=5m", "--log-opt=max-file=1",
                 "--log-opt=compress=false",
                 "--entrypoint", spec.command[0], image_id, *spec.command[1:]]
+        position = args.index('--entrypoint')
+        args[position:position] = [f'--env={key}={value}' for key, value in spec.environment.items()]
         mounts = []
         if dependency_cache_path is not None:
             base = '/mineval-dependency-cache'

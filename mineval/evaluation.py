@@ -34,10 +34,14 @@ def inspect(store, task_id, evaluation_id):
     return record
 
 
-def execute_checks(source_tree, destination, staged, verification, artifacts, adaptations, config, image, runner):
+def execute_checks(source_tree, destination, staged, verification, artifacts, adaptations, config, image, runner, *, prepare_workspace=None):
     report = {'commands': [], 'verdict': 'error', 'explanation': 'Verification infrastructure failed.'}
     if adaptations:
         raise ValueError('Frozen checks cannot be adapted to a candidate')
+    if config.get('grading_type') == 'native-script-v1':
+        from .native_grading import execute
+        return execute(source_tree, destination, staged, verification, artifacts, config, image, runner,
+                       prepare_workspace=prepare_workspace)
     if config.get('grading_type') == 'isolated-http-v1':
         from .http_grading import execute
         return execute(source_tree, destination, staged, verification, artifacts, config, image, runner)
@@ -75,10 +79,13 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
         limits = Limits(**config.get('limits', {}))
         spec = SandboxSpec(image, ('/bin/sh', '-c', 'while :; do sleep 1; done'), limits,
             workspace=workspace, network=config.get('network', 'bridge'),
-            workdir=config.get('workdir', '/workspace'))
+            workdir=config.get('workdir', '/workspace'), services=config.get('services', ()))
         with runner.container(spec) as container:
             container.start()
             report.update(image_id=container.image_id, container_id=container.id)
+            service_images = getattr(container, 'service_images', None)
+            if isinstance(service_images, dict):
+                report['service_images'] = service_images
             cache_stats = getattr(container, 'cache_stats', None)
             if isinstance(cache_stats, dict):
                 report['download_cache'] = cache_stats
@@ -131,7 +138,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
     cache_task(runner, store, task_id)
     evaluation_id = identifier(evaluation_id or uuid4().hex)
     config = load_config(config_path, evaluation=True)
-    if not any(c['kind'] == 'tests' for c in config['commands']):
+    if config.get('grading_type') != 'native-script-v1' and not any(c['kind'] == 'tests' for c in config['commands']):
         raise ValueError('Evaluation requires at least one private tests command')
     if any(c.get('expected_failure') for c in config['commands']):
         raise ValueError('Evaluation cannot exempt expected failures')
@@ -196,8 +203,17 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
             else:
                 archive = output_path(store, task_id, run_id) / 'agent/workspace.tar.gz'
                 unpack(archive, temp / 'candidate')
+                def attach_history(workspace):
+                    from .history import restore
+                    fmt = read_json(frozen / 'workspace-format.json')['git_history']
+                    restore(frozen / fmt['path'], fmt['base_commit'], workspace)
+                    if (frozen / 'submodules.json').exists():
+                        from .repository import attach_modules
+                        attach_modules(workspace, frozen, read_json(frozen / 'submodules.json'))
+
                 baseline = execute_checks(temp / 'candidate', temp / 'baseline-workspace', staged / 'baseline',
-                    verification, artifacts, [], config, image, runner)
+                    verification, artifacts, [], config, image, runner,
+                    prepare_workspace=attach_history)
                 report.update(baseline)
 
         except KeyboardInterrupt:
@@ -216,6 +232,9 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
             'output_sha256': digest(output_path(store, task_id, run_id) / 'artifact-hashes.json'),
             'verification_sha256': verification_hash, 'evidence_sha256': checked(target),
             'policy': config.get('grading_type') or POLICY, 'config_sha256': digest(target / 'config.json'),
+            'grading_conditions': {'limits': vars(Limits(**config.get('limits', {}))),
+                                   'network': config.get('network', 'bridge')},
+            'project_image_id': report.get('image_id') or (image if re.fullmatch(r'sha256:[0-9a-f]{64}', image) else None),
             'finished_at': now(), 'status': 'completed', **report})
 
     from .memory import record_evaluation
@@ -223,16 +242,29 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
     return result
 
 
+def rates(records):
+    counts = {v: sum(record['verdict'] == v for record in records)
+              for v in ('pass', 'fail', 'inconclusive', 'error')}
+    decided = counts['pass'] + counts['fail']
+    n = len(records)
+    return {'counts': counts, 'denominator': n, 'attempt_count': n,
+            'infrastructure_errors': counts['error'],
+            'pass_rate': counts['pass'] / decided if decided else None,
+            'decided_coverage': decided / n if n else None}
+
+
 def compare(store, definition):
-    """Explicit assessments only; never silently choose the most favorable reevaluation."""
-    from .benchmark import compare as compare_runs
+    """Compare explicit assessments, with one vote per distinct saved attempt."""
+    from .benchmark import compare as compare_runs, comparison_groups, condition_key, conditions
+    from .memory import encoded
     if not isinstance(definition, dict) or set(definition) != {'left', 'right'}:
         raise ValueError('Require left and right evaluation selections')
-    evaluations, runs = {}, {}
+    evaluations, refs, excluded, attempts = {}, {}, [], {}
     for side in ('left', 'right'):
         if not isinstance(definition[side], list) or not definition[side]:
             raise ValueError('Each side requires a nonempty evaluation list')
-        evaluations[side], runs[side] = {}, []
+        evaluations[side], refs[side] = [], []
+        seen = set()
         for ref in definition[side]:
             if not isinstance(ref, dict) or set(ref) != {'task_id', 'evaluation_id'}:
                 raise ValueError('Select task_id and evaluation_id explicitly')
@@ -242,26 +274,47 @@ def compare(store, definition):
                 raise ValueError('Required evaluation and review are not complete for this assessment')
             if record['schema_version'] != 2:
                 raise ValueError('Comparison requires executed evaluations')
-            key = (ref['task_id'], record['prepared_revision']['version'])
-            if any(k[0] == key[0] for k in evaluations[side]):
-                raise ValueError('Select one assessment per task per side')
-            evaluations[side][key] = record
-            runs[side].append({'task_id': ref['task_id'], 'run_id': record['run_id']})
-    result = compare_runs(store, runs)
-    common = [(r['task_id'], r['version']) for r in result['common_revisions']]
-    for key in common:
-        left, right = (evaluations[s][key] for s in ('left', 'right'))
-        if any(left[k] != right[k] for k in ('policy', 'config_sha256', 'verification_sha256')):
-            raise ValueError('Common assessments require the same evaluation policy, config and verification')
-        if left.get('image_id') and right.get('image_id') and left['image_id'] != right['image_id']:
-            raise ValueError('Common assessments require the same resolved verification image')
-    result['task_verdicts_available'] = True
-    result['assessments'] = {s: list(v.values()) for s, v in evaluations.items()}
-    result['rates'] = {}
+            attempt = (ref['task_id'], record['run_id'])
+            if attempt in seen:
+                excluded.append({'side': side, **ref, 'run_id': record['run_id'],
+                                 'reason': 'attempt already selected'})
+                continue
+            seen.add(attempt)
+            attempts[attempt] = store.inspect_run(*attempt)
+            evaluations[side].append(record)
+            refs[side].append({'task_id': ref['task_id'], 'run_id': record['run_id']})
+    result = compare_runs(store, refs)
+
+    def key(record):
+        return condition_key(record, attempts[(record['task_id'], record['run_id'])])
+
+    groups, common, mismatches = comparison_groups(evaluations, key)
+    result['excluded'] = excluded + mismatches
+    result['common_revisions'] = list({encoded(groups['left'][k][0]['prepared_revision']):
+        groups['left'][k][0]['prepared_revision'] for k in common}.values())
     for side in ('left', 'right'):
-        counts = {v: sum(evaluations[side][k]['verdict'] == v for k in common)
-                  for v in ('pass', 'fail', 'inconclusive', 'error')}
-        result['rates'][side] = {'counts': counts, 'denominator': len(common),
-            'pass_rate': counts['pass'] / len(common) if common else None,
-            'decided_coverage': (counts['pass'] + counts['fail']) / len(common) if common else None}
+        total = len(groups[side])
+        other = 'right' if side == 'left' else 'left'
+        result[side + '_only'] = [groups[side][k][0]['prepared_revision']
+                                  for k in sorted(groups[side].keys() - groups[other].keys())]
+        result['coverage'][side + '_total'] = total
+        result['coverage'][side + '_fraction'] = len(common) / total
+    result['coverage']['common'] = len(common)
+    result['task_verdicts_available'] = True
+    result['assessments'] = evaluations
+    cohorts = {}
+    for k in common:
+        record = groups['left'][k][0]
+        operation = conditions(attempts[(record['task_id'], record['run_id'])])
+        # Different tasks may require different project images. Match the image
+        # per task, then aggregate only identical coding budgets.
+        budget = {field: value for field, value in operation.items() if field in ('limits', 'harness', 'network')}
+        budget['grading'] = record.get('grading_conditions')
+        entry = cohorts.setdefault(encoded(budget), {'conditions': budget, 'left': [], 'right': []})
+        for side in ('left', 'right'):
+            entry[side].extend(groups[side][k])
+    result['cohorts'] = [{'conditions': cohort['conditions'], 'rates': {
+        side: rates(cohort[side]) for side in ('left', 'right')}} for cohort in cohorts.values()]
+    result['rates'] = (result['cohorts'][0]['rates'] if len(cohorts) == 1 else
+                       {side: rates([]) for side in ('left', 'right')})
     return result

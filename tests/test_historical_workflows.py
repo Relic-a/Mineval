@@ -202,8 +202,8 @@ class WorkflowTests(HistoryFixture):
         self.saved('one'); self.assess('one', 'first')
         self.saved('two'); self.assess('two', 'second')
         report = summaries(self.store)
-        self.assertEqual(report['models'][0]['overall']['evaluated'], 1)
-        self.assertEqual(report['models'][0]['categories']['uncategorized']['evaluated'], 1)
+        self.assertEqual(report['models'][0]['overall']['evaluated'], 2)
+        self.assertEqual(report['models'][0]['categories']['uncategorized']['evaluated'], 2)
         self.assertIsNone(report['models'][0]['category_average'])
         memory = Memory(self.store).history('fake')
         self.assertEqual(len(memory), 2)
@@ -443,7 +443,7 @@ class WorkflowTests(HistoryFixture):
         config = json.dumps({'model': 'catalog-model', 'effort': 'high', 'adapter': 'codex'})
         selection = {'task': ['example'], 'step': ['review'], 'configuration': [config], 'version_example': [self.version], 'exclude': ['yes']}
         review = pages.render('/benchmarks/new', selection)
-        self.assertIn('1 task/model combinations ready to queue', review)
+        self.assertIn('1 attempt ready to queue', review)
         self.assertIn('Fixed functional grading', review)
         self.assertEqual(flow.jobs(), [])  # Review does not enqueue or spend inference.
         with patch('mineval.benchmark.run_agent', side_effect=self._run_agent):

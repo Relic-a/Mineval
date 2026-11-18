@@ -80,7 +80,8 @@ def adapter(config):
 def matches(record, revision, config):
     return (record.get('schema_version') == 2 and record.get('prepared_revision') == revision
             and record.get('model') == {'name': config['model'], 'reasoning_effort': config['effort']}
-            and record.get('harness') == {'name': config['adapter'], 'adapter_version': 1})
+            and (record.get('harness') or {}).get('name') == config['adapter']
+            and (record.get('harness') or {}).get('adapter_version') in (1, 2))
 
 
 class Workflows:
@@ -184,12 +185,13 @@ class Workflows:
         with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
             path = Path(temp) / 'config.json'; write_json(path, config)
             result = verification.load_config(path, evaluation=True)
-        if not any(c['kind'] == 'tests' for c in result['commands']) or any(c.get('expected_failure') for c in result['commands']):
+        if (result.get('grading_type') != 'native-script-v1' and not any(c['kind'] == 'tests' for c in result['commands'])) or any(c.get('expected_failure') for c in result['commands']):
             raise ValueError('Evaluation requires private tests without expected_failure exemptions')
         return result
 
-    def enqueue(self, kind, selections, configurations=None, *, exclude=True, execution_host='local'):
-        if kind not in ('prepare', 'benchmark') or not isinstance(selections, list):
+    def enqueue(self, kind, selections, configurations=None, *, exclude=True, execution_host='local', attempts=1):
+        benchmark.attempt_count(attempts)
+        if kind not in ('prepare', 'benchmark') or not isinstance(selections, list) or (kind == 'prepare' and attempts != 1):
             raise ValueError('Select preparation or benchmark tasks')
         if len(selections) > 1000:
             raise ValueError('Select at most 1000 tasks per request')
@@ -212,30 +214,36 @@ class Workflows:
                     continue
                 revision = self.store._inspect_revision(task, selection['version']) if kind == 'benchmark' else None
                 for config in configs if kind == 'benchmark' else [None]:
-                    payload = {'selection': selection, 'revision': revision, 'configuration': config,
-                               'run_id': uuid4().hex, 'evaluation_id': uuid4().hex,
-                               'model_settings': model_settings, 'execution_host': execution_host}
-                    if kind == 'benchmark':
-                        payload['evaluation_config'] = self.checked_config(self.eval_config(task, selection['version']))
-                    dedup = hashlib.sha256(encoded([kind, task, revision, config]).encode()).hexdigest()
-                    # Serialize repeated selection across HTTP threads/processes. Task
-                    # launch uses the same immutable revision checked above.
+                    grading_config = (self.checked_config(self.eval_config(task, selection['version']))
+                                      if kind == 'benchmark' else None)
+                    # Reserve every slot before another worker can pick up the batch.
                     with self.db() as db:
                         db.execute('BEGIN IMMEDIATE')
-                        existing = db.execute("SELECT id FROM jobs WHERE dedup=? AND state IN ('queued','running','interrupted')", (dedup,)).fetchone()
                         previous = []
-                        if kind == 'benchmark' and exclude and not existing:
+                        if kind == 'benchmark' and exclude:
                             previous = [benchmark.inspect_attempt(self.store, task, path.stem)
                                         for path in (self.store.task(task) / 'runs').glob('*.json')]
-                        if existing:
-                            results.append({'task': task, 'state': 'existing', 'id': existing['id']})
-                        elif any(matches(r, revision, config) for r in previous):
-                            results.append({'task': task, 'state': 'skipped', 'detail': 'Exact configuration and revision already attempted; disable exclusion to rerun'})
-                        else:
-                            jid = uuid4().hex
-                            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)',
-                                (jid, kind, task, encoded(payload), 'queued', 'queued', '', time.time(), time.time(), dedup))
-                            results.append({'task': task, 'state': 'queued', 'id': jid})
+                        for index in range(attempts):
+                            dedup = hashlib.sha256(encoded(
+                                [kind, task, revision, config] + ([index] if index else [])).encode()).hexdigest()
+                            existing = db.execute(
+                                "SELECT id FROM jobs WHERE dedup=? AND state IN ('queued','running','interrupted')",
+                                (dedup,)).fetchone()
+                            if existing:
+                                results.append({'task': task, 'state': 'existing', 'id': existing['id']})
+                            elif any(matches(record, revision, config) for record in previous):
+                                results.append({'task': task, 'state': 'skipped',
+                                    'detail': 'Exact configuration and revision already attempted; disable exclusion to rerun'})
+                            else:
+                                payload = {'selection': selection, 'revision': revision, 'configuration': config,
+                                           'run_id': uuid4().hex, 'evaluation_id': uuid4().hex,
+                                           'model_settings': model_settings, 'execution_host': execution_host}
+                                if grading_config is not None:
+                                    payload['evaluation_config'] = grading_config
+                                jid = uuid4().hex
+                                db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)',
+                                    (jid, kind, task, encoded(payload), 'queued', 'queued', '', time.time(), time.time(), dedup))
+                                results.append({'task': task, 'state': 'queued', 'id': jid})
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 results.append({'task': task, 'state': 'error', 'detail': str(exc)})
         return results
@@ -579,12 +587,12 @@ class Workflows:
         with self.store.operation(task):
             current = read_json(config_path)
             if not current.get('image') or not current.get('commands'):
-                image = self.settings.get('preparation_image')
+                image = current.get('image') or self.settings.get('preparation_image')
                 if not image:
                     raise WorkflowFailure('Choose a trusted preloaded preparation image with --image or preparation_image in historical settings, then retry.')
                 from .artifacts import write_json
-                write_json(config_path, {'image': image, 'network': 'bridge',
-                    'limits': {'timeout_seconds': 600}, 'commands': [
+                write_json(config_path, {'network': 'bridge', 'limits': {'timeout_seconds': 600}} | current | {
+                    'image': image, 'commands': [
                     {'name': 'bootstrap-runtime', 'kind': 'setup', 'argv': ['python3', '--version']}]})
         self.stage(jid, 'cleanup')
         prep_adapter = self.role_adapter('preparation', p)
@@ -636,7 +644,11 @@ class Workflows:
             from .artifacts import write_json
             with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
                 path = Path(temp) / 'config.json'
-                write_json(path, self.checked_config(verification.load_config(selected, evaluation=True) if selected else config))
+                grading = self.checked_config(verification.load_config(selected, evaluation=True) if selected else config)
+                if (read_json(self.store.task(task) / 'metadata.json').get('preparation_contract') == 'native-script-v1'
+                        and grading.get('grading_type') != 'native-script-v1'):
+                    raise WorkflowFailure('Prepare a frozen .sh script and list its required native tests.')
+                write_json(path, grading)
                 from .evaluation import POLICY as evaluation_policy
                 validation_key = [review.VALIDATION_POLICY, evaluation_policy, progress.state(), extraction_id,
                                   review.checked(self.store.task(task) / 'private/extractions' / extraction_id),

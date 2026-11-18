@@ -15,7 +15,20 @@ def load_candidate(path):
             source = candidate.get(field)
             if isinstance(source, dict) and isinstance(source.get('path'), str):
                 source['path'] = str((path.parent / source['path']).resolve())
+        if 'task_brief' in candidate:
+            if 'task_instructions' in candidate:
+                raise ValueError('Supply one task brief')
+            candidate['task_instructions'] = read_brief(path.parent / candidate.pop('task_brief'))
     return candidate
+
+
+def read_brief(path):
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 256 * 1024:
+        raise ValueError(f'Task brief must be a regular document of at most 256 KiB: {path}')
+    value = path.read_text()
+    if not value.strip():
+        raise ValueError('Task brief must be nonempty')
+    return value
 
 
 def normalize(candidate):
@@ -36,6 +49,10 @@ def normalize(candidate):
     for field in ('repository', 'task_summary'):
         if not isinstance(candidate.get(field), str) or not candidate[field].strip():
             raise ValueError(f'{field} must be a nonempty string')
+    if 'task_instructions' in candidate:
+        brief = candidate['task_instructions']
+        if not isinstance(brief, str) or not brief.strip() or len(brief.encode()) > 256 * 1024:
+            raise ValueError('task_instructions must be nonempty text of at most 256 KiB')
     for field in ('base_commit', 'head_commit'):
         if candidate.get(field) is not None:
             commit(candidate[field])
@@ -55,7 +72,9 @@ def normalize(candidate):
     for field in ('base_source', 'future_source'):
         if candidate.get(field) is not None:
             source = candidate[field]
-            allowed = ('git', 'tree', 'archive') if field == 'base_source' else ('tree', 'archive')
+            if field == 'base_source' and isinstance(source, dict) and source.get('type') != 'git':
+                raise ValueError('Intake requires Git history via base_source.type=git')
+            allowed = ('git',) if field == 'base_source' else ('tree', 'archive')
             if (not isinstance(source, dict) or source.get('type') not in allowed
                     or not isinstance(source.get('path'), str) or not source['path'].strip()):
                 raise ValueError(f'{field} requires a supported type and local path')

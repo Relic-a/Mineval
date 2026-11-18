@@ -81,7 +81,8 @@ DATA/
       artifact-hashes.json
     private/
       base/                        original base for review/diff, never agent-mounted
-      future/<commit>/             imported future source/evidence
+      future.pack                  private Git objects for selected future commits
+      git-sources.json             pinned submodule source index
       diffs/<commit>.patch          Git imports only
       extraction-selection.json    optional extraction-session suggestion
       extraction-attempts/<session>/  unavailable verification reports

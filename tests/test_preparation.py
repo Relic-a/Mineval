@@ -135,7 +135,11 @@ class ArtifactAcceptanceTests(HistoryFixture):
         self.assertEqual((self.workspace / 'app.py').read_text(), 'def answer(): return 0\n')
         self.assertFalse((self.workspace / 'tests').exists())
         self.assertFalse((self.workspace / '.git').exists())
-        self.assertTrue((self.store.task('example') / 'private/future' / self.head / 'tests/test_answer.py').exists())
+        task = self.store.task('example')
+        self.assertFalse((task / 'private/future').exists())
+        from mineval.repository import future_tree
+        with future_tree(task, self.head) as tree:
+            self.assertTrue((tree / 'tests/test_answer.py').is_file())
         self.assertEqual(read_json(self.store.task('example') / 'metadata.json')['grounding'], 'git-objects-and-ancestry-checked')
 
     def test_freeze_materialize_independence_extraction_and_new_version(self):
@@ -176,7 +180,7 @@ class ArtifactAcceptanceTests(HistoryFixture):
         for bad in (selection | {'commit': 'a' * 40}, selection | {'test_only': False}, selection | {'path': '../app.py'}):
             with self.assertRaises(ValueError):
                 self.store.extract('example', [bad])
-        source = self.store.task('example') / 'private/future' / self.head / 'tests/test_answer.py'
+        source = self.store.task('example') / 'private/future.pack'
         original_source = source.read_bytes()
         source.write_text('tampered')
         with self.assertRaisesRegex(ValueError, 'modified'):
@@ -189,7 +193,7 @@ class ArtifactAcceptanceTests(HistoryFixture):
         with self.assertRaisesRegex(ValueError, 'hash mismatch'):
             self.store.materialize('example', result['version'], self.root / 'bad')
 
-    def test_raw_boundary_accepts_tree_and_archive_and_keeps_unknown_notes_unknown(self):
+    def test_raw_boundary_rejects_tree_archive_and_gitless_source(self):
         raw = self.root / 'raw'
         raw.mkdir()
         (raw / 'app.py').write_text('base')
@@ -201,10 +205,11 @@ class ArtifactAcceptanceTests(HistoryFixture):
         candidate = self.candidate | {'task_id': 'raw', 'base_source': {'type': 'archive', 'path': str(self.root / 'raw.tar.gz')},
                                       'future_source': {'type': 'tree', 'path': str(future)},
                                       'source_attestation': 'Producer exported these SHAs and inspected future evidence'}
-        self.store.register(candidate)
-        metadata = read_json(self.store.task('raw') / 'metadata.json')
-        self.assertEqual(metadata['grounding'], 'producer-attested-raw-export')
-        self.assertNotIn('cleanup_risks', metadata)
+        for kind, path in [('archive', self.root / 'raw.tar.gz'), ('tree', raw), ('git', raw)]:
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(ValueError, 'Git history'):
+                    self.store.register(candidate | {'base_source': {'type': kind, 'path': str(path)}})
+                self.assertFalse(self.store.task('raw').exists())
 
     def test_unsafe_archive_and_workspace_links_rejected(self):
         for name, kind in (('../escape', tarfile.REGTYPE), ('link', tarfile.SYMTYPE), ('.git/config', tarfile.REGTYPE)):
@@ -218,7 +223,7 @@ class ArtifactAcceptanceTests(HistoryFixture):
                 unpack(archive, self.root / 'output')
             self.assertFalse((self.root / 'output').exists())
         (self.workspace / 'link').symlink_to('/etc/passwd')
-        with self.assertRaisesRegex(ValueError, 'Links'):
+        with self.assertRaisesRegex(ValueError, 'Unsafe symbolic link'):
             self.freeze('example', self.review)
 
     def test_busy_task_prevents_parallel_finalize(self):

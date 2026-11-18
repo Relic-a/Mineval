@@ -105,7 +105,7 @@ class ReviewTests(HistoryFixture):
 
     def test_corrupt_evidence_rejected_before_index_is_used(self):
         task = self.store.task('example')
-        source = task / 'private/future' / self.head / 'tests/test_answer.py'
+        source = task / 'private/future.pack'
         source.chmod(0o644)
         source.write_text('changed')
         agent = ReportAgent('selection.json', plan(self.head))

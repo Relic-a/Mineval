@@ -170,7 +170,7 @@ class PhaseThreeTests(HistoryFixture):
         unpack(self.root / 'npm-output/workspace.tar.gz', self.root / 'npm-export')
         self.assertEqual((self.root / 'npm-export/candidate.py').read_text(), 'candidate source')
         self.assertFalse((self.root / 'npm-export/nested/node_modules').exists())
-        with self.assertRaisesRegex(ValueError, 'Links and special files'):
+        with self.assertRaisesRegex(ValueError, 'Unsafe symbolic link'):
             run_agent(source, 'fixture', self.root / 'bad-link', image='fixture', sandbox=SimulatedDocker(bad_output=True))
 
     def test_starting_source_inside_node_modules_is_not_silently_removed(self):
@@ -180,7 +180,7 @@ class PhaseThreeTests(HistoryFixture):
         baseline = inventory(tree)
         (tree / 'node_modules/bad-link').symlink_to('/etc/passwd')
         self.assertEqual(discard_generated_npm(tree, baseline), 0)
-        with self.assertRaisesRegex(ValueError, 'Links and special files'):
+        with self.assertRaisesRegex(ValueError, 'Unsafe symbolic link'):
             inventory(tree)
         self.assertEqual((tree / 'node_modules/source.js').read_text(), 'source')
 
@@ -212,6 +212,18 @@ class PhaseThreeTests(HistoryFixture):
         write_json(auth, {'tokens': {'access_token': 'synthetic'}, 'github_token': 'forbidden'})
         with self.assertRaises(ValueError):
             provision_auth(auth, inputs / 'bad.json')
+
+    def test_codex_launcher_preserves_project_toolchain_environment(self):
+        import subprocess
+        inputs = self.root / 'inputs'; inputs.mkdir()
+        project = self.root / 'project'; project.mkdir()
+        command = CodexAdapter().stage(inputs)
+        (inputs / 'codex_runner.py').write_text(
+            "import os\nprint(os.environ['JAVA_HOME'])\nprint(os.environ['MINEVAL_PROJECT_WORKDIR'])\n")
+        shell = command[2].replace('/mineval-input', str(inputs)).replace('/tmp/codex', str(self.root / 'codex'))
+        result = subprocess.check_output([*command[:2], shell, *command[3:]], cwd=project,
+                                         env=os.environ | {'JAVA_HOME': '/opt/project-jdk'}, text=True)
+        self.assertEqual(result.splitlines(), ['/opt/project-jdk', str(project)])
 
     def test_docker_mounts_only_disposable_dirs_and_bounds_private_logs(self):
         source = self.materialized()
@@ -251,7 +263,8 @@ class LiveAgentTests(HistoryFixture):
                 with super().container(spec) as container:
                     self.ids.append(container.id)
                     config = self._cli.json('inspect', container.id)[0]
-                    self_outer.assertEqual(config['HostConfig']['LogConfig']['Type'], 'none')
+                    self_outer.assertEqual(config['HostConfig']['LogConfig']['Type'], 'local')
+                    self_outer.assertEqual(config['HostConfig']['LogConfig']['Config']['max-file'], '1')
                     mounts = {m['Destination']: m for m in config['Mounts']}
                     self_outer.assertEqual(set(mounts), {'/workspace', '/mineval-input',
                                                         '/mineval-control'})

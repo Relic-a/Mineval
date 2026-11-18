@@ -1,4 +1,79 @@
-# Isolated private grading
+# Private grading
+
+## Native tests
+
+Use `native-script-v1` for new schema-version 2 tasks. Keep the brief in
+`drafts/<task>/control/task-brief.md`. Describe required behavior, public interfaces
+and defaults, material edge cases and behavior that must remain stable. Give the
+coding agent enough information to use the project’s public build and test commands.
+Independent preparation review checks the brief against the held-out tests. It also
+checks that the brief keeps solution details and private test contents out of the prompt.
+
+Select a regular repository-relative `.sh` file with the other private artifacts.
+The script must invoke the project's native test runner, select the applicable tests
+or suite, and produce JUnit XML at `$MINEVAL_TEST_REPORT`. For a Python library with
+pytest installed in the project image, a script run from the project root can contain:
+
+```sh
+#!/bin/sh
+exec python -m pytest tests/test_held_out.py --junitxml="$MINEVAL_TEST_REPORT"
+```
+
+```json
+{
+  "grading_type": "native-script-v1",
+  "image": "my-project:prepared",
+  "workdir": "/workspace",
+  "script": "verify.sh",
+  "required_tests": ["tests.test_held_out::test_direct_library_import"]
+}
+```
+
+Use the IDs emitted by the runner as `classname::name`, or just `name` for reports
+without a classname. Paths in the artifact list and the script path are relative to
+the workspace root. Mineval invokes the frozen file with `/bin/sh` from the configured
+working directory. The script should include any build or setup steps it needs and
+exit with the runner's status. Native grading defaults to an outbound-isolated network.
+A pass requires the command to succeed, a readable report, every required test to
+pass and no reported failure. Reports distinguish failed, skipped and missing tests
+from grading setup errors such as a missing or malformed runner report.
+
+Base validation, reference validation when available, and candidate grading each
+use a fresh workspace. Mineval freezes the script, checks and required IDs after
+independent review and uses their original bytes for each candidate. Native tests
+and their fixtures are visible during grading, where they can import the candidate
+library directly. The separate coding sandbox receives the historical project and
+frozen brief.
+
+## Project dependencies
+
+Declare the same `services` array in diagnostic and native evaluation
+configurations. Use a preloaded Docker image ID or repository digest. This example
+shows the PostgreSQL settings with a placeholder image ID:
+
+```json
+{
+  "name": "database",
+  "image": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "environment": {"POSTGRES_PASSWORD": "fixture-password"},
+  "ready": ["pg_isready", "-h", "127.0.0.1"],
+  "tmpfs": ["/var/run/postgresql"],
+  "limits": {"timeout_seconds": 30}
+}
+```
+
+Put the object inside `services`. The project reaches it via DNS name `database`.
+Use fixture credentials. Mineval uses the image's entrypoint and default command
+unless `argv` overrides the command. Image-declared volumes and listed temporary
+paths receive disposable memory-backed storage. Service containers and their private
+network are removed when the owning sandbox finishes or is cancelled. Diagnostics,
+coding, private validation and grading each start their own service group. Candidates
+can build and run public developer tests against these dependencies. Coding defaults
+to outbound access, configurable with `agent_network` in the diagnostic config.
+Use the same project image reference, workdir and service declarations across
+preparation and grading. Mineval pins the resolved project image ID from diagnostics.
+
+## CLI and HTTP checks
 
 `isolated-argv-v1` supports command-line programs that accept one string argument
 and produce an exact UTF-8 standard output. Private selected artifacts must each
@@ -35,10 +110,5 @@ network services; the operator must not expose private grading files through tho
 services. Configured commands and the container image are trusted inputs and must
 not embed private expected results or mount them themselves.
 
-Existing in-process tests, fixtures, and arbitrary shell test commands are not
-supported for isolated grading. They return an `unsupported_grading_type` error
-instead of running with private files in the candidate environment. Optional AI
-assessment and adaptation are unavailable here because their previous environment
-combined candidate code and private files. This contract does not establish that
-arbitrary pre-existing assertions executed; false-positive grading remains a
-separate issue.
+Existing `isolated-argv-v1` and `isolated-http-v1` results remain readable.
+These checks are intended for tasks that expose those interfaces.

@@ -45,14 +45,20 @@ def verify(archive, manifest, destination):
 def validate_inventory(files, *, prefixes=None):
     if not isinstance(files, dict) or len(files) > 100_000:
         raise ValueError('Invalid export inventory')
+    links = {}
     for name, entry in files.items():
         relative(name)
         if prefixes is not None and not any(name.startswith(prefix) for prefix in prefixes):
             raise ValueError('Export inventory outside job scope')
+        if isinstance(entry, dict) and set(entry) == {'symlink'} and isinstance(entry['symlink'], str):
+            links[name] = entry['symlink']
+            continue
         if (not isinstance(entry, dict) or set(entry) != {'sha256', 'executable'} or
                 not isinstance(entry['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', entry['sha256']) or
                 type(entry['executable']) is not bool):
             raise ValueError('Invalid export inventory entry')
+    from .artifacts import validate_links
+    validate_links(links)
     return files
 
 
@@ -307,7 +313,8 @@ def import_preparation(store, incoming, job, baseline):
                             continue
                         target = Path(temp) / str(len(staged))
                         shutil.copy2(source_root / name, target, follow_symlinks=False)
-                        if digest(target) != value['sha256']:
+                        if ((not target.is_symlink() or os.readlink(target) != value['symlink'])
+                                if 'symlink' in value else digest(target) != value['sha256']):
                             raise ValueError('Remote preparation changed during import')
                         staged.append((key, name, target))
                 # Keep the old state visible until every other file is published.
@@ -319,7 +326,7 @@ def import_preparation(store, incoming, job, baseline):
                 for key, name, staged_file in staged:
                     destination = roots[key] / name
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    if destination.is_dir():
+                    if not destination.is_symlink() and destination.is_dir():
                         # A draft may replace a directory with a file. Remove only
                         # empty directories left by the verified deletions above.
                         for current, dirs, files in os.walk(destination, topdown=False):

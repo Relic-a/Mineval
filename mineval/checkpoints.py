@@ -15,17 +15,19 @@ class PreparationCheckpoints:
     def state(self):
         source = read_json(self.task / 'source-hashes.json')
         # Verify preserved evidence, including history, before reusing its derivatives.
-        actual = {}
-        for name in ('base', 'future', 'diffs'):
-            if (self.task / 'private' / name).exists():
-                actual.update({name + '/' + p: v for p, v in inventory(self.task / 'private' / name).items()})
-        history = self.task / 'private/history.pack'
-        if history.exists():
-            actual['history.pack'] = {'sha256': digest(history), 'executable': bool(history.stat().st_mode & 0o111)}
+        names = ('base', 'future', 'diffs', 'submodule-packs')
+        actual = {name + '/' + path: item for name in names
+                  if (self.task / 'private' / name).exists()
+                  for path, item in inventory(self.task / 'private' / name).items()}
+        for name in ('history.pack', 'future.pack', 'git-sources.json'):
+            path = self.task / 'private' / name
+            if path.exists():
+                actual[name] = {'sha256': digest(path), 'executable': bool(path.stat().st_mode & 0o111)}
         if source != actual:
             raise ValueError('Stored source evidence was modified')
         config = read_json(self.draft / 'control/verify.json')
         return {'schema': 1, 'source': source, 'metadata': digest(self.task / 'metadata.json'),
+                'brief': digest(self.draft / 'control/task-brief.md') if (self.draft / 'control/task-brief.md').is_file() else None,
                 'workspace': inventory(self.draft / 'workspace'), 'config': config,
                 'runtime': self.runtime(config['image'])}
 

@@ -251,14 +251,18 @@ class EvaluationTests(HistoryFixture):
         self.assertEqual(result['rates']['right']['denominator'], 1)
         self.assertEqual(result['rates']['right']['decided_coverage'], 0)
         self.assess('right', 'different-image', runner=EvaluationRunner(image_id='sha256:changed'))
-        with self.assertRaisesRegex(ValueError, 'same resolved verification image'):
-            evaluation.compare(self.store, definition | {'right': [ref('different-image')]})
+        mismatch = evaluation.compare(self.store, definition | {'right': [ref('different-image')]})
+        self.assertEqual(mismatch['coverage']['common'], 0)
+        self.assertTrue(all('conditions' in item['reason'] for item in mismatch['excluded']))
         cfg = read_json(self.config); cfg['network'] = 'bridge'; write_json(self.config, cfg)
         with self.assertRaisesRegex(ValueError, 'differs from the frozen'):
             self.assess('right', 'different-policy')
         write_json(self.config, self.fixture_evaluation_config)
-        with self.assertRaisesRegex(ValueError, 'one assessment'):
-            evaluation.compare(self.store, definition | {'left': [ref('left'), ref('uncertain')]})
+        repeated = evaluation.compare(self.store, definition | {'left': [ref('left'), ref('uncertain')]})
+        self.assertEqual(repeated['rates']['left']['attempt_count'], 2)
+        regraded = evaluation.compare(self.store, definition | {'right': [ref('right'), ref('uncertain')]})
+        self.assertEqual(regraded['rates']['right']['attempt_count'], 1)
+        self.assertEqual(regraded['excluded'][0]['reason'], 'attempt already selected')
         self.version = self.freeze('example', self.review)['version']
         self.saved('new-revision')
         self.assess('new-revision', 'new-revision')

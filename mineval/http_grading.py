@@ -65,9 +65,13 @@ def execute(source, destination, staged, verification, artifacts, config, image,
         copy_tree(source, destination)
         limits = Limits(**config.get('limits', {}))
         spec = SandboxSpec(image, ('/bin/sh', '-c', 'while :; do sleep 1; done'), limits,
-                           workspace=destination, network='none', workdir=config.get('workdir', '/workspace'))
+                           workspace=destination, network='none', workdir=config.get('workdir', '/workspace'), services=config.get('services', ()))
         with runner.container(spec) as container:
-            container.start(); report.update(image_id=container.image_id, container_id=container.id)
+            container.start()
+            report.update(image_id=container.image_id, container_id=container.id)
+            service_images = getattr(container, 'service_images', None)
+            if isinstance(service_images, dict):
+                report['service_images'] = service_images
             deadline = time.monotonic() + limits.timeout_seconds
             def run(argv):
                 budget = deadline - time.monotonic()

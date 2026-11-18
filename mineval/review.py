@@ -1,5 +1,6 @@
 """Private producing/review sessions and exact-input approval receipts."""
 from pathlib import Path
+from contextlib import ExitStack
 import tempfile
 from uuid import uuid4
 
@@ -29,14 +30,26 @@ You may generate new behavioral check documents in selection.json using origin g
 and content, and combine them with historical artifacts. Generated checks must express
 requirements in the original task, be independently reviewable, and be validated on
 base and future before freezing. Do not copy production implementation into checks.
-For HTTP applications use isolated-http-v1: service {argv, port}, network none,
+Use native-script-v1 for schema-version 2 candidates. If task-brief.md is
+absent, include a task_brief string with the full public task instructions in
+selection.json. State required behavior, public interfaces, defaults, important
+edge cases and behavior to preserve. Keep historical evidence, implementation
+details and private check contents out of the brief. Include one regular .sh file
+in artifacts and set
+evaluation_config.script to its repository-relative path. The script explicitly
+runs the normal project test runner against selected tests and writes JUnit XML to
+"$MINEVAL_TEST_REPORT". Set required_tests to JUnit classname::name IDs (name only
+if no classname). Use the same image, workdir and services as runtime.json. Include
+held-out test files and fixtures in artifacts. Test public library interfaces directly
+when appropriate. Check that the task brief describes the obligations tested.
+For legacy HTTP-only grading use isolated-http-v1: service {argv, port}, network none,
 setup commands followed by one tests marker. Each selected check is JSON {cases:
 [{name, steps: [{method, path, optional headers, optional body, expect: {status,
 optional body, json, headers}}]}]}. Requests execute in order and the trusted grader
 compares responses outside the candidate sandbox. Use behavioral endpoints, not
 internal implementation names. Include regression, setup, and cleanup requests when
 needed; expected results must be fixed before any benchmark.
-For command-line checks supply evaluation_config with grading_type isolated-argv-v1,
+For legacy command-line grading supply evaluation_config with grading_type isolated-argv-v1,
 image, network, optional limits, workdir, and commands. The single tests command is
 executed against the candidate once for each private JSON case, passing its input as an
 argument and comparing stdout with expected output. Selected private artifacts must be
@@ -63,6 +76,10 @@ Inspect task.json, base, cleaned, future/diffs, cleanup.json, diagnostic.json,
 extraction and any validation results. Check task integrity, every cleanup edit,
 future/credential leakage, test-only provenance, meaningful behavioral relevance,
 arbitrary assumptions, alternate legitimate solutions, dependencies and reproducibility.
+Read task-brief.md when present. Check that it describes the required behavior,
+public interfaces, defaults, and material edge cases and invariants, without
+prescribing an implementation or disclosing a solution. Check that each mandatory
+test is supported by the brief and that material requirements are covered.
 Review the actual evaluation_config and private base/future validation results. Require selected tests to execute and finish, detect skips and missing coverage, and assess their relevance to the task and alternative legitimate implementations. Broken future checks or future environment failures remain blockers. Record any base execution limitations and coverage gaps. Passing on both trees is nondiscriminating; broken future checks or
 future environment failures remain blockers. Do not approve misleading or unjustified
 commands or treat uncovered obligations as tested. No outcome is automatic approval.
@@ -87,7 +104,7 @@ def seal(staged, target):
     target.parent.mkdir(parents=True, exist_ok=True)
     staged.rename(target)
     for path in target.rglob('*'):
-        if path.is_file():
+        if not path.is_symlink() and path.is_file():
             path.chmod(0o444)
 
 
@@ -107,7 +124,13 @@ def inputs(store, task_id, extraction_id):
     manifest = read_json(extraction / 'extraction-manifest.json')
     if not manifest.get('producer_session') or not manifest.get('plan'):
         raise ValueError('Require verification from a separate extraction session')
-    return {'cleanup_id': cleanup['cleanup_id'], 'cleanup_sha256': cleanup_hash,
+    brief = draft / 'control/task-brief.md'
+    brief_receipt = {}
+    if brief.exists() or brief.is_symlink():
+        from .intake import read_brief
+        read_brief(brief)
+        brief_receipt = {'task_brief_sha256': digest(brief)}
+    return {**brief_receipt, 'cleanup_id': cleanup['cleanup_id'], 'cleanup_sha256': cleanup_hash,
             'extraction_id': extraction_id, 'extraction_sha256': extraction_hash,
             'diagnostic_sha256': digest(task / 'verify-latest.json'),
             'metadata_sha256': digest(task / 'metadata.json'),
@@ -209,11 +232,20 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
         for name in ('base', 'future', 'diffs'):
             if (private / name).exists():
                 copy_tree(private / name, workspace / name)
+        if (private / 'git-sources.json').exists():
+            from .repository import copy_futures
+            copy_futures(task, workspace / 'future')
+        brief = draft / 'control/task-brief.md'
+        if brief.exists() or brief.is_symlink():
+            from .intake import read_brief
+            (workspace / 'task-brief.md').write_text(read_brief(brief))
         # Verify preserved evidence before it informs producing/review decisions.
         expected = read_json(task / 'source-hashes.json')
         actual = {f'{name}/{p}': v for name in ('base', 'future', 'diffs')
                   if (workspace / name).exists() for p, v in inventory(workspace / name).items()}
-        if actual != {p: v for p, v in expected.items() if p.split('/', 1)[0] in ('base', 'future', 'diffs')}:
+        prefixes = ('base', 'diffs') if (private / 'git-sources.json').exists() else ('base', 'future', 'diffs')
+        if ({p: v for p, v in actual.items() if p.split('/', 1)[0] in prefixes} !=
+                {p: v for p, v in expected.items() if p.split('/', 1)[0] in prefixes}):
             raise ValueError('Stored source evidence was modified')
         copy_tree(draft / 'workspace', workspace / 'cleaned')
         write_json(workspace / 'task.json', read_json(task / 'metadata.json'))
@@ -248,9 +280,14 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
             if not isinstance(adapter, CodexAdapter):
                 raise ValueError('Only Codex may receive authentication')
             provision_auth(auth_file, prompts / 'auth.json')
-        spec = SandboxSpec(config['image'], tuple(command), Limits(**config.get('limits', {})),
+        image = config['image']
+        diagnostic = read_json(task / 'verify-latest.json')
+        if diagnostic.get('image_id', '').startswith('sha256:') and len(diagnostic['image_id']) == 71:
+            from .verification import pinned_image
+            image = pinned_image(config, diagnostic)
+        spec = SandboxSpec(image, tuple(command), Limits(**config.get('limits', {})),
                            workspace=workspace, control=control, inputs=prompts,
-                           network='bridge', retain_logs=False)
+                           network=config.get('agent_network', 'bridge'), services=config.get('services', ()), retain_logs=False)
         with runner.container(spec) as container:
             container.start()
             timed_out = container.wait(spec.limits.timeout_seconds)
@@ -278,7 +315,10 @@ def session(store, task_id, *, stage, command=None, adapter=None, auth_file=None
                 write_json(staged / 'report.json', {'plan': plan, 'producer': producer})
                 seal(staged, private / 'extraction-attempts' / identity)
                 return {'session_id': identity, 'status': 'needs-review', 'plan': plan}
-            return store._extract(task_id, plan['artifacts'], plan=plan, producer_session=producer)
+            result = store._extract(task_id, plan['artifacts'], plan=plan, producer_session=producer)
+            if 'task_brief' in plan and not brief.exists():
+                brief.write_text(plan['task_brief'])
+            return result
         report = read_json(control / 'review.json')
         validate_review(report)
         from .cleanup import validate_report
@@ -300,7 +340,7 @@ def strings(value):
 
 
 def validate_plan(plan, *, require_evaluation_config=False):
-    if (not isinstance(plan, dict) or set(plan) - {'evaluation_config'} != {'strategy', 'rationale', 'dependencies',
+    if (not isinstance(plan, dict) or set(plan) - {'evaluation_config', 'task_brief'} != {'strategy', 'rationale', 'dependencies',
             'instructions', 'limitations', 'artifacts'} or
             plan['strategy'] not in ('focused', 'fuller', 'unavailable') or
             any(not isinstance(plan[k], str) or not plan[k].strip() for k in ('rationale', 'instructions')) or
@@ -308,6 +348,10 @@ def validate_plan(plan, *, require_evaluation_config=False):
             not isinstance(plan['artifacts'], list) or
             (bool(plan['artifacts']) != (plan['strategy'] != 'unavailable'))):
         raise ValueError('Invalid private verification plan')
+    if 'task_brief' in plan:
+        brief = plan['task_brief']
+        if not isinstance(brief, str) or not brief.strip() or len(brief.encode()) > 256 * 1024:
+            raise ValueError('Task brief must be nonempty text of at most 256 KiB')
     if require_evaluation_config and plan['strategy'] != 'unavailable' and not isinstance(plan.get('evaluation_config'), dict):
         raise ValueError('Runnable private verification requires an evaluation_config object')
     if plan.get('evaluation_config') is None:
@@ -320,7 +364,7 @@ def validate_plan(plan, *, require_evaluation_config=False):
             path = Path(temp) / 'config.json'
             write_json(path, plan['evaluation_config'])
             config = load_config(path, evaluation=True)
-        if not any(c['kind'] == 'tests' for c in config['commands']) or any(c.get('expected_failure') for c in config['commands']):
+        if (config.get('grading_type') != 'native-script-v1' and not any(c['kind'] == 'tests' for c in config['commands'])) or any(c.get('expected_failure') for c in config['commands']):
             raise ValueError('Private evaluation config needs tests without exemptions')
 
 
@@ -343,7 +387,7 @@ def validate(store, task_id, extraction_id, config_path, *, future_commit=None, 
     from .verification import load_config
     from .evaluation import execute_checks
     from .preparation import commit
-    with store.operation(task_id), tempfile.TemporaryDirectory(dir=store.root) as temp:
+    with store.operation(task_id), tempfile.TemporaryDirectory(dir=store.root) as temp, ExitStack() as sources:
         temp = Path(temp)
         task = store.task(task_id)
         extraction = task / 'private/extractions' / identifier(extraction_id)
@@ -357,13 +401,27 @@ def validate(store, task_id, extraction_id, config_path, *, future_commit=None, 
             future_commit = commit(future_commit)
             if future_commit not in read_json(task / 'metadata.json')['future_commits']:
                 raise ValueError('Unknown future validation commit')
-            source = task / 'private/future' / future_commit
-            expected = read_json(task / 'source-hashes.json')
-            prefix = f'future/{future_commit}/'
-            if inventory(source) != {p[len(prefix):]: v for p, v in expected.items() if p.startswith(prefix)}:
-                raise ValueError('Stored future state was modified')
+            from .repository import future_tree
+            source = sources.enter_context(future_tree(task, future_commit))
         else:
             source = store.draft(task_id) / 'workspace'
+        image = config['image']
+        prepare_workspace = None
+        if config.get('grading_type') == 'native-script-v1':
+            from .native_grading import script_artifact
+            from .verification import check_project_config, pinned_image
+            script_artifact(manifest['artifacts'], config)
+            project_config = load_config(store.draft(task_id) / 'control/verify.json')
+            check_project_config(project_config, config)
+            image = pinned_image(project_config, read_json(task / 'verify-latest.json'))
+            if future_commit and (task / 'private/git-sources.json').exists():
+                from .repository import attach_reference_history
+                def prepare_workspace(workspace):
+                    attach_reference_history(task, future_commit, workspace)
+            else:
+                from .cleanup import restore_history
+                def prepare_workspace(workspace):
+                    restore_history(store, task_id, workspace)
         source_hashes = inventory(source)
         # Use the same overlay, workdir and exit-code semantics as actual evaluation.
         # The execution evidence is temporary; the sealed report records the outcome.
@@ -372,7 +430,8 @@ def validate(store, task_id, extraction_id, config_path, *, future_commit=None, 
         cache_task(runner, store, task_id)
         staged = temp / 'validation'; staged.mkdir()
         baseline = execute_checks(source, temp / 'workspace', staged / 'baseline',
-                                  extraction, manifest['artifacts'], [], config, config['image'], runner)
+                                  extraction, manifest['artifacts'], [], config, image, runner,
+                                  prepare_workspace=prepare_workspace)
         report = dict(baseline)
         report['configuration'] = config
         selected_checks = staged / 'baseline/selected-checks.json'

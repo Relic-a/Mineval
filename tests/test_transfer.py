@@ -75,7 +75,7 @@ class TransferTests(unittest.TestCase):
             transfer.verify(self.archive, self.receipt, self.root / 'rejected')
         self.assertFalse((self.root / 'rejected').exists())
         (self.source / 'link').symlink_to(self.source / 'file')
-        with self.assertRaisesRegex(ValueError, 'Links'):
+        with self.assertRaisesRegex(ValueError, 'Unsafe symbolic link'):
             transfer.create(self.source, self.archive, self.receipt)
 
 

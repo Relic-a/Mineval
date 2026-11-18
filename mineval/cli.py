@@ -119,6 +119,7 @@ def _main(argv: list[str] | None = None) -> int:
     benchmark.add_argument('--model', help='explicit model; default fake or gpt-6-luna by adapter')
     benchmark.add_argument('--effort', choices=('minimal','low','medium','high','xhigh','max','ultra'))
     benchmark.add_argument('--auth-file')
+    benchmark.add_argument('--attempts', type=int, default=1, help='independent attempts per revision')
     benchmark.add_argument('--timeout', type=float, help='override frozen environment timeout')
     benches.add_parser('list', help='list durable attempts').add_argument('--task')
     for name in ('show', 'recover', 'export'):
@@ -419,10 +420,10 @@ def _main(argv: list[str] | None = None) -> int:
                         adapter = (CodexAdapter(args.model or 'gpt-6-luna', effort=args.effort) if args.adapter == 'codex'
                                    else FakeAdapter(model=args.model or 'fake', effort=args.effort))
                         options = dict(run_id=args.run_id, adapter=adapter, context=args.context,
-                                       auth_file=args.auth_file, timeout=args.timeout)
+                                       auth_file=args.auth_file, timeout=args.timeout, attempts=args.attempts)
                         with benchmark.termination_handler():
                             result = (benchmark.run_suite(store, args.suite, **options) if args.suite else
-                                      benchmark.run(store, args.task, args.version, **options))
+                                      benchmark.run_repeated(store, args.task, args.version, **options))
                     elif args.bench_action == 'list':
                         result = benchmark.list_runs(store, args.task)
                     elif args.bench_action == 'show':

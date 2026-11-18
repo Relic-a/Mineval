@@ -386,29 +386,28 @@ check fails before the fix and passes afterward, imports base/head/later evidenc
 `task add`, and checks that only base files enter the draft. Future trees and diffs
 remain private and survive removal of the source repository.
 
-Two source modes are supported:
+Use `base_source: {"type": "git", "path": "/local/repository"}` with a local
+repository containing complete pre-base history and the selected future commits.
+Intake checks exact commits and ancestry. It keeps a sanitized base-history pack
+and a private future object pack. Preparation reconstructs future trees on demand.
+Safe relative symbolic links are preserved. For submodules, initialize the local
+source or provide the objects in its Git module store. Mineval uses each recorded
+gitlink commit and never fetches a missing commit or uses the checked-out branch tip.
+Gitless directories and archives are rejected at intake. Older results remain
+readable. Artifact limits are 512 MiB and 100,000 entries, with at most 50 future
+commits. A failed import removes its partial artifacts.
 
-- `base_source: {"type": "git", "path": "/local/repository"}` reads exact Git blobs,
-  checks commits and base ancestry, and retains the chosen future trees/diffs privately.
-  Supply a local clone yourself for remote repositories. No checkout, Git hook, textconv,
-  solution execution, or repository discovery runs during import.
-- `base_source: {"type": "tree" | "archive", "path": "..."}` accepts a raw export.
-  Supply `future_source` using the same tree/archive types; it contains directories
-  named by future commit SHA, with evidence at its original relative paths. Include
-  `source_attestation` explaining how the producer obtained this historical material.
-  Raw historical identity is **producer-attested**, not independently Git-verified.
-
-Archives may be tar or tar.gz. The current tree-only importer requires no `.git`, links, special files,
-or submodules; unsupported candidates fail explicitly. Each imported collection is
-limited to 512 MiB and 100,000 files, with at most 50 future commits. The original
-candidate and SHA-256 inventories are retained. Registration is atomic with respect
-to normal failures; failures remove partial imports. Mineval does not fetch a replacement.
+For schema-version 2 tasks, prepare a full `task-brief.md` and native verification.
+Supply `task_brief` as a file path relative to the candidate JSON, supply
+`task_instructions` as inline text, or let extraction propose the brief for
+independent review. The coding agent receives the approved brief in every attempt.
+See [Native private grading](docs/isolated-grading.md).
 
 ## Clean and diagnose a draft
 
 Imported base files are in `drafts/<task>/workspace`; host-managed controls are in
 `drafts/<task>/control`. Fill in `control/verify.json` using [verify.json](examples/verify.json).
-The initial configuration intentionally has no image or commands: choose real checks.
+Choose a trusted, preloaded project image and configure its build and test checks. The [native grading guide](docs/isolated-grading.md) describes project services and the shared image pin.
 Commands use argv, with explicit `/bin/sh -c` when needed. Allowed kinds are `setup`,
 `build`, `tests`, and `smoke`. Each has a timeout bounded by the overall diagnostic
 deadline. CPU, memory, PID, and temporary-memory limits are configurable.
@@ -467,10 +466,7 @@ mineval --context rootless --data mineval-data cleanup external-task-001 --adapt
 ```
 
 The fake cleaner makes no edits and invokes a fresh diagnostic. Codex needs an image
-with its CLI, Bash, Git, project runtime and the Mineval client. Explicit commands
-work with legacy raw exports; those have no Git history. The fake adapter requires
-a Git import. Ordinary outbound access is enabled for cleanup; future-solution lookup
-is prohibited by instructions, as in Phase 3.
+with its CLI, Bash, Git, project runtime and the Mineval client. Ordinary outbound access is enabled for cleanup by default. Instructions prohibit future-solution lookup.
 
 After termination the host discards agent Git metadata and publishes the validated
 tree and diagnostic configuration back to the draft. Each attempt saves a separate
@@ -605,7 +601,7 @@ this is application-level immutability, not protection from the owning OS user.
 New versions declare their tree/history format in `workspace-format.json`; legacy
 versions remain readable. New Git imports save a sanitized base-history pack; new
 revisions include it and materialization reconstructs historical .git. Existing
-revisions and raw exports remain tree-only. Reimport complete Git sources and publish
+tree-only revisions remain readable. Reimport complete Git sources and publish
 new revisions to use the isolated agent runner. See
 the [storage format and migration boundary](docs/foundation.md).
 

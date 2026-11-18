@@ -187,6 +187,7 @@ def benchmarks(pages, query, new=False):
         content += ''.join(hidden('configuration', c) for c in previous - visible)
         content += '<div class="model-picker">' + table(['Model', 'Reasoning efforts · choose configurations', 'Harness'], picker) + '</div>'
         content += '<details><summary>Explicit model identifiers</summary><label>One identifier per line<textarea name="models" rows="3">' + esc(query.get('models', [''])[0]) + '</textarea></label>' + select('effort', [(x, x) for x in EFFORTS], query.get('effort', ['medium'])[0], 'Reasoning effort for explicit models') + '</details>'
+        content += '<label>Attempts per task and model <input type="number" name="attempts" min="1" max="100" value="' + esc(query.get('attempts', ['1'])[0]) + '" required></label>'
         content += '<label><input type="checkbox" name="exclude" value="yes"' + (' checked' if 'model_step' not in query or query.get('exclude') == ['yes'] else '') + '> Skip already benchmarked tasks</label><p class="muted">Skips attempts with the same complete frozen revision, model, effort and harness, including unsuccessful attempts.</p><button name="step" value="review">Review benchmark</button>'
         body += '<form method="get">' + content + '</form>'
         return pages.page('Run benchmark · Choose models', body)
@@ -194,6 +195,8 @@ def benchmarks(pages, query, new=False):
     configs += [{'model': m.strip(), 'effort': query.get('effort', ['medium'])[0], 'adapter': 'codex'} for m in query.get('models', [''])[0].splitlines() if m.strip()]
     from .workflows import configuration, matches
     configs = list({json.dumps(configuration(c), sort_keys=True): configuration(c) for c in configs}.values())
+    from .benchmark import attempt_count
+    attempts = attempt_count(int(query.get('attempts', ['1'])[0]))
     outcomes = []
     runnable = 0
     for t in chosen:
@@ -205,19 +208,30 @@ def benchmarks(pages, query, new=False):
             for c in configs:
                 skip = query.get('exclude') == ['yes'] and any(matches(r, revision, c) for r in prior)
                 if not skip:
-                    runnable += 1
+                    runnable += attempts
                 outcomes.append((pages.task_link(t['task_id']), esc(c['model'] + ' · ' + c['effort']), 'Skip · already attempted' if skip else 'Run and automatically evaluate'))
         except (ValueError, OSError) as exc:
             outcomes.append((pages.task_link(t['task_id']), 'Unavailable', esc(exc)))
     body += '<p>' + str(len(chosen)) + ' tasks × ' + str(len(configs)) + ' configurations. Queue submission rechecks eligibility and active work.</p>' + table(['Task', 'Configuration', 'Planned outcome'], outcomes)
     body += '<p>Saved private checks run automatically after each attempt. Deterministic checks do not require an AI model. Optional qualitative review follows the effective settings below; functional results are available as soon as grading finishes.</p>' + agent_summary(pages)
-    body += '<p>' + str(runnable) + ' task/model combinations ready to queue. Unavailable tasks and prior attempts above are excluded or reported individually; other tasks continue.</p>'
-    content = carry + hidden('operation', 'benchmark') + ''.join(hidden('configuration', json.dumps(c)) for c in configs)
+    body += '<p>' + str(runnable) + (' attempt' if runnable == 1 else ' attempts') + ' ready to queue. Unavailable tasks and prior attempts above are excluded or reported individually; other tasks continue.</p>'
+    content = carry + hidden('attempts', attempts) + hidden('operation', 'benchmark') + ''.join(hidden('configuration', json.dumps(c)) for c in configs)
     if query.get('exclude') == ['yes']:
         content += hidden('exclude', 'yes')
     content += execution_host(pages)
     content += '<div class="actions"><button' + ('' if runnable else ' disabled') + '>Run benchmark</button>' + pages.link('Start over', 'benchmarks', 'new', task=[t['task_id'] for t in chosen]) + '</div>'
     return pages.page('Run benchmark · Review and run', body + form(pages, 'selection', content))
+
+
+def _budget_label(conditions):
+    limits = conditions.get('limits')
+    if not limits:
+        return 'Unavailable'
+    coding = f"{limits['timeout_seconds']:g}s · {limits['cpus']:g} CPU · {limits['memory_mb']} MiB"
+    grading = (conditions.get('grading') or {}).get('limits')
+    if grading:
+        coding += f" / grading {grading['timeout_seconds']:g}s · {grading['cpus']:g} CPU · {grading['memory_mb']} MiB"
+    return coding
 
 
 def comparison_table(pages, report):
@@ -226,8 +240,10 @@ def comparison_table(pages, report):
         o = m['overall']; c = m['comparable']
         rate = percent(o['pass_rate'])
         bar = '' if o['pass_rate'] is None else '<meter min="0" max="1" value="' + str(o['pass_rate']) + '">' + rate + '</meter>'
-        rows.append((pages.link(m['model']['name'], 'models', model=m['model']['name']), esc(m['model'].get('reasoning_effort') or 'unspecified'), esc(m['harness']['name']), '<span class="rate">' + rate + bar + '</span>', str(o['pass']) + ' / ' + str(o['evaluated']), str(o['covered_tasks']) + ' / ' + str(o['available']) + ' tasks', percent(c['pass_rate']) + ' · ' + str(c['evaluated']) + ' samples', str(m['category_count']) + ' / ' + str(len(CATEGORIES))))
-    return table(['Model', 'Reasoning', 'Harness', 'All-evidence pass rate', 'Passed / evaluated', 'Task coverage', 'Comparable pass rate', 'Categories'], rows)
+        rows.append((pages.link(m['model']['name'], 'models', model=m['model']['name']), esc(m['model'].get('reasoning_effort') or 'unspecified'), esc(m['harness']['name']), '<span class="rate">' + rate + bar + '</span>', str(o['pass']) + ' / ' + str(o['decided']), str(o['covered_tasks']) + ' / ' + str(o['available']) + ' tasks', percent(c['pass_rate']) + ' · ' + str(c['evaluated']) + ' samples', str(m['category_count']) + ' / ' + str(len(CATEGORIES)),
+                     str(o['attempt_count']), str(o['infrastructure_errors']),
+                     esc(_budget_label(m['conditions']))))
+    return table(['Model', 'Reasoning', 'Harness', 'All-evidence pass rate', 'Passed / decided', 'Task coverage', 'Comparable pass rate', 'Categories', 'Attempts', 'Infrastructure errors', 'Run budget'], rows)
 
 
 def overview(pages):
@@ -428,7 +444,7 @@ def action(pages, route, fields):
     configs += [{'model': m.strip(), 'effort': fields.get('effort', ['medium'])[0], 'adapter': 'codex'}
                 for m in fields.get('models', [''])[0].splitlines() if m.strip()]
     outcomes = workflows.enqueue(kind, selections, configs, exclude=fields.get('exclude') == ['yes'],
-                                 execution_host=fields.get('execution_host', ['local'])[0])
+                                 execution_host=fields.get('execution_host', ['local'])[0], attempts=int(fields.get('attempts', ['1'])[0]))
     pages.start_worker()
     submission = table(['Task', 'Submission outcome', 'Details'], ((pages.task_link(r['task']), status(r['state']), esc(r.get('detail', ''))) for r in outcomes))
     progress = jobs(pages)

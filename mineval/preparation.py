@@ -23,21 +23,10 @@ def commit(value):
     return value
 
 
-def git(repo, *args, output=None):
-    with tempfile.TemporaryFile() as err:
-        try:
-            result = subprocess.run(['git', '--no-replace-objects', '-C', str(repo), *args],
-                                    stdout=output or subprocess.PIPE, stderr=err,
-                                    stdin=subprocess.DEVNULL, timeout=120, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError(f'Cannot read repository: {exc}') from exc
-        if result.returncode:
-            err.seek(0)
-            raise ValueError('Git source error: ' + err.read(4096).decode(errors='replace'))
-    return result.stdout
-
-
-def export_git(repo, sha, target):
+def export_git(repo, sha, target, *, submodule=None, validate=True, budget=None):
+    from .history import git
+    if budget is None:
+        budget = {'entries': 0, 'bytes': 0}
     if git(repo, 'rev-parse', '--verify', sha + '^{commit}').decode().strip() != sha:
         raise ValueError('Commit identity mismatch')
     # Read blobs directly: git archive honors export-ignore and could omit task files.
@@ -48,23 +37,41 @@ def export_git(repo, sha, target):
             continue
         header, name = entry.split(b'\t', 1)
         mode, kind, oid = header.split()
-        if mode not in (b'100644', b'100755') or kind != b'blob':
-            raise ValueError('Symlinks/submodules require an explicit supported producer export')
-        path = relative(name.decode('utf-8'))
+        try:
+            path = relative(name.decode('utf-8'))
+        except UnicodeError as exc:
+            raise ValueError(f'Unsupported non-UTF-8 Git path: {name!r}') from exc
+        budget['entries'] += 1
+        if budget['entries'] > MAX_FILES:
+            raise ValueError(f'Repository exceeds {MAX_FILES} entries at {path}')
+        if mode == b'160000' and kind == b'commit':
+            if submodule is None:
+                raise ValueError(f'Missing pinned submodule source: {path} at {oid.decode()}')
+            submodule(repo, sha, path, oid.decode(), target, budget)
+            continue
+        if mode not in (b'100644', b'100755', b'120000') or kind != b'blob':
+            raise ValueError(f'Unsupported Git entry: {path}')
         entries.append((mode, oid, path))
-        if len(entries) > MAX_FILES:
-            raise ValueError('Repository exceeds file budget')
     # Bound the batch before exporting blob contents to temporary disk.
+    from .history import git_environment
     probe = subprocess.run(['git', '--no-replace-objects', '-C', str(repo), 'cat-file', '--batch-check'],
-                           input=b''.join(oid + b'\n' for _, oid, _ in entries),
+                           input=b''.join(oid + b'\n' for _, oid, _ in entries), env=git_environment(),
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-    if probe.returncode or sum(int(line.split()[2]) for line in probe.stdout.splitlines()) > MAX_BYTES:
-        raise ValueError('Repository exceeds artifact budget or contains missing objects')
+    sizes = probe.stdout.splitlines()
+    if probe.returncode or len(sizes) != len(entries):
+        raise ValueError(f'Cannot inspect Git objects at {sha}')
+    for (_, _, path), line in zip(entries, sizes):
+        fields = line.split()
+        if len(fields) != 3 or fields[1] != b'blob':
+            raise ValueError(f'Missing Git blob at {sha}:{path}')
+        budget['bytes'] += int(fields[2])
+        if budget['bytes'] > MAX_BYTES:
+            raise ValueError(f'Repository exceeds {MAX_BYTES} bytes at {sha}:{path}')
     target = Path(target)
-    target.mkdir(parents=True)
+    target.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc = subprocess.run(['git', '--no-replace-objects', '-C', str(repo), 'cat-file', '--batch'],
-                              input=b''.join(oid + b'\n' for _, oid, _ in entries), stdout=out,
+                              input=b''.join(oid + b'\n' for _, oid, _ in entries), stdout=out, env=git_environment(),
                               stderr=err, timeout=120)
         if proc.returncode:
             raise ValueError('Could not export Git objects')
@@ -78,17 +85,25 @@ def export_git(repo, sha, target):
                 raise ValueError('Invalid or oversized Git export')
             destination = target / path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with destination.open('xb') as dst:
-                remaining = size
-                while remaining:
-                    block = out.read(min(remaining, 1024 * 1024))
-                    if not block:
-                        raise ValueError('Truncated Git object')
-                    dst.write(block)
-                    remaining -= len(block)
+            if mode == b'120000':
+                if size > 4095:
+                    raise ValueError(f'Symbolic link exceeds 4095 bytes: {path}')
+                destination.symlink_to(os.fsdecode(out.read(size)))
+            else:
+                with destination.open('xb') as dst:
+                    remaining = size
+                    while remaining:
+                        block = out.read(min(remaining, 1024 * 1024))
+                        if not block:
+                            raise ValueError('Truncated Git object')
+                        dst.write(block)
+                        remaining -= len(block)
             if out.read(1) != b'\n':
                 raise ValueError('Invalid Git object separator')
-            destination.chmod(0o755 if mode == b'100755' else 0o644)
+            if mode != b'120000':
+                destination.chmod(0o755 if mode == b'100755' else 0o644)
+    if validate:
+        inventory(target)
 
 
 class Store:
@@ -292,37 +307,39 @@ class Store:
                             'grounding': 'not-imported'}
                 private = task / 'private'
                 private.mkdir(mode=0o700)
-                if source['type'] == 'git':
-                    repo = Path(source['path']).resolve(strict=True)
-                    export_git(repo, base, private / 'base')
-                    from .history import create_pack
-                    create_pack(repo, base, private / 'history.pack')
+                repo = Path(source['path']).resolve(strict=True)
+                if not repo.is_dir():
+                    raise ValueError(f'Git source must be a repository directory: {repo}')
+                from .history import create_pack, git as safe_git
+                if not (repo / '.git').exists() and not (repo / 'HEAD').is_file():
+                    raise ValueError(f'Git history is required at {repo}')
+                safe_git(repo, 'rev-parse', '--git-dir')
+                from .repository import Intake
+                intake = Intake(repo, private)
+                intake.export(base, private / 'base', base=True)
+                create_pack(repo, base, private / 'history.pack')
+                with tempfile.TemporaryDirectory(dir=self.root) as temp:
                     for sha in futures:
-                        git(repo, 'merge-base', '--is-ancestor', base, sha)
-                        export_git(repo, sha, private / 'future' / sha)
+                        safe_git(repo, 'merge-base', '--is-ancestor', base, sha)
+                        tree = Path(temp) / sha
+                        intake.export(sha, tree)
+                        for evidence in candidate.get('future_evidence', []):
+                            if evidence['commit'] == sha and 'path' in evidence:
+                                if evidence['path'] not in inventory(tree):
+                                    raise ValueError(f"Missing future evidence at {sha}: {evidence['path']}")
+                        shutil.rmtree(tree)
                         patch = private / 'diffs' / (sha + '.patch')
                         patch.parent.mkdir(exist_ok=True)
                         with patch.open('wb') as out:
-                            git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--binary', base, sha, '--', output=out)
+                            safe_git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--binary', base, sha, '--', output=out)
                         inventory(private)
-                    grounding = 'git-objects-and-ancestry-checked'
-                elif source['type'] in ('tree', 'archive'):
-                    if not candidate.get('source_attestation') or not candidate.get('future_source'):
-                        raise ValueError('Raw exports require source_attestation and future_source')
-                    self._import(source, private / 'base')
-                    self._import(candidate['future_source'], private / 'future')
-                    for sha in futures:
-                        if not (private / 'future' / sha).is_dir():
-                            raise ValueError('Raw future_source must contain one directory per future SHA')
-                    grounding = 'producer-attested-raw-export'
-                else:
-                    raise ValueError('Supported sources: git, tree, archive')
-                for evidence in candidate.get('future_evidence', []):
-                    if 'path' in evidence and not (private / 'future' / evidence['commit'] / evidence['path']).is_file():
-                        raise ValueError('Future evidence path does not exist at its source commit')
+                intake.finish(futures)
+                grounding = 'git-objects-and-ancestry-checked'
                 base_inventory = inventory(private / 'base')
                 source_inventory = inventory(private)
-                write_json(task / 'metadata.json', candidate | {'future_commits': futures, 'grounding': grounding})
+                contract = 'native-script-v1' if candidate.get('schema_version') == 2 else 'legacy'
+                write_json(task / 'metadata.json', candidate | {'future_commits': futures, 'grounding': grounding,
+                                                                 'preparation_contract': contract})
                 write_json(task / 'source-hashes.json', source_inventory)
                 write_json(task / 'base-inventory.json', base_inventory)
                 write_json(task / 'status.json', {'status': 'draft'})
@@ -332,6 +349,8 @@ class Store:
                 (draft / 'control').mkdir()
                 write_json(draft / 'control' / 'task.json', {
                     key: candidate[key] for key in ('task_id', 'repository', 'base_commit', 'task_summary')})
+                if 'task_instructions' in candidate:
+                    (draft / 'control/task-brief.md').write_text(candidate['task_instructions'])
                 write_json(draft / 'control' / 'verify.json', {
                     'image': '', 'network': 'bridge', 'workdir': '/workspace',
                     'limits': {'timeout_seconds': 300},
@@ -342,15 +361,6 @@ class Store:
                 shutil.rmtree(draft, ignore_errors=True)
                 raise
         return {'task_id': task_id, 'status': 'draft', 'grounding': grounding, 'intake': candidate['intake']}
-
-    @staticmethod
-    def _import(source, target):
-        if source['type'] == 'tree':
-            copy_tree(Path(source['path']).resolve(strict=True), target)
-        elif source['type'] == 'archive':
-            unpack(source['path'], target)
-        else:
-            raise ValueError('Raw source type must be tree or archive')
 
     def reject(self, task_id, reason):
         if not reason.strip():
@@ -418,6 +428,20 @@ class Store:
             write_json(staged / 'workspace-format.json', {
                 'schema_version': 1, 'tree': {'format': 'tar', 'path': 'snapshot.tar.gz'},
                 'git_history': history_format})
+            private = task / 'private'
+            if (private / 'git-sources.json').exists():
+                expected = read_json(task / 'source-hashes.json')
+                if digest(private / 'git-sources.json') != expected['git-sources.json']['sha256']:
+                    raise ValueError('Modified Git source descriptor')
+                modules = read_json(private / 'git-sources.json')['base_modules']
+                if modules:
+                    for item in modules.values():
+                        name = item['pack']
+                        if digest(private / name) != expected[name]['sha256']:
+                            raise ValueError(f'Modified pinned submodule pack: {name}')
+                        (staged / name).parent.mkdir(exist_ok=True)
+                        shutil.copyfile(private / name, staged / name)
+                    write_json(staged / 'submodules.json', modules)
             pack(clean, staged / 'snapshot.tar.gz')
             sha = digest(staged / 'snapshot.tar.gz')
             (staged / 'snapshot.sha256').write_text(sha + '\n')
@@ -430,6 +454,10 @@ class Store:
                     raise ValueError('Cannot record cleanup patch: ' + result.stderr.decode(errors='replace'))
             write_json(staged / 'cleanup-report.json', review | {'changed_paths': changed, 'snapshot_sha256': sha})
             write_json(staged / 'tree-hashes.json', current)
+            brief = draft / 'control/task-brief.md'
+            if brief.exists() or brief.is_symlink():
+                from .intake import read_brief
+                (staged / 'task-brief.md').write_text(read_brief(brief))
             write_json(staged / 'task-instructions.json', {
                 'task_summary': read_json(task / 'metadata.json')['task_summary']})
             # Config validation is shared with diagnostics.
@@ -478,6 +506,22 @@ class Store:
             configs = [item['report']['configuration'] for item in reviewed]
             if any(item != configs[0] for item in configs[1:]):
                 raise ValueError('Reviewed validations must use one fixed evaluation configuration')
+            native = configs[0].get('grading_type') == 'native-script-v1'
+            metadata = read_json(task / 'metadata.json')
+            if metadata.get('preparation_contract') == 'native-script-v1' and not native:
+                raise ValueError('New tasks require a frozen native verification script')
+            if native:
+                if not (staged / 'task-brief.md').is_file():
+                    raise ValueError('Native grading requires a separate reviewed task brief')
+                from .verification import check_project_config, pinned_image
+                check_project_config(config, configs[0])
+                image = pinned_image(config, diagnostic)
+                if any(item.get('source_hashes') != current for item in base_checks):
+                    raise ValueError('Run native validation again on the current cleaned base')
+                if any(item['report'].get('image_id') != image for item in reviewed):
+                    raise ValueError('Reviewed validations used a different project image')
+                if (cleanup.exists() and record.get('image_id') != image):
+                    raise ValueError('Cleanup used a different project image')
             write_json(staged / 'evaluation-config.json', configs[0])
             write_json(staged / 'approval.json', approval)
             write_json(staged / 'artifact-hashes.json', inventory(staged))
@@ -485,7 +529,7 @@ class Store:
             versions.mkdir(exist_ok=True)
             os.rename(staged, versions / version)
             for p in (versions / version).rglob('*'):
-                if p.is_file():
+                if not p.is_symlink() and p.is_file():
                     p.chmod(0o444)
             write_json(task / 'status.json', {'status': 'frozen', 'version': version, 'snapshot_sha256': sha})
             return {'version': version, 'snapshot_sha256': sha}
@@ -531,6 +575,10 @@ class Store:
                     if history_format.get('format') == 'base-pack-v1':
                         from .history import restore
                         restore(frozen / 'history.pack', history_format['base_commit'], tree)
+                    modules = frozen / 'submodules.json'
+                    if modules.exists():
+                        from .repository import attach_modules
+                        attach_modules(tree, frozen, read_json(modules))
                     write_json(Path(temp) / 'hashes.json', inventory(tree, allow_git=True))
                     cached.parent.mkdir(exist_ok=True)
                     # Atomically publish the complete tree and its receipt together.
@@ -580,7 +628,6 @@ class Store:
         with tempfile.TemporaryDirectory(dir=self.root) as temp:
             task = self.task(task_id)
             metadata = read_json(task / 'metadata.json')
-            original = read_json(task / 'source-hashes.json')
             records = []
             staging = Path(temp) / 'extraction'
             staging.mkdir()
@@ -598,10 +645,6 @@ class Store:
                     sha = commit(item['commit'])
                     if sha not in metadata['future_commits']:
                         raise ValueError('Extraction requires a known source commit')
-                    key = f'future/{sha}/{path}'
-                    source = task / 'private' / key
-                    if key not in original or source.is_symlink() or digest(source) != original[key]['sha256']:
-                        raise ValueError('Missing or modified source evidence')
                     destination = staging / 'verification' / sha / path
                     record = item
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -610,9 +653,17 @@ class Store:
                 if generated:
                     destination.write_text(item['content'])
                 else:
-                    shutil.copyfile(source, destination)
-                    destination.chmod(0o755 if original[key]['executable'] else 0o644)
+                    from .repository import future_tree
+                    with future_tree(task, sha) as tree:
+                        entry = inventory(tree).get(path.as_posix(), {})
+                        if 'sha256' not in entry:
+                            raise ValueError(f'Missing regular source evidence: {sha}:{path}')
+                        shutil.copyfile(tree / path, destination)
+                        destination.chmod(0o755 if entry['executable'] else 0o644)
                 records.append(record | {'sha256': digest(destination), 'stored_path': destination.relative_to(staging).as_posix()})
+            if plan and (plan.get('evaluation_config') or {}).get('grading_type') == 'native-script-v1':
+                from .native_grading import script_artifact
+                script_artifact(records, plan['evaluation_config'])
             if not records:
                 raise ValueError('Select at least one verification artifact')
             write_json(staging / 'extraction-manifest.json', {'artifacts': records, 'applied': False,
@@ -623,6 +674,6 @@ class Store:
             target.parent.mkdir(exist_ok=True)
             os.rename(staging, target)
             for path in target.rglob('*'):
-                if path.is_file():
+                if not path.is_symlink() and path.is_file():
                     path.chmod(0o444)
             return {'extraction_id': extraction_id, 'artifacts': records}

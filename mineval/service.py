@@ -29,7 +29,8 @@ def request(action='verify', socket_path=None):
 
 
 @contextmanager
-def broker(store, task_id, runner, agent, *, workspace=None, config_path=None, diagnostic_ids=None):
+def broker(store, task_id, runner, agent, *, workspace=None, config_path=None,
+           diagnostic_ids=None, image_reference=None):
     # /tmp keeps the Unix path under Linux's 108-byte sockaddr limit.
     with tempfile.TemporaryDirectory(prefix='mineval-broker-') as temp:
         path = Path(temp) / 'verify.sock'
@@ -40,7 +41,9 @@ def broker(store, task_id, runner, agent, *, workspace=None, config_path=None, d
                     payload = json.loads(self.rfile.readline(1024))
                     if payload == {'action': 'verify'}:
                         response = diagnose(store, task_id, sandbox=runner, agent=agent, already_locked=True,
-                                            workspace=workspace, config_path=config_path)
+                                            workspace=workspace, config_path=config_path,
+                                            project_image=(image_reference, agent.container.image_id)
+                                            if image_reference is not None else None)
                         if diagnostic_ids is not None:
                             diagnostic_ids.append(response['diagnostic_id'])
                     elif payload == {'action': 'report'}:
@@ -82,7 +85,8 @@ def session(store, task_id, command=None, *, context=None, stage='cleanup', adap
                 workspace = Path(temp) / 'review'
                 workspace.mkdir()
                 task = store.task(task_id)
-                copy_tree(task / 'private' / 'future', workspace / 'future')
+                from .repository import copy_futures
+                copy_futures(task, workspace / 'future')
                 copy_tree(task / 'private' / 'base', workspace / 'base')
                 if (task / 'private' / 'diffs').exists():
                     copy_tree(task / 'private' / 'diffs', workspace / 'diffs')
@@ -90,7 +94,7 @@ def session(store, task_id, command=None, *, context=None, stage='cleanup', adap
                 write_json(workspace / 'task.json', {key: metadata[key] for key in
                            ('task_id', 'repository', 'base_commit', 'task_summary', 'future_commits')})
                 spec = SandboxSpec(config['image'], tuple(command), limits, workspace=workspace,
-                                   network=config.get('network', 'bridge'), retain_logs=False)
+                                   network=config.get('network', 'bridge'), services=config.get('services', ()), retain_logs=False)
                 result = runner.run(spec)
                 # Preserve suggestions; host extract still validates selected source bytes.
                 selection = workspace / 'selection.json'
@@ -117,7 +121,10 @@ def cleanup_session(store, task_id, command, *, runner, adapter=None, auth_file=
         config = load_config(draft / 'control/verify.json')
         write_json(control / 'verify.json', config)
         summary = read_json(store.task(task_id) / 'metadata.json')['task_summary']
-        (inputs / 'prompt.txt').write_text(POLICY + '\n' + INSTRUCTIONS + '\nTask to preserve:\n' + summary)
+        brief = draft / 'control/task-brief.md'
+        from .intake import read_brief
+        (inputs / 'prompt.txt').write_text(POLICY + '\n' + INSTRUCTIONS + '\nTask to preserve:\n' +
+                                           (read_brief(brief) if brief.exists() else summary))
         write_json(control / 'task.json', {'task_summary': summary})
         if adapter:
             if command or not isinstance(adapter, (CodexAdapter, FakeAdapter)):
@@ -142,10 +149,12 @@ def cleanup_session(store, task_id, command, *, runner, adapter=None, auth_file=
         agent = Agent()
         diagnostic_ids = []
         with broker(store, task_id, runner, agent, workspace=workspace,
-                    config_path=control / 'verify.json', diagnostic_ids=diagnostic_ids) as directory:
+                    config_path=control / 'verify.json', diagnostic_ids=diagnostic_ids,
+                    image_reference=config['image']) as directory:
             spec = SandboxSpec(config['image'], tuple(command), limits,
                                workspace=workspace, control=control, broker=directory, inputs=inputs,
-                               network='bridge', workdir='/workspace', retain_logs=False)
+                               network=config.get('agent_network', 'bridge'), workdir=config.get('workdir', '/workspace'),
+                               services=config.get('services', ()), retain_logs=False)
             with runner.container(spec) as container:
                 agent.container = container
                 container.start()

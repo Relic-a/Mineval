@@ -4,7 +4,7 @@ import shutil
 from . import processes as subprocess
 from uuid import uuid4
 
-from .artifacts import digest, inventory, pack, read_json, relative, write_json
+from .artifacts import copy_tree, digest, inventory, pack, read_json, relative, write_json
 
 INSTRUCTIONS = """You are preparing the historical base, not solving its task.
 Change as little as necessary for reproducible setup. If verify.json contains only
@@ -48,6 +48,18 @@ def restore_history(store, task_id, workspace):
         raise ValueError('Stored historical Git pack was modified')
     from .history import restore
     restore(history, read_json(task / 'metadata.json')['base_commit'], workspace)
+    descriptor = task / 'private/git-sources.json'
+    if descriptor.exists():
+        from .repository import attach_modules
+        expected = read_json(task / 'source-hashes.json')
+        if digest(descriptor) != expected['git-sources.json']['sha256']:
+            raise ValueError('Modified Git source descriptor')
+        modules = read_json(descriptor)['base_modules']
+        for item in modules.values():
+            name = item['pack']
+            if digest(task / 'private' / name) != expected[name]['sha256']:
+                raise ValueError(f'Modified pinned submodule: {name}')
+        attach_modules(workspace, task / 'private', modules)
     return True
 
 
@@ -149,7 +161,7 @@ def save_attempt(store, task_id, clean, control, result, *, image_id, diagnostic
     # The lock excludes host operations. Publish only validated tree/config, never
     # arbitrary control files or agent Git metadata. Failed attempts remain reviewable.
     replacement = clean.parent / 'replacement'
-    shutil.copytree(clean, replacement)
+    copy_tree(clean, replacement)
     old = clean.parent / 'old-draft'
     os.rename(draft / 'workspace', old)
     try:

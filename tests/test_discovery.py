@@ -107,8 +107,9 @@ class DiscoveryIntakeTests(unittest.TestCase):
         self.assertEqual(code, 125)
         self.assertIn('already registered', error)
         shutil.rmtree(self.repo)
-        copied = self.store.task(task_id) / 'private/future' / self.evidence / 'tests/test_batch.py'
-        self.assertEqual(copied.read_bytes(), check)
+        from mineval.repository import future_tree
+        with future_tree(self.store.task(task_id), self.evidence) as tree:
+            self.assertEqual((tree / 'tests/test_batch.py').read_bytes(), check)
         self.assertEqual(Store(self.store.root).inspect_task(task_id)['metadata'], metadata)
 
     def test_incomplete_deferred_and_rejected_records_do_not_create_workspaces(self):

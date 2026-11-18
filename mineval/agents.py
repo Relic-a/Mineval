@@ -48,7 +48,8 @@ class CodexAdapter:
         shutil.copyfile(Path(__file__).with_name('codex_runner.py'), inputs / 'codex_runner.py')
         write_json(inputs / 'schema.json', SCHEMA)
         # No host binary, user config, plugins, home, or session directory is mounted.
-        # Shell runs only in the container; task text is stdin, never shell source.
+        # Keep the pinned image's toolchain environment. Docker does not inherit
+        # the host environment, and task text is passed as standard input.
         command = ('sh', '-c', '''
 set -eu
 mkdir -p /tmp/codex
@@ -68,10 +69,10 @@ fi
 if [ -d /mineval-dependency-cache/cargo ]; then
   dependency_env="$dependency_env CARGO_HOME=/mineval-dependency-cache/cargo"
 fi
-exec env -i PATH="$PATH" HOME=/tmp CODEX_HOME=/tmp/codex RUSTUP_HOME="${RUSTUP_HOME:-/tmp/.rustup}" \
+exec env PATH="$PATH" HOME=/tmp CODEX_HOME=/tmp/codex RUSTUP_HOME="${RUSTUP_HOME:-/tmp/.rustup}" \
   $dependency_env \
   NPM_CONFIG_CACHE="$npm_cache" NPM_CONFIG_PREFER_OFFLINE=true NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false \
-  python3 /mineval-input/codex_runner.py --model "$1"
+  MINEVAL_PROJECT_WORKDIR="$PWD" python3 /mineval-input/codex_runner.py --model "$1"
 ''', 'mineval-codex', self.model)
         if self.effort:
             return (*command[:2], command[2].replace('--model "$1"', '"$@"'), command[3],
@@ -164,7 +165,8 @@ def discard_generated_npm(workspace, starting_inventory):
 
 
 def run_agent(workspace, instructions, destination, *, image, adapter=None,
-              context=None, limits=None, auth_file=None, sandbox=None, capture_interrupt=False, disposable=False, history_receipt=None):
+              context=None, limits=None, auth_file=None, sandbox=None, capture_interrupt=False, disposable=False, history_receipt=None,
+              network='bridge', workdir='/workspace', services=()):
     """Input is read-only to the host runner. Only disposable copies are mounted.
 
     Input must be a materialized historical workspace, never a modern clone.
@@ -220,7 +222,7 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
             provision_auth(auth_file, inputs / 'auth.json')
         command = adapter.stage(inputs)
         spec = SandboxSpec(image, command, limits, workspace=project, inputs=inputs,
-                           control=control, network='bridge', retain_logs=False)
+                           control=control, network=network, workdir=workdir, services=services, retain_logs=False)
         started = time.monotonic()
         try:
             with runner.container(spec) as container:
@@ -247,15 +249,19 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
                 raise
             state = {'ExitCode': None, 'OOMKilled': False}
             status, timed_out, report = 'cancelled', False, None
-        # Never run host Git on agent-controlled output. Discard its Git metadata.
-        if metadata.is_symlink() or metadata.is_file():
-            metadata.unlink()
-        elif metadata.exists():
-            shutil.rmtree(metadata)
         from .devlog import event
         removed = discard_generated_npm(project, starting_inventory)
         event('agent.output.generated_dependencies_removed', directories=removed)
-        inventory(project)  # Reject links/sockets/special files before exporting.
+        # Keep the candidate tree and discard all agent-controlled Git metadata.
+        for current, dirs, files in os.walk(project, followlinks=False):
+            if '.git' in dirs or '.git' in files:
+                nested = Path(current) / '.git'
+                if nested.is_symlink() or not nested.is_dir():
+                    nested.unlink()
+                else:
+                    dirs.remove('.git')
+                    shutil.rmtree(nested)
+        inventory(project)
         destination.mkdir(parents=True, exist_ok=False)
         try:
             pack(project, destination / 'workspace.tar.gz')
@@ -268,7 +274,10 @@ def run_agent(workspace, instructions, destination, *, image, adapter=None,
                       'instructions_sha256': digest(inputs / 'prompt.txt'),
                       'workspace_sha256': digest(destination / 'workspace.tar.gz'),
                       'completion': report, 'solution_lookup_evidence': 'self-reported'}
-            cache_stats = getattr(container, 'cache_stats', None) if 'container' in locals() else None
+            service_images = getattr(container, 'service_images', None) if 'container' in locals() else None
+            if isinstance(service_images, dict):
+                result['service_images'] = service_images
+            cache_stats = getattr(container, 'cache_stats', None) if 'container' in locals() else None if 'container' in locals() else None
             if isinstance(cache_stats, dict):
                 result['download_cache'] = cache_stats
             write_json(destination / 'result.json', result)

@@ -1,4 +1,4 @@
-"""Bounded, link-free artifact operations. Never follow imported filesystem links."""
+"""Bounded artifact operations that preserve workspace-relative symbolic links."""
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -70,10 +70,41 @@ def read_json(path):
 
 
 def relative(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError(f'Unsafe artifact path: {value!r}')
     p = PurePosixPath(value)
-    if not isinstance(value, str) or not value or p.is_absolute() or any(x in ('', '.', '..', '.git') for x in value.split('/')) or '\\' in value:
+    if p.is_absolute() or any(x in ('', '.', '..', '.git') for x in value.split('/')) or '\\' in value:
         raise ValueError(f'Unsafe artifact path: {value!r}')
     return p
+
+
+def validate_links(links):
+    """Resolve link targets against the link table without touching the filesystem."""
+    for name, target in links.items():
+        pending = target.split('/')
+        current = name.split('/')[:-1]
+        hops = 0
+        if not target or target.startswith('/'):
+            raise ValueError(f'Unsafe symbolic link: {name} -> {target}')
+        while pending:
+            part, *pending = pending
+            if part in ('', '.'):
+                continue
+            if part == '..':
+                if not current:
+                    raise ValueError(f'Escaping symbolic link: {name} -> {target}')
+                current.pop()
+                continue
+            if part == '.git':
+                raise ValueError(f'Symbolic link references Git metadata: {name}')
+            current.append(part)
+            nested = links.get('/'.join(current))
+            if nested is not None:
+                hops += 1
+                if hops > 40 or not nested or nested.startswith('/'):
+                    raise ValueError(f'Unsafe symbolic link chain: {name}')
+                current.pop()
+                pending = nested.split('/') + pending
 
 
 def inventory(root, *, allow_git=False, skip_root_git=False):
@@ -82,8 +113,9 @@ def inventory(root, *, allow_git=False, skip_root_git=False):
         raise ValueError('Artifact root must be a directory, not a link')
     result = {}
     total = count = 0
+    links = {}
     for current, dirs, files in os.walk(root, followlinks=False):
-        if skip_root_git and Path(current) == root:
+        if skip_root_git:
             dirs[:] = [name for name in dirs if name != '.git']
             files[:] = [name for name in files if name != '.git']
         dirs.sort()
@@ -91,18 +123,24 @@ def inventory(root, *, allow_git=False, skip_root_git=False):
         for name in dirs + files:
             count += 1
             if count > MAX_FILES:
-                raise ValueError('Workspace exceeds artifact entry budget')
+                raise ValueError(f'Workspace exceeds {MAX_FILES} artifact entries at {Path(current) / name}')
             path = Path(current) / name
             mode = path.lstat().st_mode
             if name == '.git' and not allow_git:
                 raise ValueError('.git is forbidden in exported trees')
-            if not stat.S_ISDIR(mode) and not stat.S_ISREG(mode):
-                raise ValueError(f'Links and special files are unsupported: {path}')
-            if stat.S_ISREG(mode):
+            if stat.S_ISLNK(mode):
+                name = path.relative_to(root).as_posix()
+                links[name] = os.readlink(path)
+                result[name] = {'symlink': links[name]}
+                total += len(os.fsencode(links[name]))
+            elif not stat.S_ISDIR(mode) and not stat.S_ISREG(mode):
+                raise ValueError(f'Special files are unsupported: {path}')
+            elif stat.S_ISREG(mode):
                 total += path.stat().st_size
-                if total > MAX_BYTES or len(result) >= MAX_FILES:
-                    raise ValueError('Workspace exceeds artifact budget')
                 result[path.relative_to(root).as_posix()] = {'sha256': digest(path), 'executable': bool(mode & 0o111)}
+            if total > MAX_BYTES:
+                raise ValueError(f'Workspace exceeds {MAX_BYTES} artifact bytes at {path}')
+    validate_links(links)
     return result
 
 
@@ -111,18 +149,18 @@ def copy_tree(source, target, *, allow_git=False, expected_inventory=None):
     before = inventory(source, allow_git=allow_git)
     if expected_inventory is not None and before != expected_inventory:
         raise ValueError('Source integrity mismatch')
-    shutil.copytree(source, target, copy_function=clone_file)
+    shutil.copytree(source, target, copy_function=clone_file, symlinks=True)
     if inventory(source, allow_git=allow_git) != before or inventory(target, allow_git=allow_git) != before:
         raise ValueError('Source changed during copy; stop external writers and retry')
     return before
 
 
 def copy_worktree(source, target):
-    """Copy an agent tree without reading or trusting its top-level Git metadata."""
+    """Copy an agent tree without reading or trusting Git metadata."""
     source = Path(source)
     before = inventory(source, skip_root_git=True)
-    shutil.copytree(source, target, copy_function=clone_file, ignore=lambda directory, names:
-                    {'.git'} if Path(directory) == source else set())
+    shutil.copytree(source, target, copy_function=clone_file, symlinks=True, ignore=lambda directory, names:
+                    {'.git'})
     if inventory(source, skip_root_git=True) != before or inventory(target) != before:
         raise ValueError('Source changed during copy; stop external writers and retry')
     return before
@@ -132,6 +170,7 @@ def unpack(archive, target):
     target = Path(target)
     target.mkdir(parents=True, exist_ok=False)
     total = count = 0
+    links = {}
     try:
         with tarfile.open(archive, 'r:*') as tar:
             seen = set()
@@ -140,21 +179,29 @@ def unpack(archive, target):
                 if name in ('', '.') and member.isdir():
                     continue
                 p = relative(name)
-                if name in seen or not (member.isdir() or member.isfile()):
-                    raise ValueError('Duplicate, linked or special archive member')
+                if name in seen or not (member.isdir() or member.isfile() or member.issym()):
+                    raise ValueError(f'Duplicate or unsupported archive member: {name}')
                 seen.add(name)
-                total += member.size
+                total += len(os.fsencode(member.linkname)) if member.issym() else member.size
                 count += 1
                 if total > MAX_BYTES or count > MAX_FILES:
-                    raise ValueError('Archive exceeds artifact budget')
+                    raise ValueError(f'Archive exceeds {MAX_BYTES} bytes or {MAX_FILES} entries at {name}')
                 out = target.joinpath(*p.parts)
-                if member.isdir():
+                if member.issym():
+                    links[name] = member.linkname
+                elif member.isdir():
                     out.mkdir(parents=True, exist_ok=True)
                 else:
                     out.parent.mkdir(parents=True, exist_ok=True)
                     with tar.extractfile(member) as src, out.open('xb') as dst:
                         shutil.copyfileobj(src, dst)
                     out.chmod(0o755 if member.mode & 0o111 else 0o644)
+        validate_links(links)
+        for name, link in links.items():
+            out = target / name
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.symlink_to(link)
+        inventory(target)
     except BaseException:
         shutil.rmtree(target)
         raise

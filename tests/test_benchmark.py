@@ -204,8 +204,10 @@ class BenchmarkTests(HistoryFixture):
         self.assertEqual(different['coverage']['common'], 0)
         self.assertEqual(len(different['left_only']), 1)
         self.assertFalse(different['task_verdicts_available'])
-        with self.assertRaisesRegex(ValueError, 'one attempt'):
-            benchmark.compare(self.store, {'left': [ref('right'), ref('other-revision')], 'right': [ref('right')]})
+        excluded = benchmark.compare(self.store, {
+            'left': [ref('right'), ref('other-revision')], 'right': [ref('right')]})['excluded']
+        self.assertEqual(excluded, [{'side': 'left', 'task_id': 'example', 'run_id': 'other-revision',
+                                     'reason': 'no matching task revision'}])
         with self.assertRaisesRegex(ValueError, 'not a member'):
             self.run_fake(second_version, 'bad-suite', suite='fixed')
         self.assertFalse((self.store.task('example') / 'runs/bad-suite.json').exists())

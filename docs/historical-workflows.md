@@ -566,3 +566,20 @@ Each step executes even after an assertion failure, allowing explicit cleanup st
 The candidate container is discarded on completion or infrastructure failure. All
 case and step counts are checked before a pass is published. Requests already sent
 are visible to the application, so private inputs are not secret once exercised.
+
+
+## Repeated attempts and comparison
+
+The default is one attempt per revision and model. Use `mineval bench run --attempts N`
+for an explicit task or suite run, or set `attempts` in the workflow submission JSON.
+The benchmark picker offers the same setting. To run a new batch for a model and
+revision that already have an attempt, clear **Skip already benchmarked tasks** or
+set `exclude: false` in the workflow submission. Each attempt has its own run ID,
+disposable workspace and fresh service state.
+
+Comparisons match the exact prepared revision, grading rules and resolved environment.
+Coding and grading budgets are reported separately by cohort. Pass rate is passed
+divided by decided attempts. Reports also show the number of attempts, inconclusive
+results, infrastructure errors and exclusions. A regrade reuses the original attempt
+identity. Summary views use its first published assessment. Explicit comparisons
+accept a chosen assessment per attempt.

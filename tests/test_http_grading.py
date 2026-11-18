@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import base64
 import json
 import os
 from pathlib import Path
@@ -68,7 +69,8 @@ HTTPServer(('127.0.0.1',%d),App).serve_forever()
             self.assertIsNone(runner.spec.inputs); self.assertIsNone(runner.spec.control)
             self.assertFalse((runner.spec.workspace / 'cases.json').exists())
             self.assertNotIn('x-middleware', str(runner.calls).lower())
-            self.assertNotIn('201', str(runner.calls))
+            for call in runner.calls[1:]:
+                self.assertNotIn('expect', json.loads(base64.b64decode(call[-2])))
             sock = socket.socket(); sock.bind(('127.0.0.1', 0)); second_port = sock.getsockname()[1]; sock.close()
             (source / 'server.py').write_text((source / 'server.py').read_text().replace(str(port), str(second_port)))
             config['service']['port'] = second_port

@@ -5,6 +5,7 @@ Raw events and stderr stream to the host's restricted sensitive diagnostics.
 Session state stays in the container's temporary CODEX_HOME.
 """
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 import time
@@ -106,13 +107,18 @@ def extraction_issues(inputs, control):
         return [f'{path}: must be a JSON object']
     if plan.get('strategy') != 'unavailable':
         config = plan.get('evaluation_config')
-        commands = config.get('commands') if isinstance(config, dict) else None
-        if (not isinstance(config, dict) or not isinstance(config.get('image'), str)
-                or not config['image'].strip() or not isinstance(commands, list)
-                or not any(isinstance(c, dict) and c.get('kind') == 'tests'
-                           and isinstance(c.get('argv'), list) and c['argv'] for c in commands)):
+        if isinstance(config, dict) and config.get('grading_type') == 'native-script-v1':
+            script = config.get('script')
+            tests = config.get('required_tests')
+            runnable = isinstance(script, str) and script.endswith('.sh') and isinstance(tests, list) and bool(tests)
+        else:
+            commands = config.get('commands') if isinstance(config, dict) else None
+            runnable = isinstance(commands, list) and any(
+                isinstance(c, dict) and c.get('kind') == 'tests'
+                and isinstance(c.get('argv'), list) and c['argv'] for c in commands)
+        if (not runnable or not isinstance(config.get('image'), str) or not config['image'].strip()):
             return [f'{path}: focused or fuller selection must include an evaluation_config object '
-                    'with an image and a runnable private tests command, or use unavailable and explain why']
+                    'with an image and runnable private tests, or use unavailable and explain why']
     return []
 
 
@@ -123,7 +129,7 @@ def run(options, inputs=Path('/mineval-input'), control=Path('/mineval-control')
     common = ['--ignore-user-config', '--ignore-rules', '--yolo', '--json',
               '--output-schema', str(inputs / 'schema.json'),
               '--output-last-message', str(control / 'final.json'), *options]
-    code, thread_id = invoke([*common, '--cd', '/workspace'], (inputs / 'prompt.txt').read_text())
+    code, thread_id = invoke([*common, '--cd', os.environ.get('MINEVAL_PROJECT_WORKDIR', '/workspace')], (inputs / 'prompt.txt').read_text())
     # A failed process is not a completed turn; never retry infrastructure errors.
     if code:
         progress('failed', reason='initial_process_failed', exit_code=code)

@@ -35,7 +35,7 @@ class RootlessIntegrationTests(unittest.TestCase):
             self.assertIn("no-new-privileges=true", host["SecurityOpt"])
             self.assertFalse(host["Privileged"])
             self.assertFalse(host["Binds"])
-            self.assertEqual(host["Memory"], 1024 * 1024 * 1024)
+            self.assertEqual(host["Memory"], spec.limits.memory_mb * 1024 * 1024)
             self.assertEqual(host["MemorySwap"], host["Memory"])
             self.assertEqual(host["NanoCpus"], 2_000_000_000)
             self.assertEqual(host["PidsLimit"], 256)
@@ -66,16 +66,25 @@ class PreparationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             store = Store(root / 'data')
-            (root / 'base').mkdir()
-            (root / 'base/input').write_text('base')
-            sha = 'b' * 40
-            (root / 'future' / sha).mkdir(parents=True)
-            (root / 'future' / sha / 'check.sh').write_text('test -f input')
+            import subprocess
+            repo = root / 'repository'
+            repo.mkdir()
+            def git(*args):
+                return subprocess.check_output(
+                    ['git', '-C', str(repo), '-c', 'user.name=Fixture', '-c',
+                     'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', *args],
+                    stderr=subprocess.DEVNULL, text=True).strip()
+            git('init', '-q')
+            (repo / 'input').write_text('base')
+            git('add', 'input')
+            git('commit', '-qm', 'base')
+            base = git('rev-parse', 'HEAD')
+            (repo / 'check.sh').write_text('test -f input')
+            git('add', 'check.sh')
+            git('commit', '-qm', 'future')
             store.register({'task_id': 'live', 'repository': 'local:fixture', 'task_summary': 'fixture',
-                            'base_commit': 'a' * 40, 'head_commit': sha,
-                            'base_source': {'type': 'tree', 'path': str(root / 'base')},
-                            'future_source': {'type': 'tree', 'path': str(root / 'future')},
-                            'source_attestation': 'Synthetic live integration fixture'})
+                            'base_commit': base, 'head_commit': git('rev-parse', 'HEAD'),
+                            'base_source': {'type': 'git', 'path': str(repo)}})
             write_json(store.draft('live') / 'control/verify.json', {
                 'image': os.environ['MINEVAL_TEST_IMAGE'], 'network': 'none',
                 'commands': [{'name': 'fresh', 'kind': 'setup', 'argv': ['/bin/sh', '-c', 'test ! -e marker && echo written > marker']},

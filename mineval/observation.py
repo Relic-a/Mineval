@@ -311,7 +311,7 @@ class Pages:
                     model = run['model']
                     harness = run['harness']
                     refs.append((task_id + ':' + record_id, task_id + ' / ' + record_id + ' · ' + model.get('name', '') + ' / ' + harness.get('name', '')))
-        body = '<p>Select one record per task on each side and one model + harness per side. Rates use only exact common revisions with matching evaluation policies.</p><p>' + self.link('Compare evaluations', 'compare', kind='evaluations') + ' · ' + self.link('Compare runs', 'compare', kind='runs') + '</p>'
+        body = '<p>Select one assessment per attempt and one model and harness per side. Rates use matching revisions, grading rules and run conditions.</p><p>' + self.link('Compare evaluations', 'compare', kind='evaluations') + ' · ' + self.link('Compare runs', 'compare', kind='runs') + '</p>'
         body += '<form method="get" action="' + esc(self.url('compare')) + '"><input type="hidden" name="kind" value="' + kind + '"><div class="columns">'
         for side in ('left', 'right'):
             body += '<fieldset><legend>' + side.title() + ' selection</legend>'
@@ -332,10 +332,28 @@ class Pages:
             coverage = result['coverage']
             body += '<h2>Common-task coverage</h2><p class="notice">' + str(coverage['common']) + ' exact common revisions · ' + str(coverage['left_total']) + ' selected left · ' + str(coverage['right_total']) + ' selected right. Different subsets do not establish a comparable overall ranking.</p>'
             body += table(['Common task', 'Prepared revision'], ((self.task_link(r['task_id']), self.revision_link(r)) for r in result['common_revisions']))
-            if 'rates' in result:
+            if result['excluded']:
+                body += '<h2>Excluded attempts</h2>' + table(['Side', 'Task', 'Run', 'Reason'], (
+                    (esc(item['side']), self.task_link(item['task_id']), esc(item['run_id']),
+                     esc(item['reason'] + (': ' + ', '.join(item['different_fields']) if item.get('different_fields') else '')))
+                    for item in result['excluded']))
+            if 'rates' in result and not result['cohorts']:
+                body += '<h2>Verdicts on the common set</h2><p>Unavailable (no common tasks)</p>'
+            elif 'rates' in result:
+                from .dashboard import _budget_label
                 def rate(value):
-                    return 'Unavailable (no common tasks)' if value is None else f'{value:.1%}'
-                body += '<h2>Verdicts on the common set</h2>' + table(['Side', 'Pass', 'Fail', 'Inconclusive', 'Error', 'Pass rate', 'Decided coverage'], ((side.title(), *(str(r['counts'][k]) for k in ('pass', 'fail', 'inconclusive', 'error')), esc(rate(r['pass_rate'])), esc(rate(r['decided_coverage']))) for side, r in result['rates'].items()))
+                    return 'Unavailable' if value is None else f'{value:.1%}'
+                body += '<h2>Verdicts on the common set</h2>' + table(
+                    ['Run budget', 'Side', 'Attempts', 'Pass', 'Fail', 'Inconclusive',
+                     'Infrastructure errors', 'Pass rate', 'Decided coverage'],
+                    ((esc(_budget_label(cohort['conditions'])), side.title(), str(r['attempt_count']),
+                      *(str(r['counts'][k]) for k in ('pass', 'fail', 'inconclusive', 'error')),
+                      esc(rate(r['pass_rate'])), esc(rate(r['decided_coverage'])))
+                     for cohort in result['cohorts'] for side, r in cohort['rates'].items()))
+            if kind == 'runs':
+                body += '<h2>Selected attempts</h2>' + table(['Side', 'Attempts', 'Infrastructure errors'], (
+                    (side.title(), str(count['attempt_count']), str(count['infrastructure_errors']))
+                    for side, count in result['attempts'].items()))
             body += '<details><summary>Exact selections, policies and coverage record</summary>' + pretty(result) + '</details>'
         return self.page('Compare ' + kind, body)
 

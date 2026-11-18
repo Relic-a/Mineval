@@ -107,7 +107,11 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
             suite = {'suite_id': suite, 'sha256': digest(store.root / 'suites' / suite / 'suite.json')}
         instruction_source = (frozen / 'task-instructions.json' if (frozen / 'task-instructions.json').exists()
                               else store.task(task_id) / 'metadata.json')
-        instructions = read_json(instruction_source)['task_summary']
+        brief = frozen / 'task-brief.md'
+        instructions = brief.read_text() if brief.is_file() else read_json(instruction_source)['task_summary']
+        network = config.get('agent_network', 'bridge')
+        workdir = config.get('workdir', '/workspace')
+        services = config.get('services', [])
         import hashlib
         prompt_hash = hashlib.sha256((POLICY + '\nTask:\n' + instructions).encode()).hexdigest()
         # Reserve once before launch. A killed host leaves this identity visible;
@@ -115,11 +119,11 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
         store._reserve_record(task_id, 'runs', run_id, {
             'schema_version': 2, 'task_id': task_id, 'run_id': run_id,
             'prepared_revision': revision, 'suite': suite,
-            'model': {'name': adapter.model, 'reasoning_effort': adapter.effort}, 'harness': {'name': adapter.name, 'adapter_version': 1},
+            'model': {'name': adapter.model, 'reasoning_effort': adapter.effort}, 'harness': {'name': adapter.name, 'adapter_version': 2},
             'status': 'running', 'started_at': now(), 'task_instructions': instructions,
             'instructions_sha256': prompt_hash,
             'operation': {'image': image, 'configured_image': config['image'],
-                          'limits': limits.__dict__, 'network': 'bridge'},
+                          'limits': limits.__dict__, 'network': network, 'workdir': workdir, 'services': services},
             'task_verdict': None})
         with tempfile.TemporaryDirectory(prefix='.bench-', dir=store.root) as temp:
             temp = Path(temp)
@@ -131,7 +135,8 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
                 result = run_agent(temp / 'historical', instructions, temp / 'agent-output',
                     image=image, adapter=adapter, context=context, limits=limits,
                     auth_file=auth_file, sandbox=sandbox, capture_interrupt=True,
-                    disposable=True, history_receipt=starting.get('history_receipt'))
+                    disposable=True, history_receipt=starting.get('history_receipt'),
+                    network=network, workdir=workdir, services=services)
                 shutil.move(temp / 'agent-output', staged / 'agent')
                 status = result['status']
                 invalid_completion = status == 'error' and result['exit_code'] == 0
@@ -152,7 +157,27 @@ def run(store, task_id, version, *, run_id=None, adapter=None, context=None,
             return seal(store, task_id, run_id, staged, terminal)
 
 
-def run_suite(store, suite_id, *, run_id=None, **options):
+def attempt_count(value):
+    if type(value) is not int or not 1 <= value <= 100:
+        raise ValueError('Select between 1 and 100 attempts')
+    return value
+
+
+def run_repeated(store, task_id, version, *, attempts=1, run_id=None, **options):
+    attempt_count(attempts)
+    if attempts == 1:
+        return run(store, task_id, version, run_id=run_id, **options)
+    prefix = identifier(run_id or uuid4().hex)
+    results = []
+    for index in range(1, attempts + 1):
+        results.append(run(store, task_id, version, run_id=f'{prefix}-{index:03d}', **options))
+        if results[-1]['status'] == 'cancelled':
+            break
+    return results
+
+
+def run_suite(store, suite_id, *, run_id=None, attempts=1, **options):
+    attempt_count(attempts)
     suite = store.inspect_suite(suite_id)
     # Preflight every member before launching any agent; each attempt still gets a
     # separate durable identity. Cancellation stops the sequence, never auto-retries.
@@ -165,10 +190,10 @@ def run_suite(store, suite_id, *, run_id=None, **options):
         raise ValueError('Suite run ID prefix must be at most 90 characters')
     results = []
     for index, member in enumerate(suite['members'], 1):
-        result = run(store, member['task_id'], member['version'],
-                     run_id=f'{prefix}-{index:03d}', suite=suite_id, **options)
-        results.append(result)
-        if result['status'] == 'cancelled':
+        batch = run_repeated(store, member['task_id'], member['version'], attempts=attempts,
+                             run_id=f'{prefix}-{index:03d}', suite=suite_id, **options)
+        results.extend(batch if isinstance(batch, list) else [batch])
+        if results[-1]['status'] == 'cancelled':
             break
     return results
 
@@ -211,8 +236,75 @@ def export(store, task_id, run_id, destination):
     return {'workspace': str(destination), 'task_id': task_id, 'run_id': run_id}
 
 
+def conditions(run):
+    operation = {key: value for key, value in run.get('operation', {}).items() if key != 'configured_image'}
+    limits = operation.get('limits')
+    if limits is not None:
+        operation['limits'] = limits | {key: float(limits[key]) for key in ('cpus', 'timeout_seconds')}
+    result = run.get('agent_result') or {}
+    return operation | {'image': result.get('image_id') or operation.get('image'),
+                        'resolved_service_images': result.get('service_images', {}),
+                        'harness': run['harness']}
+
+
+def condition_key(record, run):
+    from .memory import encoded
+    return encoded([record['prepared_revision'], conditions(run), record.get('policy'),
+                    record.get('config_sha256'), record.get('verification_sha256'),
+                    record.get('project_image_id') or record.get('image_id'),
+                    record.get('service_images', {})])
+
+
+def comparison_groups(selections, key):
+    import json
+    from .memory import encoded
+
+    def differences(first, second):
+        left, right = json.loads(first), json.loads(second)
+        changed = []
+        for field in left[1].keys() | right[1].keys():
+            a, b = left[1].get(field), right[1].get(field)
+            if a == b:
+                continue
+            if field == 'limits' and isinstance(a, dict) and isinstance(b, dict):
+                changed.extend('limits.' + name for name in a.keys() | b.keys() if a.get(name) != b.get(name))
+            else:
+                changed.append(field)
+        labels = ('grading policy', 'grading configuration', 'verification artifacts',
+                  'verification image', 'verification service images')
+        changed.extend(label for label, a, b in zip(labels, left[2:], right[2:]) if a != b)
+        return sorted(changed)
+
+    groups = {}
+    excluded = []
+    for side, records in selections.items():
+        groups[side] = {}
+        for record in records:
+            groups[side].setdefault(key(record), []).append(record)
+    left, right = groups['left'], groups['right']
+    common = sorted(left.keys() & right.keys())
+    for side, other in (('left', 'right'), ('right', 'left')):
+        by_revision = {}
+        for opposite, records in groups[other].items():
+            revision = records[0]['prepared_revision']
+            by_revision.setdefault(encoded(revision), []).append(opposite)
+        for unmatched in sorted(groups[side].keys() - groups[other].keys()):
+            revision = groups[side][unmatched][0]['prepared_revision']
+            matches = by_revision.get(encoded(revision), [])
+            reason = {'reason': 'no matching task revision'}
+            if matches:
+                nearest = min((differences(unmatched, opposite) for opposite in matches),
+                              key=lambda fields: (len(fields), fields))
+                reason = {'reason': 'different run conditions or grading rules', 'different_fields': nearest}
+            for record in groups[side][unmatched]:
+                excluded.append({'side': side, 'task_id': record['task_id'],
+                                 'run_id': record['run_id'], **reason})
+    return groups, common, excluded
+
+
 def compare(store, definition):
-    """Report exact common revisions/coverage. No grading or cross-subset aggregates."""
+    """Report matched attempt groups and explain excluded runs."""
+    from .memory import encoded
     if not isinstance(definition, dict) or set(definition) != {'left', 'right'}:
         raise ValueError('Comparison requires left and right lists of task_id/run_id pairs')
     selections = {}
@@ -231,22 +323,23 @@ def compare(store, definition):
             if record['schema_version'] != 2 or record['status'] in ('running', 'reserved'):
                 raise ValueError('Comparison requires finished benchmark attempts')
             ranking_identity = (record['model']['name'], record['model'].get('reasoning_effort'),
-                                record['harness'])
+                                record['harness']['name'])
             if identity is not None and ranking_identity != identity:
                 raise ValueError('Each side must select one model + harness')
             identity = ranking_identity
-            revision = record['prepared_revision']
-            key = (revision['task_id'], revision['version'], revision['artifact_manifest_sha256'])
-            if any(k[0] == key[0] for k in records):
-                raise ValueError('Select one attempt per task on each comparison side')
-            records[key] = record
-        selections[side] = records
-    left, right = selections['left'], selections['right']
-    common = sorted(left.keys() & right.keys())
-    return {'common_revisions': [left[k]['prepared_revision'] for k in common],
+            records[(ref['task_id'], ref['run_id'])] = record
+        selections[side] = list(records.values())
+    groups, common, excluded = comparison_groups(
+        selections, lambda run: encoded([run['prepared_revision'], conditions(run)]))
+    left, right = groups['left'], groups['right']
+    revisions = lambda keys, records: [
+        records[key][0]['prepared_revision'] for key in sorted(keys)]
+    return {'attempts': {side: {'attempt_count': len(records),
+                                 'infrastructure_errors': sum(r['status'] == 'error' for r in records)}
+                         for side, records in selections.items()},
+            'common_revisions': revisions(common, left),
             'coverage': {'left_total': len(left), 'right_total': len(right), 'common': len(common),
                          'left_fraction': len(common) / len(left), 'right_fraction': len(common) / len(right)},
-            'left_only': [left[k]['prepared_revision'] for k in sorted(left.keys() - right.keys())],
-            'right_only': [right[k]['prepared_revision'] for k in sorted(right.keys() - left.keys())],
-            'selections': {side: list(records.values()) for side, records in selections.items()},
-            'task_verdicts_available': False}
+            'left_only': revisions(left.keys() - right.keys(), left),
+            'right_only': revisions(right.keys() - left.keys(), right),
+            'selections': selections, 'excluded': excluded, 'task_verdicts_available': False}
