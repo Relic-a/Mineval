@@ -464,6 +464,21 @@ class Store:
             validations = task / 'private/validations' / approval['inputs']['extraction_id']
             if validations.exists():
                 copy_tree(validations, staged / 'private/validations')
+            # The independent review attests to these exact validation receipts.
+            # Pin their common configuration for all future attempts.
+            reviewed = [read_json(validations / key / 'validation.json')
+                        for key in approval['inputs']['validation']]
+            base_checks = [item for item in reviewed if item.get('state') == 'cleaned-base']
+            head = read_json(task / 'metadata.json').get('head_commit')
+            reference_checks = [item for item in reviewed if item.get('state') == head] if head else []
+            if not base_checks or any(item['report'].get('verdict') != 'fail' for item in base_checks):
+                raise ValueError('Freeze requires reviewed checks that execute and fail on the unsolved base')
+            if head and (not reference_checks or any(item['report'].get('verdict') != 'pass' for item in reference_checks)):
+                raise ValueError('Freeze requires reviewed checks that execute and pass on the reference')
+            configs = [item['report']['configuration'] for item in reviewed]
+            if any(item != configs[0] for item in configs[1:]):
+                raise ValueError('Reviewed validations must use one fixed evaluation configuration')
+            write_json(staged / 'evaluation-config.json', configs[0])
             write_json(staged / 'approval.json', approval)
             write_json(staged / 'artifact-hashes.json', inventory(staged))
             versions = task / 'versions'
@@ -570,20 +585,34 @@ class Store:
             staging = Path(temp) / 'extraction'
             staging.mkdir()
             for item in selections:
-                sha, path = commit(item['commit']), relative(item['path'])
-                if sha not in metadata['future_commits'] or not item.get('purpose') or item.get('test_only') is not True:
-                    raise ValueError('Extraction requires a known source commit, purpose and test_only attestation')
-                key = f'future/{sha}/{path}'
-                source = task / 'private' / key
-                if key not in original or source.is_symlink() or digest(source) != original[key]['sha256']:
-                    raise ValueError('Missing or modified source evidence')
-                destination = staging / 'verification' / sha / path
+                path = relative(item['path'])
+                if not item.get('purpose') or item.get('test_only') is not True:
+                    raise ValueError('Every selected check requires purpose and test_only attestation')
+                generated = item.get('origin') == 'generated'
+                if generated:
+                    if set(item) != {'origin', 'path', 'purpose', 'test_only', 'content'} or not isinstance(item['content'], str) or not 0 < len(item['content'].encode()) <= 1048576:
+                        raise ValueError('Invalid generated verification artifact')
+                    destination = staging / 'generated' / path
+                    record = {key: value for key, value in item.items() if key != 'content'}
+                else:
+                    sha = commit(item['commit'])
+                    if sha not in metadata['future_commits']:
+                        raise ValueError('Extraction requires a known source commit')
+                    key = f'future/{sha}/{path}'
+                    source = task / 'private' / key
+                    if key not in original or source.is_symlink() or digest(source) != original[key]['sha256']:
+                        raise ValueError('Missing or modified source evidence')
+                    destination = staging / 'verification' / sha / path
+                    record = item
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if destination.exists():
                     raise ValueError('Duplicate extraction entry')
-                shutil.copyfile(source, destination)
-                destination.chmod(0o755 if original[key]['executable'] else 0o644)
-                records.append(item | {'sha256': digest(destination), 'stored_path': destination.relative_to(staging).as_posix()})
+                if generated:
+                    destination.write_text(item['content'])
+                else:
+                    shutil.copyfile(source, destination)
+                    destination.chmod(0o755 if original[key]['executable'] else 0o644)
+                records.append(record | {'sha256': digest(destination), 'stored_path': destination.relative_to(staging).as_posix()})
             if not records:
                 raise ValueError('Select at least one verification artifact')
             write_json(staging / 'extraction-manifest.json', {'artifacts': records, 'applied': False,

@@ -98,10 +98,13 @@ class WorkflowTests(HistoryFixture):
         super().setUp()
         catalog = patch('mineval.codex_models.Catalog.get', return_value={'models': [], 'error': None})
         catalog.start(); self.addCleanup(catalog.stop)
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
+            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+                          'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}
         self.version = self.freeze('example', self.review)['version']
         self.config = self.root / 'evaluation.json'
-        write_json(self.config, {'image': 'local:test', 'network': 'none', 'commands': [
-            {'name': 'regression', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]})
+        write_json(self.config, self.fixture_evaluation_config)
     saved = fixtures.EvaluationTests.saved
     assess = fixtures.EvaluationTests.assess
     def flow(self):
@@ -141,8 +144,9 @@ class WorkflowTests(HistoryFixture):
              patch('mineval.workflows.evaluation.evaluate', return_value={'evaluation_id': 'fixture'}) as evaluate, \
              patch('mineval.memory.record_evaluation'):
             flow.benchmark(job['id'], 'example', job['payload'])
-        evaluator = evaluate.call_args.kwargs['adapter']
-        self.assertEqual((evaluator.model, evaluator.effort), ('eval-selected', 'ultra'))
+        self.assertNotIn('adapter', evaluate.call_args.kwargs)
+        self.assertNotIn('command', evaluate.call_args.kwargs)
+        self.assertEqual(job['payload']['evaluation_config'], self.fixture_evaluation_config)
 
     def _run_agent(self, *args, **kwargs):
         from mineval.agents import run_agent
@@ -280,7 +284,12 @@ class WorkflowTests(HistoryFixture):
         changed = read_json(self.config)
         changed['commands'][0]['name'] = 'second-condition'
         path = self.root / 'second-condition.json'; write_json(path, changed)
-        evaluation.evaluate(self.store, 'example', 'one', path, evaluation_id='second', sandbox=EvaluationRunner())
+        with self.assertRaisesRegex(ValueError, 'differs from the frozen'):
+            evaluation.evaluate(self.store, 'example', 'one', path, evaluation_id='second', sandbox=EvaluationRunner())
+        self.fixture_evaluation_config = changed
+        self.version = self.freeze('example', self.review)['version']
+        self.saved('two')
+        evaluation.evaluate(self.store, 'example', 'two', path, evaluation_id='second', sandbox=EvaluationRunner())
         metric = summaries(self.store)['models'][0]['overall']
         self.assertEqual(metric['evaluated'], 2)
         self.assertEqual(metric['available_samples'], 2)
@@ -365,7 +374,13 @@ class WorkflowTests(HistoryFixture):
         changed['commands'][0]['name'] = 'different-condition'
         path = self.root / 'different.json'; write_json(path, changed)
         # Different evaluation conditions create a separate sample, not an equivalent score.
-        evaluation.evaluate(self.store, 'logic-two', 'a', path, evaluation_id='other', sandbox=EvaluationRunner())
+        with self.assertRaisesRegex(ValueError, 'differs from the frozen'):
+            evaluation.evaluate(self.store, 'logic-two', 'a', path, evaluation_id='other', sandbox=EvaluationRunner())
+        self.fixture_evaluation_config = changed
+        changed_version = self.freeze('logic-two', self.review)['version']
+        benchmark.run(self.store, 'logic-two', changed_version, run_id='a2',
+                      adapter=FakeAdapter(model='A', effort='high'), sandbox=SolvingAgent())
+        evaluation.evaluate(self.store, 'logic-two', 'a2', path, evaluation_id='other', sandbox=EvaluationRunner())
         updated = summaries(self.store)
         self.assertEqual(updated['common_samples'], 1)
         updated_models = {m['model']['name']: m for m in updated['models']}
@@ -429,7 +444,7 @@ class WorkflowTests(HistoryFixture):
         selection = {'task': ['example'], 'step': ['review'], 'configuration': [config], 'version_example': [self.version], 'exclude': ['yes']}
         review = pages.render('/benchmarks/new', selection)
         self.assertIn('1 task/model combinations ready to queue', review)
-        self.assertIn('AI-assisted evaluation: disabled', review)
+        self.assertIn('Fixed functional grading', review)
         self.assertEqual(flow.jobs(), [])  # Review does not enqueue or spend inference.
         with patch('mineval.benchmark.run_agent', side_effect=self._run_agent):
             benchmark.run(self.store, 'example', self.version, run_id='prior', adapter=FakeAdapter(model='catalog-model', effort='high'))
@@ -439,8 +454,8 @@ class WorkflowTests(HistoryFixture):
         self.assertIn('<button disabled>Run benchmark</button>', skipped)
         del flow.settings['evaluation_config']
         unavailable = pages.render('/benchmarks/new', selection)
-        self.assertIn('Configure private evaluation commands', unavailable)
-        self.assertIn('<button disabled>Run benchmark</button>', unavailable)
+        self.assertNotIn('Configure private evaluation commands', unavailable)
+        self.assertIn('Skip · already attempted', unavailable)
 
     def test_dashboard_read_only_boundary_and_host_review_configuration(self):
         pages = Pages(self.store)
@@ -488,20 +503,29 @@ class PreparationWorkflowTests(HistoryFixture):
                     producer={'harness': 'fixture'}, input_hashes=inventory(temp / 'clean'), instructions_sha256='fixture')
         calls = []
         original_session = review.session
+        original_validate = review.validate
+        def validate_fixture(*args, **kwargs):
+            kwargs['sandbox'] = EvaluationRunner()
+            return original_validate(*args, **kwargs)
         def private(store, tid, **kwargs):
             self.assertEqual(kwargs['adapter'].model, 'prep-selected')
             self.assertEqual(kwargs['adapter'].effort, 'ultra')
             calls.append(kwargs['stage'])
             if kwargs['stage'] == 'extraction':
-                kwargs['sandbox'] = ReportAgent('selection.json', plan(self.head) | {
-                    'evaluation_config': {'image': 'local:test', 'commands': [
-                        {'name': 'private', 'kind': 'tests', 'argv': ['python3', 'tests/test_answer.py']}]}})
+                choice = plan(self.head) | {
+                    'artifacts': [{'origin': 'generated', 'path': 'cases.json', 'purpose': 'Fixed answer behavior',
+                        'test_only': True, 'content': json.dumps({'cases': [{'input': '', 'expected': '42\n'}]})}],
+                    'evaluation_config': {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
+                        'commands': [{'name': 'private', 'kind': 'tests',
+                            'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}}
+                kwargs['sandbox'] = ReportAgent('selection.json', choice)
             else:
                 kwargs['sandbox'] = ReportAgent('review.json', report(self.review) |
                     ({'verdict': 'reject', 'reasons': ['Fixture evidence does not establish the task']} if tid == 'rejected-task' else {}))
             return original_session(store, tid, **kwargs)
         with patch('mineval.workflows.service.session', side_effect=cleanup), \
              patch('mineval.workflows.review.session', side_effect=private), \
+             patch('mineval.workflows.review.validate', side_effect=validate_fixture), \
              patch('mineval.workflows.DockerSandbox', return_value=FakeRunner([step()])):
             flow.work()
         self.assertEqual(calls, ['extraction', 'review', 'extraction', 'review'])
@@ -567,10 +591,13 @@ class CLIConcurrencyTests(unittest.TestCase):
 class ModelReviewTests(HistoryFixture):
     def setUp(self):
         super().setUp()
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
+            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+                          'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}
         self.version = self.freeze('example', self.review)['version']
         self.config = self.root / 'evaluation.json'
-        write_json(self.config, {'image': 'local:test', 'commands': [
-            {'name': 'private', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]})
+        write_json(self.config, self.fixture_evaluation_config)
     saved = fixtures.EvaluationTests.saved
     assess = fixtures.EvaluationTests.assess
     def test_review_receives_prior_evidence_and_code_without_changing_verdict(self):
@@ -588,7 +615,7 @@ class ModelReviewTests(HistoryFixture):
         with patch('mineval.model_review.DockerSandbox', return_value=agent):
             result = review_evaluation(self.store, 'example', 'second', image='local:test')
         self.assertIn('return 7', captured['code_diff'])
-        self.assertIn('assert answer() == 42', captured['selected_verification'][0]['bounded_content'])
+        self.assertIn('42', captured['selected_verification'][0]['bounded_content'])
         self.assertTrue(captured['prior'])
         self.assertEqual(captured['source']['evaluation_id'], 'second')
         self.assertEqual(result['sources'][0]['verdict'], 'fail')

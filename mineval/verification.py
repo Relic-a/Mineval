@@ -12,10 +12,20 @@ from .sandbox import DockerSandbox, Limits, SandboxError, SandboxSpec
 
 def load_config(path, *, evaluation=False):
     config = read_json(path)
-    if set(config) - {'image', 'network', 'workdir', 'limits', 'commands', 'grading_type'}:
+    if set(config) - {'image', 'network', 'workdir', 'limits', 'commands', 'grading_type', 'service'}:
         raise ValueError('Unknown verification configuration fields')
-    if 'grading_type' in config and (not evaluation or config['grading_type'] != 'isolated-argv-v1'):
+    if 'grading_type' in config and (not evaluation or config['grading_type'] not in ('isolated-argv-v1', 'isolated-http-v1')):
         raise ValueError('Unsupported grading type')
+    if config.get('grading_type') == 'isolated-http-v1':
+        service = config.get('service')
+        if (not isinstance(service, dict) or set(service) != {'argv', 'port'} or
+                type(service['port']) is not int or not 1 <= service['port'] <= 65535):
+            raise ValueError('HTTP grading requires a service argv and localhost port')
+        SandboxSpec(config['image'], service['argv'])
+        if config.get('network', 'none') != 'none':
+            raise ValueError('HTTP grading requires a network-isolated candidate')
+    elif 'service' in config:
+        raise ValueError('Service is supported only for isolated HTTP grading')
     limits = Limits(**config.get('limits', {}))
     SandboxSpec(config['image'], ('/bin/sh',), limits, network=config.get('network', 'bridge'), workdir=config.get('workdir', '/workspace'))
     commands = config.get('commands')
@@ -51,6 +61,9 @@ def load_config(path, *, evaluation=False):
             raise ValueError('Step timeout must be positive and within the sandbox deadline')
     if config.get('grading_type') == 'isolated-argv-v1' and sum(c['kind'] == 'tests' for c in commands) != 1:
         raise ValueError('isolated-argv-v1 requires exactly one tests command')
+    if config.get('grading_type') == 'isolated-http-v1':
+        if sum(c['kind'] == 'tests' for c in commands) != 1 or commands[-1]['kind'] != 'tests':
+            raise ValueError('HTTP grading requires one final tests marker')
     return config
 
 

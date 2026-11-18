@@ -102,9 +102,7 @@ def agent_summary(pages, preparation=False):
     else:
         review_effort = w.settings.get('review_effort', config['effort'])
 
-    text = ('Cleanup & extraction: ' if preparation else 'AI-assisted evaluation: ') + esc(config['model'] + ' · ' + config['effort'])
-    if not preparation and not w.settings.get('evaluator_agent', True):
-        text = 'AI-assisted evaluation: disabled'
+    text = ('Cleanup & extraction: ' + esc(config['model'] + ' · ' + config['effort'])) if preparation else 'Fixed functional grading'
     text += '. ' + ('Independent preparation review: ' if preparation else 'Qualitative review & compaction: ')
     text += esc(str(review_model) + ' · ' + str(review_effort)) if preparation or w.settings.get('qualitative_review', True) else 'disabled'
     if w.settings.get('review_model') or (not preparation and w.settings.get('review_effort')):
@@ -212,7 +210,7 @@ def benchmarks(pages, query, new=False):
         except (ValueError, OSError) as exc:
             outcomes.append((pages.task_link(t['task_id']), 'Unavailable', esc(exc)))
     body += '<p>' + str(len(chosen)) + ' tasks × ' + str(len(configs)) + ' configurations. Queue submission rechecks eligibility and active work.</p>' + table(['Task', 'Configuration', 'Planned outcome'], outcomes)
-    body += '<p>Saved private checks run automatically after each attempt. Deterministic checks do not require an AI model. AI assistance and qualitative review follow the effective settings below; fake harness attempts use factual review only.</p>' + agent_summary(pages)
+    body += '<p>Saved private checks run automatically after each attempt. Deterministic checks do not require an AI model. Optional qualitative review follows the effective settings below; functional results are available as soon as grading finishes.</p>' + agent_summary(pages)
     body += '<p>' + str(runnable) + ' task/model combinations ready to queue. Unavailable tasks and prior attempts above are excluded or reported individually; other tasks continue.</p>'
     content = carry + hidden('operation', 'benchmark') + ''.join(hidden('configuration', json.dumps(c)) for c in configs)
     if query.get('exclude') == ['yes']:
@@ -367,7 +365,7 @@ def settings(pages, *, refreshed=False, saved=False):
     content = '<datalist id="codex-models">' + options + '</datalist>'
     for role, title, explanation in (
             ('preparation', 'Preparation agents · Prep / extract', 'Cleanup and private verification extraction. Independent preparation review uses this model unless the host review override below applies.'),
-            ('evaluation', 'Evaluation and review agents', 'Optional AI-assisted evaluation of saved output. Qualitative review and memory compaction use this default unless the host review override applies. Deterministic private checks run automatically without an AI model.')):
+            ('evaluation', 'Evaluation and review agents', 'Qualitative review and memory compaction use this default unless the host review override applies. Fixed private checks run without an AI model.')):
         config = current[role]
         content += '<fieldset><legend>' + title + '</legend><p>' + explanation + '</p>'
         content += '<label>Model <input name="' + role + '_model" list="codex-models" value="' + esc(config['model']) + '" required maxlength="200" spellcheck="false"></label>'
@@ -379,7 +377,7 @@ def settings(pages, *, refreshed=False, saved=False):
     body += '<h2>Available Codex models</h2><div class="model-catalog">' + table(['Model', 'Identifier', 'Reasoning efforts', 'Default effort'], (
         (esc(m['name']), '<code>' + esc(m['model']) + '</code>', esc(', '.join(m['efforts']) or 'Not reported'), esc(m['default_effort']))
         for m in catalog['models'])) + '</div>'
-    body += '<p>Host-controlled environment: preparation runtime ' + ('configured' if workflow.settings.get('preparation_image') else 'not configured') + '; AI-assisted evaluation ' + ('enabled' if workflow.settings.get('evaluator_agent', True) else 'disabled') + '; qualitative review ' + ('enabled' if workflow.settings.get('qualitative_review', True) else 'disabled') + '. Runtime images, private commands and credentials are managed by the trusted launcher.</p>'
+    body += '<p>Host-controlled environment: preparation runtime ' + ('configured' if workflow.settings.get('preparation_image') else 'not configured') + '; fixed functional grading enabled; architecture review ' + ('enabled' if workflow.settings.get('architecture_review', False) else 'disabled') + '; qualitative review ' + ('enabled' if workflow.settings.get('qualitative_review', True) else 'disabled') + '. Runtime images, private commands and credentials are managed by the trusted launcher.</p>'
     return pages.page('Settings · Agents & models', body)
 
 

@@ -22,10 +22,13 @@ import test_evaluation as fixtures
 class ObservationTests(fixtures.HistoryFixture):
     def setUp(self):
         super().setUp()
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
+            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+                          'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}
         self.version = self.freeze('example', self.review)['version']
         self.config = self.root / 'evaluation.json'
-        write_json(self.config, {'image': 'local:test', 'network': 'none', 'commands': [
-            {'name': 'regression', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]})
+        write_json(self.config, self.fixture_evaluation_config)
 
     saved = fixtures.EvaluationTests.saved
     assess = fixtures.EvaluationTests.assess
@@ -50,7 +53,8 @@ class ObservationTests(fixtures.HistoryFixture):
             from urllib.parse import parse_qs
             pages.render(url.path, parse_qs(url.query))
         evidence = pages.render('/tasks/example/artifacts/evaluations/pass', {'path': ['baseline/selected-checks.json']})
-        self.assertIn(self.head, evidence)
+        self.assertIn('generated/tests/cases.json', evidence)
+        self.assertIn('executed_sha256', evidence)
         result = pages.render('/compare', {'kind': ['evaluations'], 'left': ['example:pass'], 'right': ['example:fail']})
         self.assertIn('1 exact common revisions', result)
         self.assertIn('pass_rate', result)

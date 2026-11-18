@@ -63,15 +63,17 @@ def demonstrate(directory, context, image):
     diagnostic = cli('verify', '--task', 'answer')
     assert diagnostic['status'] == 'completed'
     plan = {'strategy': 'focused', 'rationale': 'Check the documented return value without prescribing its implementation',
-        'dependencies': [], 'instructions': 'PYTHONPATH=. python3 tests/test_answer.py',
+        'dependencies': [], 'instructions': 'Run fixed behavioral cases against the answer function',
         'limitations': ['Synthetic trivial task; not representative of model quality'],
-        'artifacts': [{'commit': head, 'path': 'tests/test_answer.py', 'purpose': 'Return value regression', 'test_only': True}]}
+        'artifacts': [{'origin': 'generated', 'path': 'tests/cases.json', 'purpose': 'Return value regression',
+                       'test_only': True, 'content': json.dumps({'cases': [{'input': '', 'expected': '42\n'}]})}]}
     def producer(filename, value):
         return ['python3', '-c', 'import pathlib; pathlib.Path(' + repr('/mineval-control/' + filename) + ').write_text(' + repr(json.dumps(value)) + ')']
     extracted = cli('verification-extract', 'answer', '--command', *producer('selection.json', plan))
     checks = directory / 'evaluation.json'
-    write_json(checks, {'image': image, 'network': 'none', 'commands': [
-        {'name': 'historical-answer', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]})
+    write_json(checks, {'image': image, 'network': 'none', 'grading_type': 'isolated-argv-v1', 'commands': [
+        {'name': 'historical-answer', 'kind': 'tests',
+         'argv': ['python3', '-c', 'from app import answer; print(answer())']}]})
     cli('verification-check', 'answer', '--extraction-id', extracted['extraction_id'], '--config', str(checks), expected=1)
     cli('verification-check', 'answer', '--extraction-id', extracted['extraction_id'], '--config', str(checks), '--future-commit', head)
     review = {'verdict': 'approve', 'objective_preserved': True, 'snapshot_reviewed': True, 'changes': [],
@@ -124,7 +126,7 @@ def demonstrate(directory, context, image):
                 response = connection.getresponse(); content = response.read().decode()
                 assert response.status == 200, (route, content)
                 if 'selected-checks' in route:
-                    assert head in content
+                    assert 'generated/tests/cases.json' in content and 'executed_sha256' in content
                 if route.endswith('/runs/' + run_id):
                     assert 'mineval-fake-result.txt' in content
         finally:

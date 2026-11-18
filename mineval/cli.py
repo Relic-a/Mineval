@@ -133,12 +133,6 @@ def _main(argv: list[str] | None = None) -> int:
     evaluate.add_argument('--task', required=True)
     evaluate.add_argument('--config', required=True, help='trusted private verification commands JSON')
     evaluate.add_argument('--evaluation-id', help='new immutable assessment ID')
-    evaluate.add_argument('--adapter', choices=('codex',))
-    evaluate.add_argument('--model', default='gpt-6-luna')
-    evaluate.add_argument('--effort', choices=('minimal','low','medium','high','xhigh','max','ultra'), default='medium')
-    evaluate.add_argument('--evaluator-timeout', type=float, default=180, help='AI evaluator deadline in seconds')
-    evaluate.add_argument('--auth-file')
-    evaluate.add_argument('--command', nargs=argparse.REMAINDER, help='isolated evaluator argv')
     evaluations = commands.add_parser('evaluation', help='inspect and compare immutable assessments')
     assessments = evaluations.add_subparsers(dest='evaluation_action', required=True)
     show = assessments.add_parser('show')
@@ -411,9 +405,7 @@ def _main(argv: list[str] | None = None) -> int:
                     from .benchmark import termination_handler
                     with termination_handler():
                         result = evaluate(store, args.task, args.run_id, args.config,
-                            evaluation_id=args.evaluation_id, sandbox=sandbox,
-                            command=args.command, adapter=CodexAdapter(args.model, effort=args.effort) if args.adapter else None,
-                            auth_file=args.auth_file, evaluator_timeout=args.evaluator_timeout)
+                            evaluation_id=args.evaluation_id, sandbox=sandbox)
                 elif args.action == 'evaluation':
                     from .evaluation import compare
                     result = (store.inspect_evaluation(args.task_id, args.evaluation_id)

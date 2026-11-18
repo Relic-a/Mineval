@@ -16,85 +16,6 @@ from .sandbox import DockerSandbox, Limits, SandboxSpec
 from .verification import load_config
 
 POLICY = 'isolated-argv-v1'
-PROMPT = """You are an independent evaluator of a saved candidate, not its coding agent.
-Start with /mineval-input/baseline-results.json and task.json. Inspect only failing
-checks and the candidate code they exercise; consult verification/extraction-manifest.json
-for original evidence. Decide promptly whether behavior is wrong or only the private
-check interface differs. For incorrect behavior, report no adaptations. Do not search
-for unrelated improvements, rerun successful checks, install tools or fix production.
-A missing implementation is not a legitimate alternative: never create or simulate
-production behavior, add passing stubs, or hide missing implementation. For a legitimate
-alternative, propose the smallest interface change preserving every behavioral assertion. Stop when evidence supports that decision.
-Write only /mineval-control/assessment.json with exactly:
-{adaptations: [{path, content, reason, evidence: [{commit, path}]}],
- limitations: [string], inconclusive_reason: string|null, error_reason?: string|null,
- behavior_failure_reason?: string|null, candidate_evidence?: [{path, reason}]}.
-Adapt only selected private test interfaces when a legitimate implementation needs it.
-Keep assertions and behavioral obligations; never weaken checks to pass wrong code,
-require historical code shape, or invent obligations. Cite original extracted evidence
-for every adaptation. A source-supported behavior failure requires behavior_failure_reason
-and nonempty candidate_evidence citing existing candidate files with specific reasons.
-For an inconclusive, execution-error, or adaptation decision, omit candidate_evidence
-or set it to an empty array; include it only with behavior_failure_reason.
-Inspect source and rule out legitimate equivalent interfaces before making that finding;
-missing modules alone are insufficient. Do not claim assertions ran when collection failed.
-A behavior failure cannot be combined with adaptations, error_reason or inconclusive_reason.
-If setup, infrastructure or execution broke, provide error_reason. If evidence is insufficient/flaky/not defensibly adaptable,
-explain inconclusive_reason. Do not edit production code. This report proposes checks;
-Mineval executes them in a separate fresh sandbox. Do not save transcripts.
-"""
-
-
-def validate_assessment(value, artifacts, candidate=None):
-    if (not isinstance(value, dict) or not {'adaptations', 'limitations', 'inconclusive_reason'} <= set(value)
-            or set(value) - {'adaptations', 'limitations', 'inconclusive_reason', 'error_reason',
-                             'behavior_failure_reason', 'candidate_evidence'}
-            or not strings(value['limitations']) or not isinstance(value['adaptations'], list)
-            or (value['inconclusive_reason'] is not None and
-                (not isinstance(value['inconclusive_reason'], str) or not value['inconclusive_reason'].strip()))):
-        raise ValueError('Invalid evaluator assessment')
-    if value.get('error_reason') is not None and (not isinstance(value['error_reason'], str)
-            or not value['error_reason'].strip()):
-        raise ValueError('Evaluator execution error requires an explanation')
-    behavior = value.get('behavior_failure_reason')
-    evidence = value.get('candidate_evidence', [])
-    if not isinstance(evidence, list):
-        raise ValueError('Invalid candidate source evidence')
-    if behavior is not None:
-        if (not isinstance(behavior, str) or not behavior.strip() or value['adaptations'] or
-                value['inconclusive_reason'] is not None or value.get('error_reason') is not None or
-                not isinstance(evidence, list) or not evidence or candidate is None):
-            raise ValueError('Source-supported failure requires exclusive reason and candidate evidence')
-        files = inventory(candidate)
-        seen_evidence = set()
-        for item in evidence:
-            if (not isinstance(item, dict) or set(item) != {'path', 'reason'} or
-                    not isinstance(item['path'], str) or not isinstance(item['reason'], str) or
-                    not item['reason'].strip()):
-                raise ValueError('Invalid candidate source evidence')
-            path = str(relative(item['path']))
-            if path not in files or path in seen_evidence:
-                raise ValueError('Candidate source evidence must be an existing unique file')
-            seen_evidence.add(path)
-    elif evidence:
-        raise ValueError('Candidate evidence requires a source-supported failure')
-    known = {(a['commit'], a['path']) for a in artifacts}
-    paths = {a['path'] for a in artifacts}
-    seen = set()
-    for item in value['adaptations']:
-        if (not isinstance(item, dict) or set(item) != {'path', 'content', 'reason', 'evidence'}
-                or item['path'] not in paths or item['path'] in seen
-                or not isinstance(item['content'], str) or not item['content'].strip()
-                or not isinstance(item['reason'], str) or not item['reason'].strip()
-                or not isinstance(item['evidence'], list) or not item['evidence']):
-            raise ValueError('Adaptation requires a selected test, content, reason and evidence')
-        seen.add(item['path'])
-        for ref in item['evidence']:
-            if (not isinstance(ref, dict) or set(ref) != {'commit', 'path'}
-                    or (ref['commit'], ref['path']) not in known):
-                raise ValueError('Adaptation must cite original extracted evidence')
-    return value
-
 
 def inspect(store, task_id, evaluation_id):
     """Caller holds task lock. Legacy reservations remain readable."""
@@ -115,6 +36,11 @@ def inspect(store, task_id, evaluation_id):
 
 def execute_checks(source_tree, destination, staged, verification, artifacts, adaptations, config, image, runner):
     report = {'commands': [], 'verdict': 'error', 'explanation': 'Verification infrastructure failed.'}
+    if adaptations:
+        raise ValueError('Frozen checks cannot be adapted to a candidate')
+    if config.get('grading_type') == 'isolated-http-v1':
+        from .http_grading import execute
+        return execute(source_tree, destination, staged, verification, artifacts, config, image, runner)
     staged.mkdir()
     if config.get('grading_type') != 'isolated-argv-v1':
         report.update(error_kind='unsupported_grading_type',
@@ -124,7 +50,6 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
     try:
         workspace = destination
         copy_tree(source_tree, workspace)
-        adapted = {a['path']: a for a in adaptations}
         selected = []
         cases = []
         if sum(step['kind'] == 'tests' for step in config['commands']) != 1:
@@ -132,10 +57,7 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
         for item in artifacts:
             path = str(relative(item['path']))
             source = verification / relative(item['stored_path'])
-            if path in adapted:
-                raw = adapted[path]['content'].encode()
-            else:
-                raw = source.read_bytes()
+            raw = source.read_bytes()
             if len(raw) > 1024 * 1024:
                 raise ValueError('Isolated test file is too large')
             document = json.loads(raw)
@@ -146,7 +68,7 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
                         any(not isinstance(case[k], str) or '\0' in case[k] or len(case[k].encode()) > 32768 for k in ('input', 'expected'))):
                     raise ValueError('Invalid isolated test case')
                 cases.append(case)
-            selected.append(item | {'executed_sha256': hashlib.sha256(raw).hexdigest(), 'adapted': path in adapted})
+            selected.append(item | {'executed_sha256': hashlib.sha256(raw).hexdigest(), 'adapted': False})
         if not cases or len(cases) > 1000:
             raise ValueError('Isolated grading requires between 1 and 1000 cases')
         write_json(staged / 'selected-checks.json', selected)
@@ -199,21 +121,11 @@ def execute_checks(source_tree, destination, staged, verification, artifacts, ad
     return report
 
 
-def assess_checks(candidate, verification, artifacts, config, image, runner, baseline,
-                  temp, task_summary, *, command=None, adapter=None, auth_file=None,
-                  evaluator_timeout=180, proposed_path=None, provenance_path=None):
-    """Reject the legacy evaluator, which shared candidate code and private files."""
-    raise ValueError('Evaluator assessment is unsupported for isolated grading: it combines candidate code and private files')
-
-
 def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox=None,
              command=None, adapter=None, auth_file=None, evaluator_timeout=180):
-    """Config is an explicit trusted operator selection; evaluator proposes adaptations."""
-    from .agents import CodexAdapter, provision_auth
-    if adapter and (command or not isinstance(adapter, CodexAdapter)):
-        raise ValueError('Use explicit evaluator argv or the dedicated Codex adapter')
-    if auth_file and not isinstance(adapter, CodexAdapter):
-        raise ValueError('Only Codex may receive authentication')
+    """Run fixed private checks against a saved candidate."""
+    if command or adapter or auth_file:
+        raise ValueError('AI-assisted evaluation is no longer supported')
     runner = sandbox or DockerSandbox()
     from .downloads import cache_task
     cache_task(runner, store, task_id)
@@ -240,6 +152,9 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
         if revision != run['prepared_revision']:
             raise ValueError('Run revision identity mismatch')
         frozen = task / 'versions' / revision['version']
+        frozen_config_path = frozen / 'evaluation-config.json'
+        if frozen_config_path.exists() and config != read_json(frozen_config_path):
+            raise ValueError('Evaluation configuration differs from the frozen reviewed checks')
         verification = frozen / 'private/verification'
         verification_hash = checked(verification)
         manifest = read_json(verification / 'extraction-manifest.json')
@@ -284,44 +199,13 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
                 baseline = execute_checks(temp / 'candidate', temp / 'baseline-workspace', staged / 'baseline',
                     verification, artifacts, [], config, image, runner)
                 report.update(baseline)
-                assessment = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None}
-                if (command or adapter) and baseline['verdict'] in ('fail', 'inconclusive') and config.get('grading_type') != 'isolated-argv-v1':
-                    assessment, report['evaluator'] = assess_checks(
-                        temp / 'candidate', verification, artifacts, config, image, runner, baseline,
-                        temp, run['task_instructions'], command=command, adapter=adapter,
-                        auth_file=auth_file, evaluator_timeout=evaluator_timeout,
-                        proposed_path=staged / 'assessment-proposal.json',
-                        provenance_path=staged / 'evaluator.json')
-                report['adaptations'] = assessment['adaptations']
-                report['limitations'].extend(assessment['limitations'])
-                write_json(staged / 'assessment.json', assessment)
-                # Only declared behavioral/inconclusive outcomes may be adapted.
-                # Unknown exit codes and infrastructure errors never invoke AI.
-                can_adapt = baseline['verdict'] in ('fail', 'inconclusive')
-                if assessment.get('behavior_failure_reason'):
-                    report.update(verdict='fail', explanation=assessment['behavior_failure_reason'],
-                                  failure_basis='source_assessment', candidate_evidence=assessment['candidate_evidence'])
-                elif assessment.get('error_reason'):
-                    report.update(verdict='error', explanation=assessment['error_reason'])
-                elif assessment['inconclusive_reason'] and baseline['verdict'] != 'error':
-                    report.update(verdict='inconclusive', explanation=assessment['inconclusive_reason'])
-                elif assessment['adaptations'] and can_adapt:
-                    report.pop('error_kind', None)
-                    report.update(execute_checks(temp / 'candidate', temp / 'adapted-workspace',
-                        staged / 'adapted', verification, artifacts, assessment['adaptations'], config, image, runner))
-                else:
-                    report.update(baseline)
+
         except KeyboardInterrupt:
             report.update(verdict='error', explanation='Evaluation cancelled; no task failure inferred.', error_kind='interrupted')
         except Exception as exc:
-            # Provenance is written before startup and updated once the image is known.
-            provenance = staged / 'evaluator.json'
-            if provenance.exists():
-                report['evaluator'] = read_json(provenance)
             # No raw infrastructure exceptions/session output in durable records.
             report.update(verdict='error', explanation='Verification or evaluation infrastructure failed.',
                           error_kind=type(exc).__name__)
-        report['limitations'].append('Command selection and behavioral equivalence of adaptations require inspection; provenance is validated, semantics are not mechanically proved. False-positive grading is tracked separately.')
         write_json(staged / 'report.json', report)
         target = task / 'evaluation-evidence' / evaluation_id
         seal(staged, target)
@@ -331,7 +215,7 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
             'run_sha256': digest(task / 'runs' / (run_id + '.json')),
             'output_sha256': digest(output_path(store, task_id, run_id) / 'artifact-hashes.json'),
             'verification_sha256': verification_hash, 'evidence_sha256': checked(target),
-            'policy': POLICY, 'config_sha256': digest(target / 'config.json'),
+            'policy': config.get('grading_type') or POLICY, 'config_sha256': digest(target / 'config.json'),
             'finished_at': now(), 'status': 'completed', **report})
 
     from .memory import record_evaluation

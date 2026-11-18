@@ -20,10 +20,13 @@ from test_preparation import HistoryFixture
 class IncrementalTests(HistoryFixture):
     def setUp(self):
         super().setUp()
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
+            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+                          'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}
         self.version = self.freeze('example', self.review)['version']
         self.eval_config = self.root / 'evaluation.json'
-        write_json(self.eval_config, {'image': 'local:test', 'network': 'none', 'commands': [
-            {'name': 'private', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]})
+        write_json(self.eval_config, self.fixture_evaluation_config)
 
     def flow(self, **settings):
         return Workflows(self.store, {'evaluation_config': str(self.eval_config),
@@ -79,7 +82,7 @@ class IncrementalTests(HistoryFixture):
         def phases(jid, task, payload, *, phase=None):
             if phase == 'review' and payload['configuration']['model'] == 'a':
                 reviewing.set()
-                self.assertFalse(summaries(self.store)['models'])
+                self.assertTrue(summaries(self.store)['models'])
                 # Enqueue while review is running, as an independent HTTP request would.
                 self.enqueue(flow, 'b')
                 self.assertTrue(other_benchmarked.wait(5), 'review blocked independent benchmark')
@@ -223,11 +226,11 @@ class IncrementalTests(HistoryFixture):
     def test_large_hard_limit_does_not_reserve_maximum_capacity(self):
         from mineval.publication import published
         flow = self.flow()
-        self.enqueue(flow, 'large', 'small')
-        large = next(j for j in flow.jobs() if j['payload']['configuration']['model'] == 'large')
-        payload = large['payload']
-        payload['evaluation_config']['limits'] = {'memory_mb': 8192}
-        flow.update(large['id'], payload=payload)
+        self.fixture_evaluation_config = self.fixture_evaluation_config | {'limits': {'memory_mb': 8192}}
+        large_version = self.freeze('example', self.review)['version']
+        flow.enqueue('benchmark', [{'task_id': 'example', 'version': large_version}],
+                     [{'model': 'large', 'adapter': 'fake'}])
+        self.enqueue(flow, 'small')
         with patch('mineval.resources.capacity', return_value=(8, 4096)), patch('mineval.benchmark.run_agent', side_effect=self.agent), patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
             flow.work()
         jobs = {j['payload']['configuration']['model']: j for j in flow.jobs()}

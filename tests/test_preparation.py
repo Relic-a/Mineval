@@ -48,7 +48,7 @@ class HistoryFixture(unittest.TestCase):
         diagnose(self.store, 'example', sandbox=FakeRunner([step()]))
         self.review = {'objective_preserved': True, 'snapshot_reviewed': True, 'reviewer': 'test reviewer', 'changes': []}
 
-    def prepare_review(self, task_id, review):
+    def prepare_review(self, task_id, review, *, synthetic_validation=True, validation_verdicts=('fail', 'pass')):
         # Existing artifact tests now pass through separate fake producing/review sessions.
         from mineval.cleanup import save_attempt
         from mineval.review import session
@@ -77,8 +77,31 @@ class HistoryFixture(unittest.TestCase):
         metadata = read_json(task / 'metadata.json')
         sha = metadata['head_commit']
         path = 'check.py' if task_id == 'cleanup' else 'tests/test_answer.py'
+        selection = plan(sha, path)
+        if getattr(self, 'fixture_generated_cases', False):
+            selection['artifacts'] = [{'origin': 'generated', 'path': 'tests/cases.json',
+                'purpose': 'Fixed behavioral fixture', 'test_only': True,
+                'content': json.dumps({'cases': [{'input': '', 'expected': '42\n'}]})}]
         extraction = session(self.store, task_id, stage='extraction', command=['fixture-extractor'],
-            sandbox=ReportAgent('selection.json', plan(sha, path)))
+            sandbox=ReportAgent('selection.json', selection))
+        if synthetic_validation:
+            # Synthetic, sealed validation evidence for tests that need a prepared
+            # revision. Freeze still verifies real receipts and review input identities.
+            from mineval.review import checked, seal, VALIDATION_POLICY
+            from uuid import uuid4
+            config = getattr(self, 'fixture_evaluation_config', {'image': 'local:test', 'network': 'none',
+                'grading_type': 'isolated-argv-v1', 'commands': [{'name': 'cases', 'kind': 'tests',
+                    'argv': ['python3', '-c', 'from app import answer; print(answer())']}]})
+            extraction_root = task / 'private/extractions' / extraction['extraction_id']
+            for state, verdict in zip(('cleaned-base', sha), validation_verdicts):
+                with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
+                    staged = Path(temp) / 'validation'; staged.mkdir()
+                    validation = {'extraction_id': extraction['extraction_id'], 'extraction_sha256': checked(extraction_root),
+                        'state': state, 'policy': VALIDATION_POLICY,
+                        'report': {'configuration': config, 'verdict': verdict},
+                        'interpretation': 'behavior_failure' if verdict == 'fail' else 'passed'}
+                    write_json(staged / 'validation.json', validation)
+                    seal(staged, task / 'private/validations' / extraction['extraction_id'] / uuid4().hex)
         approval = session(self.store, task_id, stage='review', command=['fixture-reviewer'],
             extraction_id=extraction['extraction_id'], sandbox=ReportAgent('review.json', report(review)))
         return approval['review_id']
@@ -93,6 +116,21 @@ class HistoryFixture(unittest.TestCase):
 
 
 class ArtifactAcceptanceTests(HistoryFixture):
+    def test_freeze_rejects_review_without_validation_receipts(self):
+        review_id = self.prepare_review('example', self.review, synthetic_validation=False)
+        with self.assertRaisesRegex(ValueError, 'fail on the unsolved base'):
+            self.store.finalize('example', review_id=review_id)
+        self.assertEqual(self.store.inspect_task('example')['prepared_revisions'], [])
+
+    def test_freeze_rejects_unverified_base_or_reference(self):
+        for verdicts, reason in [(('pass', 'pass'), 'fail on the unsolved base'),
+                                 (('fail', 'fail'), 'pass on the reference')]:
+            with self.subTest(verdicts=verdicts):
+                review_id = self.prepare_review('example', self.review, validation_verdicts=verdicts)
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.store.finalize('example', review_id=review_id)
+        self.assertEqual(self.store.inspect_task('example')['prepared_revisions'], [])
+
     def test_import_has_exact_base_and_no_future_or_git(self):
         self.assertEqual((self.workspace / 'app.py').read_text(), 'def answer(): return 0\n')
         self.assertFalse((self.workspace / 'tests').exists())

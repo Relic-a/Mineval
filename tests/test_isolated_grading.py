@@ -30,11 +30,12 @@ class IsolatedGradingTests(HistoryFixture):
         write_json(self.config_path, {'image': 'local:test', 'network': 'bridge', 'commands': [
             {'name': 'smoke', 'kind': 'smoke', 'argv': ['true']}]})
         diagnose(self.store, 'example', sandbox=FakeRunner([step()]))
+        self.fixture_evaluation_config = {'image': os.environ.get('MINEVAL_TEST_IMAGE', 'local:test'),
+            'network': 'bridge', 'grading_type': 'isolated-argv-v1', 'commands': [
+                {'name': 'cases', 'kind': 'tests', 'argv': ['python3', 'app.py']}]}
         self.version = self.freeze('example', self.review)['version']
         self.config = self.root / 'isolated-config.json'
-        write_json(self.config, {'image': os.environ.get('MINEVAL_TEST_IMAGE', 'local:test'),
-            'network': 'bridge', 'grading_type': 'isolated-argv-v1', 'commands': [
-                {'name': 'cases', 'kind': 'tests', 'argv': ['python3', 'app.py']}]})
+        write_json(self.config, self.fixture_evaluation_config)
 
     def save(self, code):
         class Candidate(SimulatedDocker):
@@ -53,15 +54,18 @@ class IsolatedGradingTests(HistoryFixture):
         self.save('print(1)')
         config = read_json(self.config); config.pop('grading_type'); write_json(self.config, config)
         runner = Mock()
-        result = evaluation.evaluate(self.store, 'example', 'candidate', self.config, sandbox=runner)
-        self.assertEqual(result['error_kind'], 'unsupported_grading_type')
+        with self.assertRaisesRegex(ValueError, 'differs from the frozen'):
+            evaluation.evaluate(self.store, 'example', 'candidate', self.config, sandbox=runner)
+        runner.container.assert_not_called()
+        unsupported = evaluation.execute_checks(self.workspace, self.root / 'unused-workspace',
+            self.root / 'legacy-evidence', self.root, [], [], config, config['image'], runner)
+        self.assertEqual(unsupported['error_kind'], 'unsupported_grading_type')
         runner.container.assert_not_called()
 
     def test_wrong_output_fails_without_shared_evaluator(self):
         self.save('print(0)')
         runner = EvaluationRunner()
-        result = evaluation.evaluate(self.store, 'example', 'candidate', self.config,
-                                     sandbox=runner, command=['fixture-evaluator'])
+        result = evaluation.evaluate(self.store, 'example', 'candidate', self.config, sandbox=runner)
         self.assertEqual(result['verdict'], 'fail', result)
         self.assertEqual(len(result['commands']), 2)
         self.assertEqual(len(runner.specs), 1)

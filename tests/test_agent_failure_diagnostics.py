@@ -32,28 +32,26 @@ class FailingEvaluator(fixtures.EvaluationRunner):
 class EvaluatorFailureTests(HistoryFixture):
     def setUp(self):
         super().setUp()
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image':'local:test', 'network':'none', 'grading_type':'isolated-argv-v1',
+            'commands':[{'name':'answer-regression','kind':'tests',
+                         'argv':['python3','-c','from app import answer; print(answer())']}]}
         self.version = self.freeze('example', self.review)['version']
         self.config = self.root / 'evaluation.json'
-        write_json(self.config, {'image': 'local:test', 'network': 'none', 'commands': [
-            {'name': 'answer-regression', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]})
+        write_json(self.config, self.fixture_evaluation_config)
 
     saved = fixtures.EvaluationTests.saved
     assess = fixtures.EvaluationTests.assess
     def test_failed_evaluator_records_provenance_and_failure_category(self):
         self.saved(code='def answer(): return 7\n')
-        for reason, error in [('nonzero_exit', 'ValueError'), ('timeout', 'TimeoutError'), ('oom', 'ValueError')]:
-            with self.subTest(reason=reason), patch('mineval.sandbox.event') as logged:
-                result = self.assess(evaluation_id='failure-' + reason,
-                                     runner=FailingEvaluator(reason), command=['fixture-evaluator'])
-            self.assertEqual(result['error_kind'], error)
-            self.assertEqual(result['evaluator']['harness'], 'explicit-command')
-            self.assertEqual(result['evaluator']['image_id'], 'sha256:fixture')
-            evidence = self.store.task('example') / 'evaluation-evidence' / ('failure-' + reason)
-            self.assertEqual(json.loads((evidence / 'evaluator.json').read_text()), result['evaluator'])
-            self.assertNotIn('private-state-secret', json.dumps(result))
-            event = next(c for c in logged.call_args_list if c.args[0] == 'evaluator.failed')
-            self.assertEqual(event.kwargs['reason'], reason)
-            self.assertEqual(event.kwargs['sensitive']['state']['Error'], 'private-state-secret')
+        runner = FailingEvaluator('nonzero_exit')
+        with self.assertRaisesRegex(ValueError, 'no longer supported'):
+            self.assess(runner=runner, command=['fixture-evaluator'])
+        self.assertEqual(runner.specs, [])
+        result = self.assess(runner=runner)
+        self.assertEqual(result['verdict'], 'fail')
+        self.assertIsNone(result['evaluator'])
+        self.assertNotIn('private-state-secret', json.dumps(result))
 
 
 class PrivateFailureTests(unittest.TestCase):

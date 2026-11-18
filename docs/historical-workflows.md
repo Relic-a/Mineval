@@ -265,7 +265,7 @@ selects another trusted host JSON file. Example:
   "review_image": "mineval-review:local",
   "evaluation_model": "gpt-6-luna",
   "evaluation_effort": "medium",
-  "evaluator_timeout_seconds": 180,
+  "architecture_review": true,
   "concurrency": {"total": 4, "prepare": 1, "benchmark": 2, "evaluation": 1, "review": 1, "per_model": 2},
   "models": [
     {"model": "gpt-6-luna", "effort": "medium", "adapter": "codex"},
@@ -283,9 +283,7 @@ for this server/worker. `review_image` selects the trusted Codex-capable image f
 qualitative review and compaction. It defaults to `preparation_image`, then the saved
 benchmark's configured agent image, independently of the private test image. Review
 failures are labeled separately and preserve benchmark and evaluation results;
-retrying them reuses both saved artifacts. Use `evaluator_agent: false` for checks-only evaluation or
-`qualitative_review: false` to retain factual observations without qualitative model
-inference. Separate sessions and frozen independent review are always required to
+retrying them reuses both saved artifacts. Set `architecture_review: true` to queue architecture records and comparisons, or `false` to disable them. Set `qualitative_review: false` to disable the separate legacy qualitative memory review. Separate sessions and frozen independent review are always required to
 prepare tasks, regardless of these evaluation/review options.
 
 The extractor is asked to supply a structured `evaluation_config` in its private
@@ -298,14 +296,28 @@ free-text extraction instructions as a shell command or guess arbitrary test sem
 Commands execute only inside disposable rootless sandboxes. Queuing snapshots the
 validated config; later settings edits do not change that queued evaluation.
 
-Automatic evaluation runs private checks first. Passing checks skip AI. Declared
-behavioral failures and inconclusive outcomes may invoke the evaluator for a minimal,
-evidence-backed interface adaptation; incorrect behavior gets no adaptation.
-Infrastructure errors retain their classification and never invoke AI. If a test
-runner reports collection/import incompatibility with a special code, declare that
-code in `inconclusive_exit_codes`; unknown exit codes remain infrastructure errors.
-The evaluator defaults to a separate 180-second deadline and the queued evaluation
-model/effort. The CLI exposes `evaluate --effort` and `--evaluator-timeout` too.
+Automatic evaluation runs fixed private cases without an evaluator model. The isolated-argv-v1 runner keeps case files outside the candidate container and compares
+captured output on the host. isolated-http-v1 starts a service in a network-isolated
+candidate container. A transport inside that container sends one HTTP request at a time
+to localhost; the trusted host compares status, headers, exact response bodies or JSON
+against private expectations. Ordered steps support stateful behavior and cleanup
+requests. The candidate can observe requests already sent and can control its own HTTP
+responses, but the private test documents, unsent requests and expected values are not
+mounted or sent into its environment. The HTTP service and transport require Python 3
+in the selected image. The service must expose a stable HTTP interface; arbitrary
+in-process Python tests, direct imports, database access, browser execution, and other
+test types are not supported by this boundary. Older shared-environment configurations
+fail closed. New freezes require reviewed validation receipts showing a failing base
+and, when a reference exists, a passing reference with the same fixed configuration.
+Older revisions without a pinned configuration retain their original evidence and still
+require an operator-selected configuration.
+
+Architecture review runs in the existing review phase after functional evaluation and
+cannot change its verdict. Records and comparison history appear on the task and run
+pages. Comparisons receive anonymous labels and source copies; candidate source may
+itself contain identifying information, so anonymity cannot be guaranteed against
+such clues. Only successfully recorded attempts are included. Each comparison is saved
+separately, and later completions trigger a fresh comparison across available records.
 
 ## Queue, exclusion and interruption
 
@@ -527,3 +539,30 @@ Command classification, limits and
 diagnostics also appear in the private `dev.jsonl` log as
 `evaluation.command.classified`. Docker limits, OOM detection and timeouts remain
 in force.
+
+### Isolated HTTP grading format
+
+Use a trusted service startup command and a final `tests` marker in the frozen
+configuration. The marker's argv is not executed; the private case documents drive
+the requests. For example:
+
+```json
+{"image":"local:python", "network":"none", "grading_type":"isolated-http-v1",
+ "service":{"argv":["python3","-m","uvicorn","app:app","--host","127.0.0.1","--port","8000"],"port":8000},
+ "commands":[{"name":"http-cases","kind":"tests","argv":["true"]}]}
+```
+
+Each selected or generated document has named, nonempty cases and ordered steps:
+
+```json
+{"cases":[{"name":"create then read","steps":[
+  {"method":"POST","path":"/items","headers":{"Content-Type":"application/json"},"body":"{\"name\":\"pen\"}","expect":{"status":201}},
+  {"method":"GET","path":"/items","expect":{"status":200,"json":[{"name":"pen"}]}}
+]}]}
+```
+
+Assertions use exact status and optional exact body, JSON value, or header values.
+Each step executes even after an assertion failure, allowing explicit cleanup steps.
+The candidate container is discarded on completion or infrastructure failure. All
+case and step counts are checked before a pass is published. Requests already sent
+are visible to the application, so private inputs are not secret once exercised.

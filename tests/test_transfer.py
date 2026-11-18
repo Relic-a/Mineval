@@ -338,6 +338,10 @@ class DispatchTests(HistoryFixture):
         from mineval import remote_api, remote_coordinator, remote_dispatch
         from mineval.workflows import Workflows
         import threading
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
+            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+                          'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}
         version = self.freeze('example', self.review)['version']
         revision = self.store.inspect_revision('example', version)
         payload = {'run_id': 'dispatch-run', 'evaluation_id': 'dispatch-eval',
@@ -386,8 +390,7 @@ class DispatchTests(HistoryFixture):
                 from mineval import evaluation
                 from test_evaluation import EvaluationRunner
                 config = workflow.store.root / 'dispatch-evaluation.json'
-                config.write_text(json.dumps({'image': 'local:test', 'network': 'none', 'commands': [
-                    {'name': 'answer', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]}))
+                config.write_text(json.dumps(self.fixture_evaluation_config))
                 evaluation.evaluate(workflow.store, task, p['run_id'], config,
                                     evaluation_id=p['evaluation_id'], sandbox=EvaluationRunner())
             elif phase == 'review':
@@ -425,12 +428,15 @@ class RetryTests(HistoryFixture):
         from mineval.artifacts import digest, write_json
         from mineval.workflows import Workflows
         from test_evaluation import EvaluationRunner
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
+            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+                          'argv': ['python3', '-c', 'from app import answer; print(answer())']}]}
         version = self.freeze('example', self.review)['version']
         revision = self.store.inspect_revision('example', version)
         benchmark.run(self.store, 'example', version, run_id='saved', adapter=FakeAdapter(effort='medium'), sandbox=SimulatedDocker())
         config = self.root / 'reeval-config.json'
-        write_json(config, {'image': 'local:test', 'commands': [{'name': 'private', 'kind': 'tests',
-                    'argv': ['python3', 'tests/test_answer.py']}]})
+        write_json(config, self.fixture_evaluation_config)
         evaluation.evaluate(self.store, 'example', 'saved', config, evaluation_id='old-eval', sandbox=EvaluationRunner())
         old = self.store.task('example') / 'evaluations/old-eval.json'
         before = digest(old)

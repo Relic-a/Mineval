@@ -97,11 +97,13 @@ class SavedConfigurationCLITests(unittest.TestCase):
     def test_saved_auth_does_not_reach_command_or_plain_evaluation(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch('mineval.evaluation.evaluate', return_value={'verdict': 'pass'}) as evaluate:
-                self.assertEqual(self.invoke(['evaluate', 'run', '--task', 'task', '--config', 'checks',
-                                               '--command', 'python3', 'review.py'], data=tmp), 0)
-                self.assertIsNone(evaluate.call_args.kwargs['auth_file'])
+                with self.assertRaises(SystemExit) as error:
+                    self.invoke(['evaluate', 'run', '--task', 'task', '--config', 'checks',
+                                 '--command', 'python3', 'review.py'], data=tmp)
+                self.assertEqual(error.exception.code, 2)
+                evaluate.assert_not_called()
                 self.assertEqual(self.invoke(['evaluate', 'run', '--task', 'task', '--config', 'checks'], data=tmp), 0)
-                self.assertIsNone(evaluate.call_args.kwargs['auth_file'])
+                self.assertNotIn('auth_file', evaluate.call_args.kwargs)
 
     def test_doctor_uses_explicit_data_and_context(self):
         with patch('mineval.configuration.diagnose', return_value={'ready': False}) as diagnose:

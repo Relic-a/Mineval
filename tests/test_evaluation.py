@@ -18,8 +18,8 @@ from test_preparation import HistoryFixture
 
 class EvaluationRunner:
     """Run only fixed fixture Python tests locally; production uses rootless Docker."""
-    def __init__(self, assessment=None, mode=None, image_id="sha256:fixture"):
-        self.assessment, self.mode, self.image_id = assessment, mode, image_id
+    def __init__(self, *, mode=None, image_id="sha256:fixture"):
+        self.mode, self.image_id = mode, image_id
         self.specs = []
 
     @contextmanager
@@ -28,19 +28,12 @@ class EvaluationRunner:
         if self.mode == 'startup-error':
             raise SandboxError('private error text must not be retained')
         container = Mock(id='evaluation-fixture', image_id=self.image_id)
-        container.start.side_effect = lambda: (write_json(spec.control / 'assessment.json', self.assessment)
-            if spec.control else None)
-        container.wait.return_value = False
         container.inspect.return_value = {'Running': True, 'ExitCode': 0}
-        if spec.control:
-            self.baseline = read_json(spec.inputs / 'baseline-results.json')
-            container.inspect.return_value['Running'] = False
-            # Evaluator edits to production code must never be used for checking.
-            (spec.workspace / 'app.py').write_text('def answer(): return -100\n')
+
         def execute(argv, **kwargs):
             process = subprocess.run(argv, cwd=spec.workspace, capture_output=True, text=True,
                                      env={'PATH': os.environ['PATH'], 'PYTHONPATH': str(spec.workspace)})
-            code = 127 if self.mode == 'command-error' else 1 if self.mode == 'contention' else process.returncode
+            code = 127 if self.mode == 'command-error' else 1 if self.mode == 'contention' else 2 if self.mode == 'inconclusive' else process.returncode
             return {'resources': {'contended': self.mode == 'contention'}, 'exit_code': code, 'timed_out': self.mode == 'timeout', 'oom_killed': self.mode == 'oom',
                     'stdout': process.stdout, 'stderr': process.stderr, 'logs_truncated': False,
                     'duration_seconds': 0.01}
@@ -51,10 +44,14 @@ class EvaluationRunner:
 class EvaluationTests(HistoryFixture):
     def setUp(self):
         super().setUp()
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
+            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+                          'argv': ['python3', '-c', 'from pathlib import Path; from app import answer; '
+                                   'assert not Path("tests/cases.json").exists(); print(answer())']}]}
         self.version = self.freeze('example', self.review)['version']
         self.config = self.root / 'evaluation.json'
-        write_json(self.config, {'image': 'local:test', 'network': 'none', 'commands': [
-            {'name': 'answer-regression', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]})
+        write_json(self.config, self.fixture_evaluation_config)
 
     def saved(self, run_id='candidate', code='def answer(): return 42\n', sandbox=None):
         class Candidate(SimulatedDocker):
@@ -65,7 +62,7 @@ class EvaluationTests(HistoryFixture):
                     def write_candidate():
                         start()
                         (spec.workspace / 'app.py').write_text(code)
-                        # Candidate's bogus check must be replaced with original evidence.
+                        # Candidate-supplied tests cannot override the fixed grader.
                         (spec.workspace / 'tests').mkdir(exist_ok=True)
                         (spec.workspace / 'tests/test_answer.py').write_text('assert True\n')
                     container.start.side_effect = write_candidate
@@ -116,12 +113,12 @@ class EvaluationTests(HistoryFixture):
         self.assertEqual((first['evaluation_version'], second['evaluation_version']), (1, 2))
         self.assertEqual(Store(self.store.root).inspect_evaluation('example', 'first'), first)
         self.assertEqual((inventory(frozen), inventory(output)), before)
-        self.assertEqual(runner.specs[0].readonly_paths, ('tests/test_answer.py',))
+        self.assertEqual(runner.specs[0].readonly_paths, ())
         self.assertIsNone(runner.specs[0].control)
         self.assertIsNone(runner.specs[0].inputs)
         evidence = self.store.task('example') / 'evaluation-evidence/first'
         checks = read_json(evidence / 'baseline/selected-checks.json')
-        self.assertEqual(checks[0]['commit'], self.head)
+        self.assertEqual(checks[0]['origin'], 'generated')
         self.assertEqual(checks[0]['sha256'], checks[0]['executed_sha256'])
         self.assertFalse(checks[0]['adapted'])
         self.assertNotIn('transcript', str(inventory(evidence)))
@@ -130,147 +127,73 @@ class EvaluationTests(HistoryFixture):
         self.saved('wrong', 'def answer(): return 7\n')
         failed = self.assess('wrong')
         self.assertEqual(failed['verdict'], 'fail')
-        self.assertIn('AssertionError', failed['commands'][0]['stderr'])
+        self.assertEqual(failed['commands'][0]['stdout'], '7\n')
 
-    def test_source_assessment_distinguishes_missing_behavior_from_import_failure(self):
+    def test_missing_entrypoint_fails_the_fixed_command(self):
         self.saved(code='VALUE = 0\n')
-        assessment = {'adaptations': [], 'limitations': ['Assertions did not run.'],
-                      'inconclusive_reason': None,
-                      'behavior_failure_reason': 'Source lacks the required answer behavior and an alternative interface.',
-                      'candidate_evidence': [{'path': 'app.py', 'reason': 'Only an unrelated constant is present.'}]}
-        result = self.assess(evaluation_id='source-failure', runner=EvaluationRunner(assessment),
-                             command=['fixture-evaluator'])
+        result = self.assess(evaluation_id='source-failure')
         self.assertEqual(result['verdict'], 'fail')
-        self.assertEqual(result['failure_basis'], 'source_assessment')
-        self.assertEqual(result['candidate_evidence'], assessment['candidate_evidence'])
+        self.assertIn('ImportError', result['commands'][0]['stderr'])
+        self.assertNotIn('failure_basis', result)
         evidence = self.store.task('example') / 'evaluation-evidence/source-failure'
-        self.assertIn('ImportError', read_json(evidence / 'baseline/execution.json')['commands'][0]['stderr'])
-        self.assertEqual(read_json(evidence / 'assessment-proposal.json'), assessment)
         self.assertFalse((evidence / 'adapted').exists())
 
-    def test_source_assessment_requires_safe_existing_evidence_and_exclusive_outcome(self):
-        from copy import deepcopy
-        self.saved(code='VALUE = 0\n')
-        valid = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None,
-                 'behavior_failure_reason': 'Required behavior is absent after source inspection.',
-                 'candidate_evidence': [{'path': 'app.py', 'reason': 'The required behavior is missing.'}]}
-        for mutation in ('missing', 'unsafe', 'empty', 'error', 'inconclusive', 'adaptation'):
-            proposal = deepcopy(valid)
-            if mutation == 'missing': proposal['candidate_evidence'][0]['path'] = 'missing.py'
-            if mutation == 'unsafe': proposal['candidate_evidence'][0]['path'] = '../app.py'
-            if mutation == 'empty': proposal['candidate_evidence'] = []
-            if mutation == 'error': proposal['error_reason'] = 'Infrastructure failed.'
-            if mutation == 'inconclusive': proposal['inconclusive_reason'] = 'Uncertain.'
-            if mutation == 'adaptation': proposal['adaptations'] = [{'path': 'tests/test_answer.py'}]
-            result = self.assess(evaluation_id='invalid-' + mutation, runner=EvaluationRunner(proposal),
-                                 command=['fixture-evaluator'])
-            self.assertEqual(result['verdict'], 'error', mutation)
-            evidence = self.store.task('example') / 'evaluation-evidence' / ('invalid-' + mutation)
-            self.assertEqual(read_json(evidence / 'assessment-proposal.json'), proposal)
-        runner = EvaluationRunner(valid, mode='timeout')
-        result = self.assess(evaluation_id='source-timeout', runner=runner, command=['fixture-evaluator'])
-        self.assertEqual(result['verdict'], 'error')
-        self.assertEqual(len(runner.specs), 1)
+    def test_removed_evaluator_arguments_are_rejected_without_a_record(self):
+        self.saved()
+        for argument in ({'command': ['fixture']}, {'adapter': object()}, {'auth_file': 'unused'}):
+            with self.subTest(argument=argument), self.assertRaisesRegex(ValueError, 'no longer supported'):
+                self.assess(**argument)
+        self.assertFalse(list((self.store.task('example') / 'evaluations').glob('*.json')))
 
-    def test_candidate_evidence_requires_behavior_failure_for_other_outcomes(self):
-        for outcome in ('inconclusive', 'error', 'adaptation'):
-            with self.subTest(outcome=outcome):
-                proposal = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None,
-                            'candidate_evidence': [{'path': 'app.py', 'reason': 'Different interface.'}]}
-                if outcome == 'inconclusive':
-                    proposal['inconclusive_reason'] = 'Cannot establish behavior.'
-                elif outcome == 'error':
-                    proposal['error_reason'] = 'Execution failed.'
-                else:
-                    proposal['adaptations'] = [{'path': 'tests/test_answer.py'}]
-                with self.assertRaisesRegex(ValueError, 'Candidate evidence requires a source-supported failure'):
-                    evaluation.validate_assessment(proposal, [])
+    def test_output_mismatch_records_failure_without_source_assessment(self):
+        self.saved(code='def answer(): return 7\n')
+        result = self.assess()
+        self.assertEqual(result['verdict'], 'fail')
+        self.assertNotIn('candidate_evidence', result)
+        self.assertNotIn('failure_basis', result)
 
     def test_passing_checks_do_not_launch_evaluator(self):
         self.saved()
-        runner = EvaluationRunner({'deliberately': 'invalid'})
-        result = self.assess(runner=runner, command=['must-not-run'])
-        self.assertEqual(result['verdict'], 'pass')
-        self.assertIsNone(result['evaluator'])
+        runner = EvaluationRunner()
+        with self.assertRaisesRegex(ValueError, 'no longer supported'):
+            self.assess(runner=runner, command=['must-not-run'])
+        self.assertEqual(runner.specs, [])
+        self.assertEqual(self.assess(runner=runner)['verdict'], 'pass')
         self.assertEqual(len(runner.specs), 1)
 
-    def test_alternative_interface_adaptation_preserves_assertion_and_records_evidence(self):
+    def test_alternative_interface_does_not_adapt_frozen_checks(self):
         self.saved(code='def result(): return 42\n')
-        assessment = {'adaptations': [{'path': 'tests/test_answer.py',
-            'content': 'from app import result\nassert result() == 42\n',
-            'reason': 'Task specifies the returned value, not the historical function name.',
-            'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
-            'limitations': ['Fixture adaptation reviewed for behavior preservation.'], 'inconclusive_reason': None}
-        runner = EvaluationRunner(assessment)
-        result = self.assess(runner=runner, command=['fixture-evaluator'])
-        self.assertEqual(result['verdict'], 'pass', result)
-        self.assertEqual(result['adaptations'], assessment['adaptations'])
-        self.assertFalse(runner.specs[1].retain_logs)
-        self.assertEqual(runner.baseline['verdict'], 'fail')
-        self.assertNotEqual(runner.specs[1].workspace, runner.specs[2].workspace)
-        self.saved('wrong-alternative', 'def result(): return 7\n')
-        self.assertEqual(self.assess('wrong-alternative', runner=EvaluationRunner(assessment),
-                                    command=['fixture-evaluator'])['verdict'], 'fail')
-        assessment['adaptations'][0]['evidence'][0]['commit'] = 'a' * 40
-        self.assertEqual(self.assess(runner=EvaluationRunner(assessment), command=['fixture-evaluator'])['verdict'], 'error')
+        frozen = self.store.task('example') / 'versions' / self.version
+        before = inventory(frozen)
+        with self.assertRaisesRegex(ValueError, 'no longer supported'):
+            self.assess(command=['fixture-evaluator'])
+        result = self.assess()
+        self.assertEqual(result['verdict'], 'fail')
+        self.assertEqual(result['adaptations'], [])
+        self.assertEqual(inventory(frozen), before)
 
-    def test_test_execution_error_can_be_adapted_without_weakening_assertions(self):
-        cfg = read_json(self.config)
-        cfg['commands'][0]['argv'] = ['python3', '-c',
-            "import runpy, sys\ntry:\n runpy.run_path('tests/test_answer.py')\n"
-            "except ImportError:\n sys.exit(3)\nexcept AssertionError:\n sys.exit(1)"]
-        cfg['commands'][0]['inconclusive_exit_codes'] = [2, 3]
-        write_json(self.config, cfg)
-        assessment = {'adaptations': [{'path': 'tests/test_answer.py',
-            'content': 'from app import result\nassert result() == 42\n',
-            'reason': 'Use the alternative interface while preserving the answer requirement.',
-            'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
-            'limitations': [], 'inconclusive_reason': None}
-        for run_id, answer, expected in [('correct-interface', 42, 'pass'), ('wrong-interface', 7, 'fail')]:
-            self.saved(run_id, code=f'def result(): return {answer}\n')
-            runner = EvaluationRunner(assessment)
-            result = self.assess(run_id, runner=runner, command=['fixture-evaluator'])
-            self.assertEqual(runner.baseline['verdict'], 'inconclusive')
-            self.assertEqual(runner.baseline['commands'][0]['exit_code'], 3)
-            self.assertEqual(result['verdict'], expected, result)
-            self.assertNotIn('error_kind', result)
-            self.assertEqual(len(runner.specs), 3)
-            self.assertNotEqual(runner.specs[0].workspace, runner.specs[2].workspace)
-            evidence = self.store.task('example') / 'evaluation-evidence' / result['evaluation_id']
-            self.assertEqual(read_json(evidence / 'baseline/execution.json')['verdict'], 'inconclusive')
-            self.assertEqual(read_json(evidence / 'adapted/execution.json')['verdict'], expected)
-
-        # An adaptation that still cannot import its interface stays inconclusive.
-        assessment['adaptations'][0]['content'] = 'from app import missing\nassert missing() == 42\n'
-        self.assertEqual(self.assess('correct-interface', runner=EvaluationRunner(assessment),
-                                    command=['fixture-evaluator'])['verdict'], 'inconclusive')
+    def test_rejects_replacing_the_frozen_command(self):
+        self.saved(code='def result(): return 42\n')
+        config = read_json(self.config)
+        config['commands'][0]['argv'] = ['python3', '-c', 'print(42)']
+        write_json(self.config, config)
+        with self.assertRaisesRegex(ValueError, 'differs from the frozen'):
+            self.assess()
+        write_json(self.config, self.fixture_evaluation_config)
+        self.assertEqual(self.assess()['verdict'], 'fail')
 
     def test_adaptations_cannot_override_infrastructure_failure(self):
         self.saved()
-        assessment = {'adaptations': [{'path': 'tests/test_answer.py',
-            'content': 'from app import answer\nassert answer() == 42\n',
-            'reason': 'Evidence-backed test proposal does not repair infrastructure.',
-            'evidence': [{'commit': self.head, 'path': 'tests/test_answer.py'}]}],
-            'limitations': [], 'inconclusive_reason': None}
         for mode in ('command-error', 'timeout', 'oom'):
-            runner = EvaluationRunner(assessment, mode=mode)
-            self.assertEqual(self.assess(runner=runner, command=['fixture-evaluator'])['verdict'], 'error')
+            runner = EvaluationRunner(mode=mode)
+            self.assertEqual(self.assess(runner=runner)['verdict'], 'error')
             self.assertEqual(len(runner.specs), 1)
-        cfg = read_json(self.config)
-        cfg['commands'].insert(0, {'name': 'setup', 'kind': 'setup', 'argv': ['sh', '-c', 'exit 3']})
-        write_json(self.config, cfg)
-        runner = EvaluationRunner(assessment)
-        self.assertEqual(self.assess(runner=runner, command=['fixture-evaluator'])['verdict'], 'error')
-        self.assertEqual(len(runner.specs), 1)
+        with self.assertRaisesRegex(ValueError, 'no longer supported'):
+            self.assess(command=['fixture-evaluator'])
 
     def test_inconclusive_and_infrastructure_error_are_not_task_failure(self):
         self.saved()
-        assessment = {'adaptations': [], 'limitations': ['Cannot reproduce intermittent source requirement'],
-                      'inconclusive_reason': 'Original evidence is flaky and cannot establish the behavior.'}
-        cfg = read_json(self.config)
-        cfg['commands'][0]['argv'] = ['sh', '-c', 'exit 2']
-        write_json(self.config, cfg)
-        result = self.assess(runner=EvaluationRunner(assessment), command=['fixture-evaluator'])
+        result = self.assess(runner=EvaluationRunner(mode='inconclusive'))
         self.assertEqual(result['verdict'], 'inconclusive')
         self.assertEqual(result['commands'][0]['status'], 'inconclusive')
         for mode in ('startup-error', 'command-error', 'timeout'):
@@ -281,26 +204,17 @@ class EvaluationTests(HistoryFixture):
                       sandbox=EvaluationRunner(mode='startup-error'))
         self.assertEqual(self.assess('no-output')['verdict'], 'error')
 
-    def test_command_outcome_contract_and_evaluator_execution_error(self):
+    def test_fixed_command_outcome_and_configuration_contract(self):
         self.saved()
+        self.assertEqual(self.assess(runner=EvaluationRunner(mode='inconclusive'))['verdict'], 'inconclusive')
+        self.assertEqual(self.assess(runner=EvaluationRunner(mode='contention'))['verdict'], 'fail')
+        self.assertEqual(self.assess(runner=EvaluationRunner(mode='command-error'))['verdict'], 'error')
         cfg = read_json(self.config)
-        cfg['commands'][0]['argv'] = ['sh', '-c', 'exit 2']
-        write_json(self.config, cfg)
-        self.assertEqual(self.assess()['verdict'], 'inconclusive')
-        cfg['commands'][0]['argv'] = ['sh', '-c', 'exit 9']
-        write_json(self.config, cfg)
-        self.assertEqual(self.assess()['verdict'], 'error')
-        cfg['commands'][0]['failure_exit_codes'] = [9]
-        write_json(self.config, cfg)
-        self.assertEqual(self.assess()['verdict'], 'fail')
-        error = {'adaptations': [], 'limitations': [], 'inconclusive_reason': None,
-                 'error_reason': 'Result was an unavailable dependency, not a failed assertion.'}
-        self.assertEqual(self.assess(runner=EvaluationRunner(error), command=['fixture'])['verdict'], 'error')
-        cfg['commands'][0]['inconclusive_exit_codes'] = [9]
+        cfg['commands'][0]['failure_exit_codes'] = [2]
         write_json(self.config, cfg)
         with self.assertRaisesRegex(ValueError, 'must not overlap'):
             self.assess()
-        cfg['commands'][0].pop('inconclusive_exit_codes')
+        cfg['commands'][0].pop('failure_exit_codes')
         cfg['commands'][0]['expected_failure'] = 'Historical base fails'
         write_json(self.config, cfg)
         with self.assertRaisesRegex(ValueError, 'cannot exempt'):
@@ -331,8 +245,7 @@ class EvaluationTests(HistoryFixture):
         self.assertEqual(result['coverage']['common'], 1)
         self.assertEqual(result['rates']['left']['pass_rate'], 1)
         self.assertEqual(result['rates']['right']['counts']['fail'], 1)
-        uncertain = {'adaptations': [], 'limitations': [], 'inconclusive_reason': 'Insufficient original evidence'}
-        self.assess('right', 'uncertain', runner=EvaluationRunner(uncertain), command=['fixture'])
+        self.assess('right', 'uncertain', runner=EvaluationRunner(mode='inconclusive'))
         result = evaluation.compare(self.store, definition | {'right': [ref('uncertain')]})
         self.assertEqual(result['rates']['right']['counts']['inconclusive'], 1)
         self.assertEqual(result['rates']['right']['denominator'], 1)
@@ -341,9 +254,9 @@ class EvaluationTests(HistoryFixture):
         with self.assertRaisesRegex(ValueError, 'same resolved verification image'):
             evaluation.compare(self.store, definition | {'right': [ref('different-image')]})
         cfg = read_json(self.config); cfg['network'] = 'bridge'; write_json(self.config, cfg)
-        self.assess('right', 'different-policy')
-        with self.assertRaisesRegex(ValueError, 'same evaluation policy'):
-            evaluation.compare(self.store, definition | {'right': [ref('different-policy')]})
+        with self.assertRaisesRegex(ValueError, 'differs from the frozen'):
+            self.assess('right', 'different-policy')
+        write_json(self.config, self.fixture_evaluation_config)
         with self.assertRaisesRegex(ValueError, 'one assessment'):
             evaluation.compare(self.store, definition | {'left': [ref('left'), ref('uncertain')]})
         self.version = self.freeze('example', self.review)['version']
@@ -388,21 +301,16 @@ class LiveEvaluationTests(HistoryFixture):
 
     def setUp(self):
         super().setUp()
+        self.fixture_generated_cases = True
+        self.fixture_evaluation_config = {'image': os.environ['MINEVAL_AGENT_TEST_IMAGE'], 'network': 'none', 'grading_type': 'isolated-argv-v1',
+            'commands': [{'name': 'answer-regression', 'kind': 'tests',
+                          'argv': ['python3', '-c', "from pathlib import Path; assert not Path('/workspace/tests/cases.json').exists(); from app import answer; print(answer())"]}]}
         self.version = self.freeze('example', self.review)['version']
         self.config = self.root / 'evaluation.json'
-        write_json(self.config, {'image': 'local:test', 'network': 'none', 'commands': [
-            {'name': 'answer-regression', 'kind': 'tests', 'argv': ['sh', '-c', 'PYTHONPATH=. python3 tests/test_answer.py']}]})
+        write_json(self.config, self.fixture_evaluation_config)
 
     def test_live_private_checks_readonly_and_original_artifacts_unchanged(self):
         self.saved()
-        image = os.environ['MINEVAL_AGENT_TEST_IMAGE']
-        cfg = read_json(self.config)
-        cfg['image'] = image
-        cfg['commands'].insert(0, {'name': 'protected', 'kind': 'setup', 'argv': ['sh', '-c',
-            'if echo "assert True" > tests/test_answer.py 2>/dev/null; then exit 1; fi']})
-        cfg['commands'].append({'name': 'protected-after', 'kind': 'setup', 'argv': ['sh', '-c',
-            'if rm tests/test_answer.py 2>/dev/null; then exit 1; fi']})
-        write_json(self.config, cfg)
         before = inventory(self.store.task('example') / 'versions' / self.version)
         output_before = inventory(benchmark.output_path(self.store, 'example', 'candidate'))
         result = self.assess(runner=DockerSandbox(context=os.environ.get('MINEVAL_TEST_CONTEXT')))

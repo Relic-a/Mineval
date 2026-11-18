@@ -161,6 +161,10 @@ class Workflows:
             db.execute('UPDATE jobs SET ' + ','.join(k + '=?' for k in changes) + ' WHERE id=?', (*changes.values(), jid))
 
     def eval_config(self, task, version=None):
+        if version:
+            frozen_config = self.store.task(task) / 'versions' / version / 'evaluation-config.json'
+            if frozen_config.exists():
+                return self.checked_config(read_json(frozen_config))
         selected = self.settings.get('evaluation_configs', {}).get(task, self.settings.get('evaluation_config'))
         if selected:
             return verification.load_config(selected, evaluation=True)
@@ -633,23 +637,21 @@ class Workflows:
             with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
                 path = Path(temp) / 'config.json'
                 write_json(path, self.checked_config(verification.load_config(selected, evaluation=True) if selected else config))
-                from .evaluation import POLICY as evaluation_policy, PROMPT as evaluation_prompt
-                evaluation_adapter = self.role_adapter('evaluation', p) if self.settings.get('evaluator_agent', True) else None
-                assessment_options = dict(adapter=evaluation_adapter,
-                    auth_file=self.auth_file if isinstance(evaluation_adapter, CodexAdapter) else None,
-                    evaluator_timeout=self.settings.get('evaluator_timeout_seconds', 180))
-                validation_key = [review.VALIDATION_POLICY, evaluation_policy, evaluation_prompt,
-                                  (p['model_settings'] if 'model_settings' in p else self.model_settings())['evaluation'], assessment_options['evaluator_timeout'],
-                                  bool(evaluation_adapter), progress.state(), extraction_id,
+                from .evaluation import POLICY as evaluation_policy
+                validation_key = [review.VALIDATION_POLICY, evaluation_policy, progress.state(), extraction_id,
                                   review.checked(self.store.task(task) / 'private/extractions' / extraction_id),
                                   read_json(path), progress.runtime(read_json(path)['image'])]
-                progress.run('validation-base', validation_key,
-                    lambda: review.validate(self.store, task, extraction_id, path, sandbox=DockerSandbox(context=self.context), **assessment_options), progress.validation)
+                base_validation = progress.run('validation-base', validation_key,
+                    lambda: review.validate(self.store, task, extraction_id, path, sandbox=DockerSandbox(context=self.context)), progress.validation)
                 metadata = read_json(self.store.task(task) / 'metadata.json')
                 future = metadata.get('head_commit')
                 if future:
-                    progress.run('validation-future', [validation_key, future],
-                        lambda: review.validate(self.store, task, extraction_id, path, future_commit=future, sandbox=DockerSandbox(context=self.context), **assessment_options), progress.validation)
+                    future_validation = progress.run('validation-future', [validation_key, future],
+                        lambda: review.validate(self.store, task, extraction_id, path, future_commit=future, sandbox=DockerSandbox(context=self.context)), progress.validation)
+                if base_validation['report']['verdict'] != 'fail':
+                    raise WorkflowFailure('Private checks must execute and fail on the unsolved base before freezing.')
+                if future and future_validation['report']['verdict'] != 'pass':
+                    raise WorkflowFailure('Private checks must execute and pass on the reference implementation before freezing.')
         self.stage(jid, 'independent review')
         review_adapter = CodexAdapter(self.settings['review_model'], effort=self.settings.get('review_effort')) if self.settings.get('review_model') else prep_adapter
         approval = progress.run('review', [review.inputs(self.store, task, extraction_id), progress.state(),
@@ -696,10 +698,7 @@ class Workflows:
                 with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
                     config = Path(temp) / 'config.json'; write_json(config, p['evaluation_config'])
                     assessed = evaluation.evaluate(self.store, task, p['run_id'], config,
-                        evaluation_id=p['evaluation_id'], sandbox=DockerSandbox(context=self.context),
-                        adapter=self.role_adapter('evaluation', p) if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None,
-                        auth_file=self.auth_file if self.settings.get('evaluator_agent', True) and p['configuration']['adapter'] != 'fake' else None,
-                        evaluator_timeout=self.settings.get('evaluator_timeout_seconds', 180))
+                        evaluation_id=p['evaluation_id'], sandbox=DockerSandbox(context=self.context))
             if assessed.get('error_kind') == 'interrupted':
                 raise KeyboardInterrupt()
             if phase == 'evaluation':
@@ -709,6 +708,21 @@ class Workflows:
         self.stage(jid, 'model review')
         from .memory import record_evaluation
         record_evaluation(self.store, task, assessed['evaluation_id'])
+        if p['configuration']['adapter'] != 'fake' and self.settings.get('architecture_review', False):
+            from .architecture import record as architecture_record, compare as architecture_compare
+            image = self.settings.get('review_image') or self.settings.get('preparation_image') or record.get('operation', {}).get('configured_image')
+            if not image:
+                raise WorkflowFailure('Architecture review requires a configured review image; functional results remain available.')
+            options = dict(image=image, context=self.context, auth_file=self.auth_file,
+                           model=self.settings.get('review_model', self.role_adapter('evaluation', p).model),
+                           effort=self.settings.get('review_effort', self.role_adapter('evaluation', p).effort))
+            try:
+                self.stage(jid, 'architecture record')
+                architecture_record(self.store, task, p['run_id'], **options)
+                self.stage(jid, 'architecture comparison')
+                architecture_compare(self.store, task, record['prepared_revision']['version'], **options)
+            except Exception as exc:
+                raise WorkflowFailure('Architecture review failed (' + type(exc).__name__ + '); functional results remain available. Retry review separately.') from exc
         if p['configuration']['adapter'] != 'fake' and self.settings.get('qualitative_review', True):
             from .model_review import review_evaluation
             image = self.settings.get('review_image') or self.settings.get('preparation_image') or record.get('operation', {}).get('configured_image')

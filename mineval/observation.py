@@ -175,6 +175,11 @@ class Pages:
                     body += '<p>' + esc(completion.get('summary', '')) + '</p><p class="muted">Historical solution seen: ' + esc(completion.get('historical_solution_seen', 'unknown')) + ' (self-reported).</p>'
                 assessments = [evaluation.inspect(self.store, task, p.stem) for p in sorted((self.store.task(task) / 'evaluations').glob('*.json'))]
                 body += '<h2 id="evaluations">Evaluations</h2>' + table(['Assessment', 'Verdict'], ((self.link(e['evaluation_id'], 'tasks', task, 'evaluations', e['evaluation_id']), status(e.get('verdict', e['status']))) for e in assessments if e['run_id'] == parts[3]))
+                architecture = self.store.task(task) / 'architecture/records' / parts[3]
+                if architecture.exists():
+                    from .review import checked
+                    checked(architecture)
+                    body += '<h2>Architecture observations</h2>' + pretty(read_json(architecture / 'record.json'))
                 if run.get('output_available'):
                     body += '<h2>Output changes</h2>' + self.diff(task, run)
                     body += '<h2>Saved output artifacts</h2>' + self.files(task, 'runs', parts[3], self.artifact_root(task, 'runs', parts[3]))
@@ -245,6 +250,15 @@ class Pages:
         body += '<h2 id="evaluations">Evaluations</h2>'
         results = [self.store.inspect_evaluation(task, Path(name).stem) for name in record['evaluations']]
         body += table(['Assessment', 'Run', 'Verdict'], ((self.link(e['evaluation_id'], 'tasks', task, 'evaluations', e['evaluation_id']), self.link(e['run_id'], 'tasks', task, 'runs', e['run_id']), status(e.get('verdict', e['status']))) for e in results))
+        comparisons = []
+        from .review import checked
+        for directory in (self.store.task(task) / 'architecture/comparisons').glob('*'):
+            checked(directory)
+            comparisons.append(read_json(directory / 'comparison.json'))
+        if comparisons:
+            body += '<h2>Architecture comparisons</h2>'
+            for i, comparison in enumerate(sorted(comparisons, key=lambda x: x['created_at'], reverse=True)):
+                body += '<details' + (' open' if i == 0 else '') + '><summary>' + esc(comparison['created_at'] + ' · ' + comparison['version']) + '</summary>' + pretty(comparison) + '</details>'
         body += '<p class="muted">To exclude this task from future work: <code>mineval task retire ' + esc(task) + ' --reason "Reason"</code>. Old results remain available.</p>'
         return self.page(task, body)
 
