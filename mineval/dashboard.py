@@ -237,13 +237,25 @@ def _budget_label(conditions):
 def comparison_table(pages, report):
     rows = []
     for m in report['models']:
-        o = m['overall']; c = m['comparable']
-        rate = percent(o['pass_rate'])
-        bar = '' if o['pass_rate'] is None else '<meter min="0" max="1" value="' + str(o['pass_rate']) + '">' + rate + '</meter>'
-        rows.append((pages.link(m['model']['name'], 'models', model=m['model']['name']), esc(m['model'].get('reasoning_effort') or 'unspecified'), esc(m['harness']['name']), '<span class="rate">' + rate + bar + '</span>', str(o['pass']) + ' / ' + str(o['decided']), str(o['covered_tasks']) + ' / ' + str(o['available']) + ' tasks', percent(c['pass_rate']) + ' · ' + str(c['evaluated']) + ' samples', str(m['category_count']) + ' / ' + str(len(CATEGORIES)),
-                     str(o['attempt_count']), str(o['infrastructure_errors']),
-                     esc(_budget_label(m['conditions']))))
-    return table(['Model', 'Reasoning', 'Harness', 'All-evidence pass rate', 'Passed / decided', 'Task coverage', 'Comparable pass rate', 'Categories', 'Attempts', 'Infrastructure errors', 'Run budget'], rows)
+        overall = m['overall']
+        comparable = m['comparable']
+        rate = percent(comparable['pass_rate'])
+        bar = ''
+        if comparable['pass_rate'] is not None:
+            bar = f'<meter min="0" max="1" value="{comparable["pass_rate"]}">{rate}</meter>'
+        rows.append((
+            pages.link(m['model']['name'], 'models', model=m['model']['name']),
+            esc(m['model'].get('reasoning_effort') or 'unspecified'), esc(m['harness']['name']),
+            f'<span class="rate">{rate}{bar}</span>', str(comparable['attempt_count']),
+            percent(overall['pass_rate']), f'{overall["pass"]} / {overall["decided"]}',
+            f'{overall["covered_tasks"]} / {overall["available"]} tasks',
+            f'{m["category_count"]} / {len(CATEGORIES)}',
+            str(overall['attempt_count']), str(overall['infrastructure_errors']),
+            esc(_budget_label(m['conditions'])),
+        ))
+    return table(['Model', 'Reasoning', 'Harness', 'Mean matched-task pass rate', 'Matched attempts',
+                  'All-evidence pass rate', 'Passed / decided', 'Task coverage', 'Categories',
+                  'Attempts', 'Infrastructure errors', 'Run budget'], rows)
 
 
 def overview(pages):
@@ -313,14 +325,14 @@ def percent(value):
 
 
 def metrics(row):
-    return [str(row[x]) for x in ('pass', 'fail', 'inconclusive', 'error')] + [percent(row['pass_rate']), str(row['evaluated']) + ' evaluated samples', str(row['decided']) + ' decided']
+    return [str(row[x]) for x in ('pass', 'fail', 'inconclusive', 'error')] + [percent(row['pass_rate']), str(row['evaluated']) + ' evaluated attempts', str(row['decided']) + ' decided']
 
 
 def models(pages, query):
     report = summaries(pages.store)
     chosen = query.get('model', [None])[0]
-    body = '<p>Pass rate includes all evaluated verdicts. Exact task revisions and evaluation conditions define samples; reruns never select a best score.</p>'
-    body += '<p class="notice">All-evidence figures describe each configuration’s own coverage and are not a ranking. Comparable rates use only the exact common revision and evaluation-condition intersection across every listed configuration (' + str(report['common_samples']) + ' samples).</p>'
+    body = '<p>Pass rates use pass and fail verdicts. Exact task revisions and evaluation conditions define matches. Each matched task with a decided attempt contributes equally to the comparable rate.</p>'
+    body += '<p class="notice">All-evidence figures describe each configuration’s own coverage. Comparable rates use the exact common revision and evaluation-condition intersection (' + str(report['common_samples']) + ' matches).</p>'
     if not chosen:
         body += comparison_table(pages, report)
         body += '<p>' + pages.link('Compare explicit assessments', 'compare') + '</p>'
@@ -334,14 +346,14 @@ def models(pages, query):
             if m['model']['name'] != chosen:
                 continue
             body += '<h3>Effort: ' + esc(m['model'].get('reasoning_effort') or 'unspecified') + ' · ' + esc(m['harness']['name']) + '</h3>'
-            body += table(['Overall', 'Pass', 'Fail', 'Inconclusive', 'Error', 'Pass rate', 'Denominator', 'Decided count'], [('All evaluated samples', *metrics(m['overall']))])
+            body += table(['Overall', 'Pass', 'Fail', 'Inconclusive', 'Error', 'Pass rate', 'Denominator', 'Decided count'], [('All evaluated attempts', *metrics(m['overall']))])
             overall = m['overall']
             body += '<p>Task coverage: ' + str(overall['covered_tasks']) + '/' + str(overall['available']) + ' prepared tasks (' + percent(overall['coverage']) + '). Sample coverage: ' + str(overall['evaluated']) + '/' + str(overall['available_samples']) + ' observed revision/condition samples (' + percent(overall['sample_coverage']) + ').</p>'
             breakdown = []
             for category, r in m['categories'].items():
                 breakdown.append((esc(category), *metrics(r), str(r['covered_tasks']) + '/' + str(r['available']) + ' tasks'))
             body += '<h2 id="categories">Category performance</h2>' + table(['Category', 'Pass', 'Fail', 'Inconclusive', 'Error', 'Pass rate', 'Denominator', 'Decided coverage', 'Task coverage'], breakdown)
-            body += '<details><summary>Category performance on exact common conditions</summary>' + table(['Category', 'Pass', 'Fail', 'Inconclusive', 'Error', 'Pass rate', 'Denominator', 'Decided count'], [(esc(c), *metrics(r)) for c, r in m['comparable_categories'].items()]) + '</details>'
+            body += '<details><summary>Category performance on exact common conditions</summary>' + table(['Category', 'Pass', 'Fail', 'Inconclusive', 'Error', 'Mean matched-task pass rate', 'Attempts', 'Decided attempts'], [(esc(c), *metrics(r)) for c, r in m['comparable_categories'].items()]) + '</details>'
             body += '<details><summary>Exact assessment selections</summary>' + pretty(m['selections']) + '</details>'
         body += '<h2 id="observations">Accumulated observations</h2><p>Qualitative observations supplement independent verdicts. Configuration and original evidence remain attached to each observation.</p>'
         for item in Memory(pages.store).history(chosen):

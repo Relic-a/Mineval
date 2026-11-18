@@ -128,9 +128,8 @@ See [Phase 8 handoff](docs/phase-handoffs/phase-8.md) for tested paths and limit
 
 Troubleshooting: a busy task is locked by a CLI operation; wait for it to finish and
 refresh. A hash mismatch means evidence changed: preserve the store and investigate,
-rather than rewriting receipts. A comparison error usually means duplicate tasks,
-mixed model/harness identities or incompatible verification policies/images; select
-one record per task per side with matching evaluation inputs. For Docker errors, run
+rather than rewriting receipts. For comparable results, select one model and harness
+per side and use matching evaluation inputs. For Docker errors, run
 `mineval --context YOUR_CONTEXT doctor` and check your preloaded image and runtimes.
 If a fixed port is busy, omit `--port`. Each restart prints a new private URL.
 
@@ -268,14 +267,15 @@ Publication uses sealed evidence followed by a receipted record; host loss may l
 an orphan evidence directory that reserves its ID. Use a new ID to retry. There is
 no automatic coding-agent rerun or assessment replacement.
 
-Comparisons select explicit `task_id/evaluation_id` pairs on each side, one per task
+Comparisons select explicit `task_id/evaluation_id` pairs on each side, one per attempt
 and one model + harness per side. They report exact common prepared revisions and
 coverage, and require the same configuration, verification and evaluation policy
-for common tasks, plus matching resolved runtime images where available. Rates use **only that common set**, with pass/fail/inconclusive/error
-counts, total denominator, pass rate and decided coverage. Errors and inconclusives
-stay in the denominator and retain their own counts; they are never relabeled task
-failures. Zero common coverage gives null rates. No latest/best assessment is selected
-implicitly, and no aggregates over different subsets are presented as comparable.
+for common tasks, plus matching resolved runtime images where available. Within each
+budget, the comparison averages the pass rates of exact matched task revisions with
+at least one pass or fail on that side. `decided_task_count` reports how many matches
+contributed to the mean. Pooled verdict counts, the attempt denominator, and decided
+attempt coverage include every matched attempt. A side with no decided matches
+has a null pass rate. Select the assessment for each attempt explicitly.
 
 ## Run a frozen benchmark
 
@@ -332,8 +332,8 @@ files as the saved final state, without agent-controlled Git. Safe outputs from 
 timeouts and cancellation are retained too. Outputs can contain secrets copied by an
 agent: inspect code before sharing. Unsupported links/special files fail collection.
 
-Comparisons take explicit left/right lists of saved task/run IDs, one attempt per task
-and one model + harness per side. They report the exact **common revisions**, coverage,
+Comparisons take explicit left/right lists of saved task/run IDs with one model
+and harness per side. They report the exact **common revisions**, coverage,
 and left/right-only revisions, including zero overlap. Different revisions of the same
 task do not overlap. Execution failures stay visible in coverage; benchmark comparison adds no task grading or
 aggregate scores are produced in this phase. Task/suite/run identities remain immutable.

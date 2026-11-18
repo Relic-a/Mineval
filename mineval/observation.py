@@ -343,12 +343,13 @@ class Pages:
                 from .dashboard import _budget_label
                 def rate(value):
                     return 'Unavailable' if value is None else f'{value:.1%}'
-                body += '<h2>Verdicts on the common set</h2>' + table(
-                    ['Run budget', 'Side', 'Attempts', 'Pass', 'Fail', 'Inconclusive',
-                     'Infrastructure errors', 'Pass rate', 'Decided coverage'],
-                    ((esc(_budget_label(cohort['conditions'])), side.title(), str(r['attempt_count']),
+                body += '<h2>Verdicts on the common set</h2><p>Each matched task with a pass or fail contributes equally to its side’s pass rate.</p>' + table(
+                    ['Run budget', 'Side', 'Mean task pass rate', 'Decided task matches',
+                     'Attempts', 'Pass', 'Fail', 'Inconclusive', 'Infrastructure errors', 'Decided attempt coverage'],
+                    ((esc(_budget_label(cohort['conditions'])), side.title(), esc(rate(r['pass_rate'])),
+                      str(r['decided_task_count']), str(r['attempt_count']),
                       *(str(r['counts'][k]) for k in ('pass', 'fail', 'inconclusive', 'error')),
-                      esc(rate(r['pass_rate'])), esc(rate(r['decided_coverage'])))
+                      esc(rate(r['decided_coverage'])))
                      for cohort in result['cohorts'] for side, r in cohort['rates'].items()))
             if kind == 'runs':
                 body += '<h2>Selected attempts</h2>' + table(['Side', 'Attempts', 'Infrastructure errors'], (

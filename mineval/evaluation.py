@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import json
 import re
+from statistics import mean
 import tempfile
 import time
 from uuid import uuid4
@@ -242,19 +243,32 @@ def evaluate(store, task_id, run_id, config_path, *, evaluation_id=None, sandbox
     return result
 
 
-def rates(records):
+def matched_pass_rate(task_groups):
+    """Give each exact task match with a decided verdict equal weight."""
+    task_rates = []
+    for records in task_groups:
+        passed = sum(record['verdict'] == 'pass' for record in records)
+        failed = sum(record['verdict'] == 'fail' for record in records)
+        if passed + failed:
+            task_rates.append(passed / (passed + failed))
+    return {'pass_rate': mean(task_rates) if task_rates else None,
+            'decided_task_count': len(task_rates)}
+
+
+def rates(task_groups):
+    records = [record for group in task_groups for record in group]
     counts = {v: sum(record['verdict'] == v for record in records)
               for v in ('pass', 'fail', 'inconclusive', 'error')}
     decided = counts['pass'] + counts['fail']
     n = len(records)
     return {'counts': counts, 'denominator': n, 'attempt_count': n,
             'infrastructure_errors': counts['error'],
-            'pass_rate': counts['pass'] / decided if decided else None,
+            **matched_pass_rate(task_groups),
             'decided_coverage': decided / n if n else None}
 
 
 def compare(store, definition):
-    """Compare explicit assessments, with one vote per distinct saved attempt."""
+    """Compare explicit assessments with equal weight per matched task in each budget."""
     from .benchmark import compare as compare_runs, comparison_groups, condition_key, conditions
     from .memory import encoded
     if not isinstance(definition, dict) or set(definition) != {'left', 'right'}:
@@ -312,7 +326,7 @@ def compare(store, definition):
         budget['grading'] = record.get('grading_conditions')
         entry = cohorts.setdefault(encoded(budget), {'conditions': budget, 'left': [], 'right': []})
         for side in ('left', 'right'):
-            entry[side].extend(groups[side][k])
+            entry[side].append(groups[side][k])
     result['cohorts'] = [{'conditions': cohort['conditions'], 'rates': {
         side: rates(cohort[side]) for side in ('left', 'right')}} for cohort in cohorts.values()]
     result['rates'] = (result['cohorts'][0]['rates'] if len(cohorts) == 1 else

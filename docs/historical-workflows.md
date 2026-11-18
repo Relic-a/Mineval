@@ -427,10 +427,10 @@ a behavioral verdict.
 Models and results shows each model/effort/harness configuration's all-evidence
 performance and category average. Each dedicated model profile shows pass/fail/inconclusive/error,
 pass rates, decided counts, denominators, task coverage, exact assessment selections,
-and accumulated observations. Pass rate includes all four verdicts in the denominator.
-A sample is an exact prepared revision and evaluation condition. Repeated reruns
-use the first assessment of the earliest attempt for that sample; no best score is
-selected. Distinct revisions/conditions remain distinct samples; task coverage counts
+and accumulated observations. An attempt pass rate divides passes by passes plus
+failures. An exact prepared revision and evaluation condition defines a sample.
+Each attempt contributes its first published assessment. Distinct revisions and
+conditions remain distinct samples. Task coverage counts
 distinct task registrations, not samples, against prepared registrations including
 archived history. Overall coverage uses the same distinct-task denominator. Separate
 sample coverage divides evaluated samples by the union of observed exact revision/condition
@@ -440,10 +440,11 @@ contribute to overall rates but not the named-category mean. Zero data yields an
 unavailable rate, not zero. Small sample counts are visible rather than ranked.
 
 All-evidence summaries on different subsets are descriptive, not model rankings.
-Comparable rates use only the intersection of exact revisions, verification receipts,
-evaluation config hashes, policy and resolved image IDs across every listed
-configuration. Missing resolved IDs do not match known images. Use Compare for
-explicit pairwise assessment selections and its existing stricter compatibility checks.
+Comparable rates use the intersection of exact revisions, verification receipts,
+evaluation config hashes, policy and resolved image IDs. Each matched sample with a
+decided attempt contributes equally to its configuration’s pass rate. Pooled attempt
+counts include all four verdicts. Missing resolved IDs match only other missing IDs.
+Use Compare for explicit pairwise assessment selections and coverage.
 
 ## Model memory and safe compaction
 
@@ -578,8 +579,9 @@ set `exclude: false` in the workflow submission. Each attempt has its own run ID
 disposable workspace and fresh service state.
 
 Comparisons match the exact prepared revision, grading rules and resolved environment.
-Coding and grading budgets are reported separately by cohort. Pass rate is passed
-divided by decided attempts. Reports also show the number of attempts, inconclusive
-results, infrastructure errors and exclusions. A regrade reuses the original attempt
-identity. Summary views use its first published assessment. Explicit comparisons
-accept a chosen assessment per attempt.
+Each budget cohort reports the mean of its matched task pass rates. For each side,
+divide passes by decided attempts within each match, then average the rates for
+matches with at least one decided attempt. Reports also show pooled attempt counts,
+inconclusive results, infrastructure errors and exclusions. A regrade reuses the
+original attempt identity. Summary views use its first published assessment.
+Explicit comparisons accept a chosen assessment per attempt.

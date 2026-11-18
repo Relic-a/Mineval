@@ -29,6 +29,20 @@ from mineval.verification import diagnose
 from review_helpers import ReportAgent, plan, report
 
 
+class SolvingAgent(SimulatedDocker):
+    @contextmanager
+    def container(self, spec):
+        with super().container(spec) as container:
+            original = container.start.side_effect
+
+            def start():
+                original()
+                (spec.workspace / 'app.py').write_text('def answer(): return 42\n')
+
+            container.start.side_effect = start
+            yield container
+
+
 class MemoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -339,16 +353,6 @@ class WorkflowTests(HistoryFixture):
         self.assertFalse((self.store.task('example') / 'evaluations' / (job['payload']['evaluation_id'] + '.json')).exists())
 
     def test_named_category_mean_and_comparable_intersection_use_exact_conditions(self):
-        class SolvingAgent(SimulatedDocker):
-            @contextmanager
-            def container(inner, spec):
-                with super().container(spec) as container:
-                    original = container.start.side_effect
-                    def start():
-                        original()
-                        (spec.workspace / 'app.py').write_text('def answer(): return 42\n')
-                    container.start.side_effect = start
-                    yield container
         versions = {}
         for tid, category in [('logic-one', 'behavior'), ('logic-two', 'behavior'), ('access', 'security')]:
             self.store.register(self.candidate | {'task_id': tid, 'category': category})
@@ -387,6 +391,53 @@ class WorkflowTests(HistoryFixture):
         self.assertEqual(updated_models['A']['overall']['sample_coverage'], 1)
         self.assertEqual(updated_models['B']['overall']['sample_coverage'], .25)
         self.assertEqual(updated_models['A']['overall']['coverage'], .75)
+
+    def test_comparable_rates_weight_matched_tasks_equally_with_uneven_repeats(self):
+        selections = {'left': [], 'right': []}
+        for task_id, agent, repeat_counts in [('easy', SolvingAgent, (9, 1)),
+                                              ('hard', SimulatedDocker, (1, 9))]:
+            self.store.register(self.candidate | {'task_id': task_id, 'category': 'behavior'})
+            write_json(self.store.draft(task_id) / 'control/verify.json', read_json(self.config_path))
+            diagnose(self.store, task_id, sandbox=FakeRunner([step()]))
+            version = self.freeze(task_id, self.review)['version']
+            for side, repeats in zip(selections, repeat_counts):
+                for repeat in range(repeats):
+                    attempt = f'{side}-{repeat}'
+                    benchmark.run(self.store, task_id, version, run_id=attempt,
+                                  adapter=FakeAdapter(model=side, effort='high'), sandbox=agent())
+                    evaluation.evaluate(self.store, task_id, attempt, self.config,
+                                        evaluation_id=attempt, sandbox=EvaluationRunner())
+                    selections[side].append({'task_id': task_id, 'evaluation_id': attempt})
+
+        comparison = evaluation.compare(self.store, selections)
+        self.assertEqual(comparison['coverage']['common'], 2)
+        self.assertEqual(len(comparison['cohorts']), 1)
+        report = summaries(self.store)
+        self.assertEqual(report['common_samples'], 2)
+        models = {model['model']['name']: model for model in report['models']}
+        for side, passes in [('left', 9), ('right', 1)]:
+            with self.subTest(side=side):
+                rates = comparison['rates'][side]
+                self.assertEqual(rates['pass_rate'], .5)
+                self.assertEqual(rates['decided_task_count'], 2)
+                self.assertEqual(rates['attempt_count'], 10)
+                self.assertEqual(rates['counts'], {'pass': passes, 'fail': 10 - passes,
+                                                   'inconclusive': 0, 'error': 0})
+                model = models[side]
+                self.assertEqual(model['overall']['pass_rate'], passes / 10)
+                for comparable in (model['comparable'], model['comparable_categories']['behavior']):
+                    self.assertEqual(comparable['pass_rate'], .5)
+                    self.assertEqual(comparable['decided_task_count'], 2)
+                    self.assertEqual(comparable['attempt_count'], 10)
+                    self.assertEqual(comparable['pass'], passes)
+
+        pages = Pages(self.store)
+        dashboard = pages.render('/models')
+        self.assertEqual(dashboard.count('<meter min="0" max="1" value="0.5">50.0%</meter>'), 2)
+        query = {side: [f"{ref['task_id']}:{ref['evaluation_id']}" for ref in refs]
+                 for side, refs in selections.items()}
+        comparison_page = pages.render('/compare', query | {'kind': ['evaluations']})
+        self.assertEqual(comparison_page.count('<td>50.0%</td><td>2</td><td>10</td>'), 2)
 
     def test_http_writes_require_origin_csrf_and_idempotency_and_retirement_confirmation(self):
         flow = self.flow()

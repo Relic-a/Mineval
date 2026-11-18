@@ -3,6 +3,7 @@ from collections import defaultdict
 import json
 from .artifacts import read_json
 from .categories import CATEGORIES, LEGACY
+from .evaluation import matched_pass_rate
 from .memory import encoded
 from .workflows import tasks
 from .publication import published
@@ -29,6 +30,12 @@ def counts(records, total, sample_total):
                      'available_samples': sample_total,
                      'sample_coverage': len({sample_key(r) for r in records}) / sample_total if sample_total else None,
                      'decided': result['pass'] + result['fail']}
+
+
+def comparable_counts(task_groups):
+    records = [record for group in task_groups for record in group]
+    total = len({record['task_id'] for record in records})
+    return counts(records, total, len(task_groups)) | matched_pass_rate(task_groups)
 
 
 def summaries(store):
@@ -76,7 +83,8 @@ def summaries(store):
             model, harness, budget = json.loads(identity)
             records = groups[identity]
             all_attempts = [r for attempts in records.values() for r in attempts]
-            comparable = [r for key in sorted(matched) for r in records[key]]
+            comparable_groups = [records[key] for key in sorted(matched)]
+            comparable = [r for group in comparable_groups for r in group]
             unmatched = [r for key in records.keys() - matched for r in records[key]]
             breakdown = {c: counts([r for r in all_attempts if r['category'] == c], available[c],
                                     sum(r['category'] == c for r in pool.values())) for c in available}
@@ -86,10 +94,9 @@ def summaries(store):
             results.append({'model': model, 'harness': harness, 'conditions': budget, 'overall': overall,
                 'categories': breakdown, 'category_average': sum(rates) / len(rates) if rates else None,
                 'category_count': len(rates),
-                'comparable': counts(comparable, len({r['task_id'] for r in comparable}), len(matched)),
-                'comparable_categories': {c: counts([r for r in comparable if r['category'] == c],
-                                                  len({r['task_id'] for r in comparable if r['category'] == c}),
-                                                  sum(pool[key]['category'] == c for key in matched)) for c in available},
+                'comparable': comparable_counts(comparable_groups),
+                'comparable_categories': {c: comparable_counts(
+                    [group for group in comparable_groups if group[0]['category'] == c]) for c in available},
                 'selections': [{'task_id': r['task_id'], 'evaluation_id': r['evaluation_id']} for r in all_attempts],
                 'common_selections': [{'task_id': r['task_id'], 'evaluation_id': r['evaluation_id']} for r in comparable],
                 'excluded': [{'task_id': r['task_id'], 'run_id': r['run_id'],
