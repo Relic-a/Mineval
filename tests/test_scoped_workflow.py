@@ -50,14 +50,14 @@ class ScopedWorkflowTests(unittest.TestCase):
         def run(flow, job, stop):
             dispatched.append(job['id'])
             flow.update(job['id'], state='completed')
-        with patch('mineval.remote_dispatch.run_job', side_effect=run):
+        with patch('mineval.addons.remote.remote_dispatch.run_job', side_effect=run):
             self.flow.work(job_id='selected')
         self.assertEqual(dispatched, ['selected'])
         self.assertEqual(self.states(), {'selected': 'completed', 'other': 'running'})
 
     def test_unknown_job_is_rejected_before_workers_start(self):
         self.insert('other', 'running')
-        with patch('mineval.remote_dispatch.dispatch') as dispatch:
+        with patch('mineval.addons.remote.remote_dispatch.dispatch') as dispatch:
             with self.assertRaisesRegex(ValueError, 'Unknown workflow job: missing'):
                 self.flow.work(job_id='missing')
         dispatch.assert_not_called()
@@ -80,7 +80,7 @@ class ScopedWorkflowTests(unittest.TestCase):
         phases = []
         with patch.object(self.store, 'inspect_run', return_value=record), \
              patch.object(self.flow, 'benchmark', side_effect=lambda jid, task, p, *, phase: phases.append(phase)), \
-             patch('mineval.resources.admits', return_value=True):
+             patch('mineval.addons.batch.resources.admits', return_value=True):
             self.flow.retry('selected', reevaluate=True)
             retried = self.flow.jobs()[0]
             self.assertEqual(retried['payload']['run_id'], 'saved')
@@ -100,7 +100,7 @@ class ScopedWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'usable saved run'):
             self.flow.retry('selected', reevaluate=True)
         output = io.StringIO()
-        with patch('mineval.configuration.load', return_value={}), contextlib.redirect_stderr(output):
+        with patch('mineval.core.configuration.load', return_value={}), contextlib.redirect_stderr(output):
             with self.assertRaises(SystemExit):
                 _main(['--data', str(self.store.root), 'workflow', 'retry', 'selected', '--reevaluate', '--new-attempt'])
         self.assertIn('not allowed with argument', output.getvalue())
@@ -112,7 +112,7 @@ class ScopedWorkflowTests(unittest.TestCase):
         processed = []
         def remote(flow, job, stop, refresh):
             processed.append((job['id'], refresh))
-        with patch('mineval.remote_dispatch.run_job', side_effect=remote), \
+        with patch('mineval.addons.remote.remote_dispatch.run_job', side_effect=remote), \
              patch.object(self.flow, '_local_work', side_effect=AssertionError('local work')):
             self.flow.work(job_id='selected', refresh_export=True)
         self.assertEqual(processed, [('selected', True)])
@@ -120,7 +120,7 @@ class ScopedWorkflowTests(unittest.TestCase):
         self.assertEqual(self.states()['other'], 'running')
 
     def test_refresh_does_not_submit_a_nonterminal_remote_job(self):
-        from mineval.remote_dispatch import run_job
+        from mineval.addons.remote.remote_dispatch import run_job
         import threading
         self.flow.settings['vps'] = {'host': 'test@example.test'}
         self.insert('selected', 'interrupted', host='vps')
@@ -131,8 +131,8 @@ class ScopedWorkflowTests(unittest.TestCase):
             def request(self, request, **kwargs):
                 actions.append(request['action'])
                 return {'state': 'ready'}
-        with patch('mineval.remote_dispatch.SSHClient', Client), \
-             patch('mineval.remote_dispatch.upload_resumable', side_effect=AssertionError('must not submit')):
+        with patch('mineval.addons.remote.remote_dispatch.SSHClient', Client), \
+             patch('mineval.addons.remote.remote_dispatch.upload_resumable', side_effect=AssertionError('must not submit')):
             run_job(self.flow, self.flow.jobs()[0], threading.Event(), True)
         self.assertEqual(actions, ['status'])
         self.assertEqual(self.states()['selected'], 'interrupted')
@@ -141,14 +141,14 @@ class ScopedWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'requires a job ID'):
             self.flow.work(refresh_export=True)
         output = io.StringIO()
-        with patch('mineval.configuration.load', return_value={}), contextlib.redirect_stderr(output):
+        with patch('mineval.core.configuration.load', return_value={}), contextlib.redirect_stderr(output):
             with self.assertRaises(SystemExit):
                 _main(['--data', str(self.store.root), 'workflow', 'work', '--refresh-export'])
         self.assertIn('--refresh-export requires --job-id', output.getvalue())
 
     def test_cli_accepts_selector_and_reports_unknown_job(self):
         output = io.StringIO()
-        with patch('mineval.configuration.load', return_value={}), contextlib.redirect_stderr(output):
+        with patch('mineval.core.configuration.load', return_value={}), contextlib.redirect_stderr(output):
             code = _main(['--data', str(self.store.root), 'workflow', 'work', '--job-id', 'missing'])
         self.assertEqual(code, 125)
         self.assertIn('Unknown workflow job: missing', output.getvalue())

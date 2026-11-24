@@ -8,12 +8,12 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from mineval import benchmark
-from mineval.agents import FakeAdapter
-from mineval.artifacts import digest, inventory, read_json, write_json
+from mineval.historical import benchmark
+from mineval.core.agents import FakeAdapter
+from mineval.core.artifacts import digest, inventory, read_json, write_json
 from mineval.cli import main
 from mineval.preparation import Store
-from mineval.sandbox import DockerSandbox, SandboxError
+from mineval.core.sandbox import DockerSandbox, SandboxError
 from test_agents import SimulatedDocker
 from test_preparation import HistoryFixture
 
@@ -85,7 +85,7 @@ class BenchmarkTests(HistoryFixture):
 
     def test_output_collection_error_is_logged_restricted(self):
         version = self.frozen()
-        with patch('mineval.devlog.failure') as diagnostic:
+        with patch('mineval.core.devlog.failure') as diagnostic:
             record = self.run_fake(version, 'bad-output', sandbox=SimulatedDocker(bad_output=True))
         self.assertEqual(record['failure_kind'], 'infrastructure_or_output')
         self.assertFalse(record['output_available'])
@@ -162,7 +162,7 @@ class BenchmarkTests(HistoryFixture):
     def test_unclean_exit_can_be_sealed_once_without_rerun(self):
         version = self.frozen()
         # Simulates process death between reservation and agent launch/publication.
-        with patch('mineval.benchmark.run_agent', side_effect=SystemExit(99)):
+        with patch('mineval.historical.benchmark.run_agent', side_effect=SystemExit(99)):
             with self.assertRaises(SystemExit):
                 self.run_fake(version, 'abandoned')
         self.assertEqual(self.store.inspect_run('example', 'abandoned')['status'], 'running')
@@ -184,7 +184,7 @@ class BenchmarkTests(HistoryFixture):
         self.assertEqual(result[0]['suite']['suite_id'], 'fixed')
         self.assertEqual(inventory(self.store.root / 'suites/fixed'), suite_before)
         self.run_fake(version, 'right')
-        from mineval.verification import diagnose
+        from mineval.historical.verification import diagnose
         from test_preparation import FakeRunner, step
         write_json(self.store.draft('another') / 'control/verify.json', read_json(self.config_path))
         diagnose(self.store, 'another', sandbox=FakeRunner([step()]))
@@ -227,7 +227,7 @@ class BenchmarkTests(HistoryFixture):
         definition = self.root / 'comparison.json'
         ref = {'task_id': 'example', 'run_id': 'cli'}
         write_json(definition, {'left': [ref], 'right': [ref]})
-        with patch('mineval.agents.DockerSandbox', return_value=SimulatedDocker()):
+        with patch('mineval.core.agents.DockerSandbox', return_value=SimulatedDocker()):
             for args in (['run', '--task', 'example', '--version', version, '--run-id', 'cli'],
                          ['list', '--task', 'example'], ['show', 'example', 'cli'],
                          ['compare', str(definition)], ['export', 'example', 'cli', str(self.root / 'export')]):
@@ -239,7 +239,7 @@ class BenchmarkTests(HistoryFixture):
             code = main(['--data', str(self.store.root), 'bench', 'run', '--task', 'example'])
         self.assertEqual(code, 125)
         self.assertIn('--version', err.getvalue())
-        with patch('mineval.benchmark.run', return_value={'status': 'timeout'}):
+        with patch('mineval.historical.benchmark.run', return_value={'status': 'timeout'}):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(['--data', str(self.store.root), 'bench', 'run',
                                       '--task', 'example', '--version', version]), 124)
@@ -260,7 +260,7 @@ class LiveBenchmarkTests(HistoryFixture):
     def test_live_independent_attempts_and_pinned_suite(self):
         cfg = read_json(self.config_path) | {'image': os.environ['MINEVAL_AGENT_TEST_IMAGE']}
         write_json(self.config_path, cfg)
-        from mineval.verification import diagnose
+        from mineval.historical.verification import diagnose
         runner = DockerSandbox(context=os.environ.get('MINEVAL_TEST_CONTEXT'))
         diagnose(self.store, 'example', sandbox=runner)
         version = self.freeze('example', self.review)['version']
@@ -276,7 +276,7 @@ class LiveBenchmarkTests(HistoryFixture):
         self.assertEqual(inventory(self.store.task('example') / 'versions' / version), before)
 
     def test_live_cancellation_stops_writer_and_preserves_partial_tree(self):
-        from mineval.verification import diagnose
+        from mineval.historical.verification import diagnose
         write_json(self.config_path, read_json(self.config_path) | {'image': os.environ['MINEVAL_AGENT_TEST_IMAGE']})
         runner = DockerSandbox(context=os.environ.get('MINEVAL_TEST_CONTEXT'))
         diagnose(self.store, 'example', sandbox=runner)

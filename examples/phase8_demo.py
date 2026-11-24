@@ -13,8 +13,8 @@ import sys
 import threading
 from urllib.parse import urlsplit
 
-from mineval.artifacts import inventory, read_json, write_json
-from mineval.observation import make_server
+from mineval.core.artifacts import inventory, read_json, write_json
+from mineval.server import make_historical_server as make_server
 from mineval.preparation import Store
 
 

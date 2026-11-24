@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from mineval.cli import main
-from mineval.sandbox import Container, DockerCLI, DockerSandbox, Limits, SandboxError, SandboxSpec
+from mineval.core.sandbox import Container, DockerCLI, DockerSandbox, Limits, SandboxError, SandboxSpec
 
 
 IMAGE_ID = "sha256:" + "a" * 64
@@ -179,7 +179,7 @@ class SandboxTests(unittest.TestCase):
             order.append(args[0])
             return ('private agent event', 'private error', False) if args[0] == 'logs' else (CONTAINER_ID, '', False)
         self.cli.call.side_effect = call
-        with patch('mineval.sandbox.event') as logged:
+        with patch('mineval.core.container_runtime.event') as logged:
             result = self.sandbox.run(replace(self.spec, retain_logs=False))
         self.assertEqual((result.stdout, result.stderr), ('', ''))
         self.assertLess(order.index('logs'), order.index('rm'))
@@ -292,7 +292,7 @@ class WorkspacePolicyTests(unittest.TestCase):
     def test_workspace_export_pauses_copies_and_does_not_mount_archive(self):
         import tempfile
         from pathlib import Path
-        from mineval.artifacts import digest, unpack
+        from mineval.core.artifacts import digest, unpack
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp) / 'workspace'
             workspace.mkdir()

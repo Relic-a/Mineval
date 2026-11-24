@@ -6,12 +6,12 @@ import threading
 import time
 from unittest.mock import patch
 
-from mineval import benchmark
-from mineval.agents import FakeAdapter, run_agent
-from mineval.artifacts import digest, inventory, read_json, write_json
-from mineval.checkpoints import PreparationCheckpoints
-from mineval.performance import summaries
-from mineval.workflows import Workflows
+from mineval.historical import benchmark
+from mineval.core.agents import FakeAdapter, run_agent
+from mineval.core.artifacts import digest, inventory, read_json, write_json
+from mineval.addons.batch.checkpoints import PreparationCheckpoints
+from mineval.addons.batch.performance import summaries
+from mineval.addons.batch.workflows import Workflows
 from test_agents import SimulatedDocker
 from test_evaluation import EvaluationRunner
 from test_preparation import HistoryFixture
@@ -48,7 +48,7 @@ class IncrementalTests(HistoryFixture):
             with self.assertRaisesRegex(ValueError, 'busy'):
                 benchmark.recover(self.store, 'example', kwargs['adapter'].model)
             return self.agent(*args, **kwargs)
-        with patch('mineval.benchmark.run_agent', side_effect=agent):
+        with patch('mineval.historical.benchmark.run_agent', side_effect=agent):
             with ThreadPoolExecutor(2) as pool:
                 futures = [pool.submit(benchmark.run, self.store, 'example', self.version,
                     run_id=model, adapter=FakeAdapter(model=model), sandbox=SimulatedDocker()) for model in ('a', 'b')]
@@ -57,10 +57,10 @@ class IncrementalTests(HistoryFixture):
         self.assertNotEqual(results[0]['run_id'], results[1]['run_id'])
 
     def test_materialized_history_is_reconstructed_once_and_clones_are_isolated(self):
-        from mineval.history import restore
-        from mineval.artifacts import unpack
-        with patch('mineval.history.restore', wraps=restore) as restored, \
-             patch('mineval.preparation.unpack', wraps=unpack) as extracted:
+        from mineval.core.history import restore
+        from mineval.core.artifacts import unpack
+        with patch('mineval.core.history.restore', wraps=restore) as restored, \
+             patch('mineval.historical.preparation.unpack', wraps=unpack) as extracted:
             for name in ('first', 'second'):
                 self.store.materialize('example', self.version, self.root / name)
         self.assertEqual(restored.call_count, 1)
@@ -91,8 +91,8 @@ class IncrementalTests(HistoryFixture):
                 other_benchmarked.set()
             return result
         with patch.object(flow, 'benchmark', side_effect=phases), \
-             patch('mineval.benchmark.run_agent', side_effect=self.agent), \
-             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+             patch('mineval.historical.benchmark.run_agent', side_effect=self.agent), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()):
             flow.work()
         self.assertTrue(reviewing.is_set())
         self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
@@ -113,27 +113,27 @@ class IncrementalTests(HistoryFixture):
             finally:
                 with guard:
                     count -= 1
-        with patch('mineval.benchmark.run_agent', side_effect=slow_agent), \
-             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+        with patch('mineval.historical.benchmark.run_agent', side_effect=slow_agent), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()):
             flow.work()
         self.assertEqual(peak, 2)
         self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
 
     def test_interrupted_evaluation_retry_does_not_publish_abandoned_assessment(self):
-        from mineval import evaluation
-        from mineval.publication import published
+        from mineval.historical import evaluation
+        from mineval.historical.publication import published
         flow = self.flow()
         self.enqueue(flow, 'retry-evaluation')
-        with patch('mineval.benchmark.run_agent', side_effect=self.agent), \
-             patch('mineval.evaluation.execute_checks', side_effect=KeyboardInterrupt):
+        with patch('mineval.historical.benchmark.run_agent', side_effect=self.agent), \
+             patch('mineval.historical.evaluation.execute_checks', side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 flow.work()
         failed = flow.jobs()[0]
         old_id = failed['payload']['evaluation_id']
         self.assertEqual(self.store.inspect_evaluation('example', old_id)['error_kind'], 'interrupted')
         flow.retry(failed['id'])
-        with patch('mineval.workflows.benchmark.run', side_effect=AssertionError('benchmark repeated')), \
-             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+        with patch('mineval.addons.batch.workflows.benchmark.run', side_effect=AssertionError('benchmark repeated')), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()):
             flow.work()
         finished = flow.jobs()[0]
         self.assertEqual(finished['state'], 'completed')
@@ -156,7 +156,7 @@ class IncrementalTests(HistoryFixture):
         self.assertEqual(self.store.starting_cache()['states'], 1)
 
     def test_concurrent_evaluations_ignore_unsealed_other_runs_and_own_ids(self):
-        from mineval import evaluation
+        from mineval.historical import evaluation
         for model in ('one', 'two'):
             benchmark.run(self.store, 'example', self.version, run_id=model,
                           adapter=FakeAdapter(model=model), sandbox=SimulatedDocker())
@@ -169,7 +169,7 @@ class IncrementalTests(HistoryFixture):
         def assess(run, eid):
             return evaluation.evaluate(self.store, 'example', run, self.eval_config,
                                        evaluation_id=eid, sandbox=EvaluationRunner())
-        with patch('mineval.preparation.write_json', side_effect=publish):
+        with patch('mineval.core.store.write_json', side_effect=publish):
             with ThreadPoolExecutor(2) as pool:
                 first = pool.submit(assess, 'one', 'first')
                 try:
@@ -193,7 +193,7 @@ class IncrementalTests(HistoryFixture):
 
     def test_hash_rechecks_bytes_when_metadata_identity_is_unchanged(self):
         path = self.root / 'coarse-clock'; path.write_text('old')
-        with patch('mineval.artifacts._identity', return_value=('unchanged',)):
+        with patch('mineval.core.artifacts._identity', return_value=('unchanged',)):
             before = digest(path)
             path.write_text('new')
             self.assertNotEqual(digest(path), before)
@@ -224,14 +224,14 @@ class IncrementalTests(HistoryFixture):
             progress.cleanup(cleanup)
 
     def test_large_hard_limit_does_not_reserve_maximum_capacity(self):
-        from mineval.publication import published
+        from mineval.historical.publication import published
         flow = self.flow()
         self.fixture_evaluation_config = self.fixture_evaluation_config | {'limits': {'memory_mb': 8192}}
         large_version = self.freeze('example', self.review)['version']
         flow.enqueue('benchmark', [{'task_id': 'example', 'version': large_version}],
                      [{'model': 'large', 'adapter': 'fake'}])
         self.enqueue(flow, 'small')
-        with patch('mineval.resources.capacity', return_value=(8, 4096)), patch('mineval.benchmark.run_agent', side_effect=self.agent), patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+        with patch('mineval.addons.batch.resources.capacity', return_value=(8, 4096)), patch('mineval.historical.benchmark.run_agent', side_effect=self.agent), patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()):
             flow.work()
         jobs = {j['payload']['configuration']['model']: j for j in flow.jobs()}
         self.assertEqual(jobs['small']['state'], 'completed')
@@ -239,8 +239,8 @@ class IncrementalTests(HistoryFixture):
         self.assertTrue(published(self.store, 'example', jobs['large']['payload']['run_id']))
 
     def test_partial_evaluation_receipt_recovery(self):
-        from mineval import evaluation
-        from mineval.publication import published
+        from mineval.historical import evaluation
+        from mineval.historical.publication import published
         for boundary in ('seal', 'receipt'):
             with self.subTest(boundary=boundary):
                 flow = self.flow()
@@ -255,15 +255,15 @@ class IncrementalTests(HistoryFixture):
                 def after_seal(staged, target):
                     seal(staged, target)
                     raise KeyboardInterrupt()
-                target = patch.object(self.store, '_reserve_record', side_effect=partial) if boundary == 'receipt' else patch('mineval.evaluation.seal', side_effect=after_seal)
-                with patch('mineval.benchmark.run_agent', side_effect=self.agent), patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()), target:
+                target = patch.object(self.store, '_reserve_record', side_effect=partial) if boundary == 'receipt' else patch('mineval.historical.evaluation.seal', side_effect=after_seal)
+                with patch('mineval.historical.benchmark.run_agent', side_effect=self.agent), patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()), target:
                     with self.assertRaises(KeyboardInterrupt):
                         flow.work()
                 job = next(j for j in flow.jobs() if j['state'] == 'interrupted')
                 old = job['payload']['evaluation_id']
                 self.assertFalse(published(self.store, 'example', job['payload']['run_id'], old))
                 flow.retry(job['id'])
-                with patch('mineval.workflows.benchmark.run', side_effect=AssertionError('repeated run')), patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+                with patch('mineval.addons.batch.workflows.benchmark.run', side_effect=AssertionError('repeated run')), patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()):
                     flow.work()
                 finished = next(j for j in flow.jobs() if j['id'] == job['id'])
                 self.assertEqual(finished['state'], 'completed', finished)
@@ -273,9 +273,9 @@ class IncrementalTests(HistoryFixture):
 
 def setUpModule():
     global resource_patch, pressure_patch
-    resource_patch = patch('mineval.resources.capacity', return_value=(64, 131072))
+    resource_patch = patch('mineval.addons.batch.resources.capacity', return_value=(64, 131072))
     resource_patch.start()
-    pressure_patch = patch('mineval.resources.pressure', return_value={})
+    pressure_patch = patch('mineval.addons.batch.resources.pressure', return_value={})
     pressure_patch.start()
 
 

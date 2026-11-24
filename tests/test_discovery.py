@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
-from mineval.artifacts import write_json
+from mineval.core.artifacts import write_json
 from mineval.cli import main
 from mineval.preparation import Store
 
@@ -67,7 +67,7 @@ class DiscoveryIntakeTests(unittest.TestCase):
         return self.candidate | {'base_source': {'type': 'git', 'path': str(self.repo)}} | overrides
 
     def test_new_schema_requires_primary_category_while_legacy_remains_importable(self):
-        from mineval.intake import normalize
+        from mineval.historical.intake import normalize
         candidate = self.direct()
         for value in (None, '', 'feature', 'unknown', []):
             with self.subTest(category=value), self.assertRaisesRegex(ValueError, 'primary category'):
@@ -107,7 +107,7 @@ class DiscoveryIntakeTests(unittest.TestCase):
         self.assertEqual(code, 125)
         self.assertIn('already registered', error)
         shutil.rmtree(self.repo)
-        from mineval.repository import future_tree
+        from mineval.historical.repository import future_tree
         with future_tree(self.store.task(task_id), self.evidence) as tree:
             self.assertEqual((tree / 'tests/test_batch.py').read_bytes(), check)
         self.assertEqual(Store(self.store.root).inspect_task(task_id)['metadata'], metadata)

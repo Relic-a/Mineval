@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 from mineval.arena import Arena
-from mineval.arena_runtime import Runner, RuntimeManager
-from mineval.artifacts import digest
+from mineval.arena.runtime import Runner, RuntimeManager
+from mineval.core.artifacts import digest
 
 
 def demonstrate(directory, context, image):

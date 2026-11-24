@@ -5,11 +5,11 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock
 
-from mineval import benchmark, evaluation
-from mineval.artifacts import write_json, read_json
+from mineval.historical import benchmark, evaluation
+from mineval.core.artifacts import write_json, read_json
 from mineval.preparation import Store
-from mineval.sandbox import DockerSandbox
-from mineval.verification import diagnose
+from mineval.core.sandbox import DockerSandbox
+from mineval.historical.verification import diagnose
 from test_agents import SimulatedDocker
 from test_evaluation import EvaluationRunner
 from test_preparation import HistoryFixture, FakeRunner, step

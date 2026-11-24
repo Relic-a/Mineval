@@ -6,7 +6,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-from mineval.artifacts import digest, read_json, write_json
+from mineval.core.artifacts import digest, read_json, write_json
 from mineval.cli import main
 from mineval.preparation import Store
 from test_preparation import HistoryFixture
@@ -176,7 +176,7 @@ class RegistryTests(HistoryFixture):
         descriptor = frozen / 'workspace-format.json'
         self.assertEqual(read_json(descriptor)['git_history']['format'], 'base-pack-v1')
         # Simulate a pre-descriptor version, retaining its original receipt shape.
-        from mineval.artifacts import inventory
+        from mineval.core.artifacts import inventory
         descriptor.unlink()
         (frozen / 'history.pack').unlink()
         receipt = frozen / 'artifact-hashes.json'

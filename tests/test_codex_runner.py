@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from mineval.agents import CodexAdapter
-from mineval.codex_runner import run
+from mineval.core.agents import CodexAdapter
+from mineval.core.codex_runner import run
 
 
 class CodexRunnerTests(unittest.TestCase):
@@ -124,7 +124,7 @@ if mode == 'complete' or (mode == 'repair' and prior):
     def test_missing_host_fails_before_model_invocation(self):
         (self.root / 'codex-code-mode-host').unlink()
         # Do not find a developer's host binary elsewhere on PATH.
-        with patch('mineval.codex_runner.shutil.which', side_effect=lambda name:
+        with patch('mineval.core.codex_runner.shutil.which', side_effect=lambda name:
                    str(self.root / 'codex') if name == 'codex' else None):
             self.assertEqual(self.execute(), 125)
         self.assertFalse((self.root / 'calls.jsonl').exists())
@@ -182,7 +182,7 @@ if mode == 'complete' or (mode == 'repair' and prior):
 
     def captured_execution(self):
         return subprocess.run([sys.executable, '-c',
-            'from pathlib import Path; import sys; from mineval.codex_runner import run; '
+            'from pathlib import Path; import sys; from mineval.core.codex_runner import run; '
             'sys.exit(run([], Path(sys.argv[1]), Path(sys.argv[2])))',
             str(self.inputs), str(self.control)], capture_output=True, text=True)
 

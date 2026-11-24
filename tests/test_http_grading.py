@@ -9,9 +9,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from mineval import evaluation, http_grading
-from mineval.artifacts import write_json
-from mineval.verification import load_config
+from mineval.historical import evaluation
+from mineval.addons.grading import http_grading
+from mineval.core.artifacts import write_json
+from mineval.historical.verification import load_config
 
 
 class LocalRunner:
@@ -62,7 +63,7 @@ HTTPServer(('127.0.0.1',%d),App).serve_forever()
             write_json(root / 'config.json', config); self.assertEqual(load_config(root / 'config.json', evaluation=True), config)
             runner = LocalRunner()
             report = evaluation.execute_checks(source, root / 'workspace', root / 'results', private,
-                [{'path':'cases.json','stored_path':'cases.json'}], [], config, config['image'], runner)
+                [{'path':'cases.json','stored_path':'cases.json'}], [], config, config['image'], runner, graders={'isolated-http-v1': http_grading.execute})
             self.assertEqual(report['verdict'], 'pass', report)
             self.assertEqual(len(report['cases'][0]['steps']), 2)
             self.assertEqual(runner.spec.network, 'none')
@@ -78,7 +79,7 @@ HTTPServer(('127.0.0.1',%d),App).serve_forever()
             checks['cases'][0]['steps'][0]['expect']['status'] = 202
             write_json(private / 'cases.json', checks)
             failed = evaluation.execute_checks(source, root / 'workspace2', root / 'results2', private,
-                [{'path':'cases.json','stored_path':'cases.json'}], [], config, config['image'], LocalRunner())
+                [{'path':'cases.json','stored_path':'cases.json'}], [], config, config['image'], LocalRunner(), graders={'isolated-http-v1': http_grading.execute})
             self.assertEqual(failed['verdict'], 'fail', failed)
             self.assertEqual(len(failed['cases'][0]['steps']), 2)
             self.assertEqual(failed['cases'][0]['steps'][0]['mismatches'], ['status'])
@@ -98,7 +99,7 @@ class GeneratedChecksTests(HistoryFixture):
         with self.store.operation('example'):
             result = self.store._extract('example', [generated, historical], plan={'origin': 'fixture'}, producer_session={'session_id': 'fixture'})
         root = self.store.task('example') / 'private/extractions' / result['extraction_id']
-        from mineval.review import checked
+        from mineval.historical.review import checked
         checked(root)
         self.assertEqual(len(result['artifacts']), 2)
         self.assertNotIn('content', result['artifacts'][0])
@@ -107,7 +108,7 @@ class GeneratedChecksTests(HistoryFixture):
 
 class PreparationHttpTests(HistoryFixture):
     def test_generated_checks_validate_base_and_reference_then_freeze(self):
-        from mineval import review
+        from mineval.historical import review
         from review_helpers import ReportAgent, report
         sock = socket.socket(); sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]; sock.close()
         server = '''from http.server import BaseHTTPRequestHandler,HTTPServer
@@ -140,9 +141,10 @@ Server(('127.0.0.1',%d),Handler).serve_forever()
         self.assertEqual(json.loads((version / 'evaluation-config.json').read_text()), config)
         from contextlib import contextmanager
         from unittest.mock import patch
-        from mineval import architecture, benchmark
-        from mineval.agents import FakeAdapter
-        from mineval.observation import Pages
+        from mineval.addons.ai_review import architecture
+        from mineval.historical import benchmark
+        from mineval.core.agents import FakeAdapter
+        from mineval.server import historical_view as Pages
         from test_agents import SimulatedDocker
         class Candidate(SimulatedDocker):
             def __init__(self, code): super().__init__(); self.candidate_code = code
@@ -161,7 +163,7 @@ Server(('127.0.0.1',%d),Handler).serve_forever()
             return {'ranking':[{'candidates':labels,'explanation':'Equivalent behavior',
                 'evidence':[{'candidate':label,'path':'app.py'} for label in labels]}], 'uncertainty':'Similar approaches'}
         options = {'image':'local:test','model':'reviewer','effort':'low'}
-        with patch('mineval.architecture._infer', side_effect=infer):
+        with patch('mineval.addons.ai_review.architecture._infer', side_effect=infer):
             for name, code in [('one','def answer(): return 42\n'), ('two','def answer(): return 6 * 7\n')]:
                 benchmark.run(self.store, 'example', frozen['version'], run_id=name,
                               adapter=FakeAdapter(model=name), sandbox=Candidate(code))

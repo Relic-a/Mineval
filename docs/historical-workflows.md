@@ -1,12 +1,12 @@
 # Historical benchmarking from the web and CLI
 
-Run `mineval --context YOUR_ROOTLESS_CONTEXT --data DATA observe --image YOUR_PRELOADED_PREPARATION_IMAGE --auth-file /explicit/model-only/auth.json`.
+Run `mineval --context YOUR_ROOTLESS_CONTEXT --data DATA observe --operations --image YOUR_PRELOADED_PREPARATION_IMAGE --auth-file /explicit/model-only/auth.json`.
 The printed secret loopback URL opens the benchmark overview. The image must
 already exist and contain Git, Python, Mineval and the isolated Codex executable
 (and the dependencies the project needs). No images are pulled. The browser never
 receives the auth path, credentials, host command execution or Docker APIs.
 Web Arena continues to use its separate server, store, execution path and policies;
-its embedded historical pages remain read-only. Use `observe` for historical actions.
+its embedded historical pages remain read-only. Use `observe --operations` for historical actions. Plain `observe` opens the read-only view.
 
 The **Tasks** workspace lists every repository and supports repository, category, state,
 prepared/unprepared and text filters. Check task rows to reveal preparation, benchmarking and removal actions above the table. Task filters explicitly clear selection; selection is limited to the visible table. Choose **Select all visible** for bulk selection.
@@ -266,6 +266,7 @@ selects another trusted host JSON file. Example:
   "evaluation_model": "gpt-6-luna",
   "evaluation_effort": "medium",
   "architecture_review": true,
+  "model_memory": true,
   "concurrency": {"total": 4, "prepare": 1, "benchmark": 2, "evaluation": 1, "review": 1, "per_model": 2},
   "models": [
     {"model": "gpt-6-luna", "effort": "medium", "adapter": "codex"},
@@ -279,7 +280,7 @@ selects another trusted host JSON file. Example:
 `evaluation_configs` overrides it per task. Paths resolve relative to the settings
 file. Settings contain configuration, never credentials. Supply authentication only
 through the explicit launcher flag. `--image` overrides the default preparation image
-for this server/worker. Set `architecture_review: true` to record design evidence
+for this server/worker. Set `model_memory: true` to automatically record verdict summaries in model memory. Set `architecture_review: true` to record design evidence
 for each submission and compare recorded submissions for the same prepared task.
 `review_image` selects the trusted Codex-capable image for architecture review.
 It defaults to `preparation_image`, then the saved benchmark's configured agent

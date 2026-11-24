@@ -7,11 +7,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-from mineval.codex_models import Catalog, discover
-from mineval.dashboard import action
-from mineval.observation import Pages
+from mineval.core.codex_models import Catalog, discover
+from mineval.addons.batch.dashboard import action
+from mineval.server import historical_view as Pages
 from mineval.preparation import Store
-from mineval.workflows import Workflows
+from mineval.addons.batch.workflows import Workflows
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -52,12 +52,12 @@ for line in sys.stdin:
 
     def test_cache_refresh_and_safe_failure(self):
         catalog = Catalog()
-        with patch('mineval.codex_models.discover', return_value=[{'model': 'a'}]) as probe:
+        with patch('mineval.core.codex_models.discover', return_value=[{'model': 'a'}]) as probe:
             catalog.get(); catalog.get()
             self.assertEqual(probe.call_count, 1)
             catalog.get(refresh=True)
             self.assertEqual(probe.call_count, 2)
-        with patch('mineval.codex_models.discover', side_effect=OSError('secret')):
+        with patch('mineval.core.codex_models.discover', side_effect=OSError('secret')):
             self.assertNotIn('secret', catalog.get(refresh=True)['error'])
 
 

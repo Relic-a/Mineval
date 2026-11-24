@@ -9,11 +9,11 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from mineval.artifacts import digest, inventory, read_json, unpack, write_json
+from mineval.core.artifacts import digest, inventory, read_json, unpack, write_json
 from mineval.preparation import Store
-from mineval.sandbox import DockerSandbox, SandboxError, SandboxSpec
-from mineval.service import broker, request
-from mineval.verification import diagnose
+from mineval.core.sandbox import DockerSandbox, SandboxError, SandboxSpec
+from mineval.historical.service import broker, request
+from mineval.historical.verification import diagnose
 
 
 class HistoryFixture(unittest.TestCase):
@@ -50,14 +50,14 @@ class HistoryFixture(unittest.TestCase):
 
     def prepare_review(self, task_id, review, *, synthetic_validation=True, validation_verdicts=('fail', 'pass')):
         # Existing artifact tests now pass through separate fake producing/review sessions.
-        from mineval.cleanup import save_attempt
-        from mineval.review import session
-        from mineval.sandbox import RunResult
+        from mineval.historical.cleanup import save_attempt
+        from mineval.historical.review import session
+        from mineval.core.sandbox import RunResult
         from review_helpers import ReportAgent, plan, report
         task = self.store.task(task_id)
         if task_id != 'cleanup':
             with self.store.operation(task_id), tempfile.TemporaryDirectory(dir=self.store.root) as temp:
-                from mineval.artifacts import copy_tree
+                from mineval.core.artifacts import copy_tree
                 temp = Path(temp)
                 copy_tree(self.store.draft(task_id) / 'workspace', temp / 'clean')
                 control = temp / 'control'; control.mkdir()
@@ -87,7 +87,7 @@ class HistoryFixture(unittest.TestCase):
         if synthetic_validation:
             # Synthetic, sealed validation evidence for tests that need a prepared
             # revision. Freeze still verifies real receipts and review input identities.
-            from mineval.review import checked, seal, VALIDATION_POLICY
+            from mineval.historical.review import checked, seal, VALIDATION_POLICY
             from uuid import uuid4
             config = getattr(self, 'fixture_evaluation_config', {'image': 'local:test', 'network': 'none',
                 'grading_type': 'isolated-argv-v1', 'commands': [{'name': 'cases', 'kind': 'tests',
@@ -137,7 +137,7 @@ class ArtifactAcceptanceTests(HistoryFixture):
         self.assertFalse((self.workspace / '.git').exists())
         task = self.store.task('example')
         self.assertFalse((task / 'private/future').exists())
-        from mineval.repository import future_tree
+        from mineval.historical.repository import future_tree
         with future_tree(task, self.head) as tree:
             self.assertTrue((tree / 'tests/test_answer.py').is_file())
         self.assertEqual(read_json(self.store.task('example') / 'metadata.json')['grounding'], 'git-objects-and-ancestry-checked')
@@ -200,7 +200,7 @@ class ArtifactAcceptanceTests(HistoryFixture):
         future = self.root / 'evidence'
         (future / self.head).mkdir(parents=True)
         (future / self.head / 'check.py').write_text('assert True')
-        from mineval.artifacts import pack
+        from mineval.core.artifacts import pack
         pack(raw, self.root / 'raw.tar.gz')
         candidate = self.candidate | {'task_id': 'raw', 'base_source': {'type': 'archive', 'path': str(self.root / 'raw.tar.gz')},
                                       'future_source': {'type': 'tree', 'path': str(future)},
@@ -344,10 +344,10 @@ class PublicationGuardTests(HistoryFixture):
         with self.assertRaisesRegex(ValueError, 'rejected'):
             self.store.materialize('example', first['version'], self.root / 'bad')
 
-    @patch('mineval.service.DockerSandbox')
+    @patch('mineval.historical.service.DockerSandbox')
     def test_cleanup_session_mounts_no_private_history(self, runner_class):
-        from mineval.service import session
-        from mineval.sandbox import RunResult
+        from mineval.historical.service import session
+        from mineval.core.sandbox import RunResult
         runner = runner_class.return_value
         container = Mock()
         container.wait.return_value = False
@@ -366,10 +366,10 @@ class PublicationGuardTests(HistoryFixture):
         self.assertFalse(spec.retain_logs)
         self.assertEqual(read_json(self.store.task('example') / 'cleanup-latest.json')['disposition'], 'needs-review')
 
-    @patch('mineval.service.DockerSandbox')
+    @patch('mineval.historical.service.DockerSandbox')
     def test_extraction_session_separate_private_copy_only_saves_suggestions(self, runner_class):
-        from mineval.service import session
-        from mineval.sandbox import RunResult
+        from mineval.historical.service import session
+        from mineval.core.sandbox import RunResult
         before = inventory(self.workspace)
         def run(spec):
             self.assertEqual((spec.workspace / 'base/app.py').read_text(), 'def answer(): return 0\n')

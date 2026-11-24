@@ -11,10 +11,10 @@ import threading
 import unittest
 from urllib.parse import urlsplit
 
-from mineval import benchmark
-from mineval.artifacts import inventory, read_json, write_json
+from mineval.historical import benchmark
+from mineval.core.artifacts import inventory, read_json, write_json
 from mineval.cli import main
-from mineval.observation import Pages, make_server
+from mineval.server import historical_view as Pages, make_historical_server as make_server
 from mineval.preparation import Store
 import test_evaluation as fixtures
 
@@ -112,7 +112,7 @@ class ObservationTests(fixtures.HistoryFixture):
             {'task_id': 'example', 'version': self.version}]})
         # A retired later member must stop the whole suite before any earlier launch.
         from test_preparation import FakeRunner, step
-        from mineval.verification import diagnose
+        from mineval.historical.verification import diagnose
         self.store.register(self.candidate | {'task_id': 'active'})
         write_json(self.store.draft('active') / 'control/verify.json', read_json(self.config_path))
         diagnose(self.store, 'active', sandbox=FakeRunner([step()]))

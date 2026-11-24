@@ -7,12 +7,31 @@ import subprocess
 import unittest
 from unittest.mock import Mock, MagicMock
 
-from mineval.artifacts import digest, inventory, read_json, write_json
-from mineval.review import approved, checked, session, validate
-from mineval.sandbox import DockerSandbox
-from mineval.verification import diagnose
+from mineval.core.artifacts import digest, inventory, read_json, write_json
+from mineval.historical.review import EXTRACTION, approved, checked, session, validate
+from mineval.core.sandbox import DockerSandbox
+from mineval.historical.verification import diagnose, load_config
 from test_preparation import HistoryFixture, FakeRunner, step
 from review_helpers import ReportAgent, plan, report
+
+
+class ExtractionPromptTests(unittest.TestCase):
+    def test_native_script_preserves_seeded_package_cache(self):
+        self.assertIn('Preserve runtime-provided package cache environment', EXTRACTION)
+        self.assertIn('especially NPM_CONFIG_CACHE', EXTRACTION)
+        self.assertIn('fallback cache only when the runtime did not provide one', EXTRACTION)
+        self.assertIn('seeded dependency caches for offline setup', EXTRACTION)
+
+    def test_native_config_example_passes_verification(self):
+        import tempfile
+        example = EXTRACTION.split('```json\n', 1)[1].split('\n```', 1)[0]
+        config = json.loads(example)
+        self.assertEqual(config['grading_type'], 'native-script-v1')
+        self.assertNotIn('commands', config)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.json'
+            write_json(path, config)
+            load_config(path, evaluation=True)
 
 
 class ReviewTests(HistoryFixture):
@@ -167,7 +186,7 @@ class ReviewTests(HistoryFixture):
             self.store.finalize('example', review_id=result['review_id'])
 
     def test_revision_feedback_restarts_extraction_and_survives_interruption(self):
-        from mineval.checkpoints import PreparationCheckpoints
+        from mineval.addons.batch.checkpoints import PreparationCheckpoints
         task = self.store.task('example')
         config = self.root / 'private-check.json'
         write_json(config, {'image': 'local:test', 'commands': [
@@ -346,7 +365,7 @@ class ReviewTests(HistoryFixture):
 
     def test_review_can_record_unexecutable_base_as_a_limitation(self):
         from test_evaluation import EvaluationRunner
-        from mineval.review import validate_review
+        from mineval.historical.review import validate_review
         extraction, config = self.behavioral_checks()
         base = validate(self.store, 'example', extraction, config, sandbox=EvaluationRunner(mode='command-error'))
         future = validate(self.store, 'example', extraction, config, future_commit=self.head, sandbox=EvaluationRunner())
@@ -384,8 +403,8 @@ class ReviewTests(HistoryFixture):
     def test_live_later_regression_isolated_extraction_review_and_checks(self):
         # Use the normal fixture cleanup producer, then real Docker for phase 5.
         # The later task has no cleanup yet; record an ordinary no-edit producer.
-        from mineval.cleanup import save_attempt
-        from mineval.sandbox import RunResult
+        from mineval.historical.cleanup import save_attempt
+        from mineval.core.sandbox import RunResult
         import tempfile
         target_config = self.store.draft('later') / 'control/verify.json'
         write_json(target_config, {'image': os.environ['MINEVAL_TEST_IMAGE'], 'commands': [
@@ -394,7 +413,7 @@ class ReviewTests(HistoryFixture):
         diagnostic = diagnose(self.store, 'later', sandbox=runner)
         self.assertEqual(diagnostic['status'], 'completed')
         with self.store.operation('later'), tempfile.TemporaryDirectory(dir=self.store.root) as temp:
-            from mineval.artifacts import copy_tree
+            from mineval.core.artifacts import copy_tree
             temp = Path(temp)
             copy_tree(self.store.draft('later') / 'workspace', temp / 'clean')
             control = temp / 'control'; control.mkdir()

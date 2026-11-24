@@ -7,11 +7,11 @@ import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-from mineval import benchmark, evaluation
-from mineval.artifacts import inventory, read_json, write_json
+from mineval.historical import benchmark, evaluation
+from mineval.core.artifacts import inventory, read_json, write_json
 from mineval.cli import main
 from mineval.preparation import Store
-from mineval.sandbox import DockerSandbox, SandboxError
+from mineval.core.sandbox import DockerSandbox, SandboxError
 from test_agents import SimulatedDocker
 from test_preparation import HistoryFixture
 
@@ -78,7 +78,7 @@ class EvaluationTests(HistoryFixture):
         record = self.saved()
         for kind in ('resource_exhaustion',):
             runner = EvaluationRunner()
-            with patch('mineval.evaluation.inspect_attempt', return_value=record | {'failure_kind': kind, 'status': 'error'}):
+            with patch('mineval.historical.evaluation.inspect_attempt', return_value=record | {'failure_kind': kind, 'status': 'error'}):
                 report = self.assess(evaluation_id=kind, runner=runner)
             self.assertEqual(report['verdict'], 'error')
             self.assertEqual(report['error_kind'], kind)
@@ -90,7 +90,7 @@ class EvaluationTests(HistoryFixture):
             runner = EvaluationRunner()
             legacy = record | {'failure_kind': 'resource_contention', 'status': 'error',
                                'agent_result': {'timed_out': timed_out}}
-            with patch('mineval.evaluation.inspect_attempt', return_value=legacy):
+            with patch('mineval.historical.evaluation.inspect_attempt', return_value=legacy):
                 report = self.assess(evaluation_id=f'legacy-{timed_out}', runner=runner)
             self.assertEqual(report['verdict'], verdict)
             self.assertEqual(bool(runner.specs), not timed_out)
@@ -298,7 +298,7 @@ class EvaluationTests(HistoryFixture):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(json.loads(process.stdout)['evaluation_id'], 'cli')
         for verdict, code in [('fail', 1), ('inconclusive', 2), ('error', 125)]:
-            with patch('mineval.evaluation.evaluate', return_value={'verdict': verdict}), redirect_stdout(io.StringIO()):
+            with patch('mineval.historical.evaluation.evaluate', return_value={'verdict': verdict}), redirect_stdout(io.StringIO()):
                 self.assertEqual(main(['--data', str(self.store.root), 'evaluate', 'candidate', '--task', 'example',
                                        '--config', str(self.config)]), code)
 

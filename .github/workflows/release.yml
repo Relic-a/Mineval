@@ -23,7 +23,7 @@ jobs:
       - name: Build and probe the starter image
         run: |
           docker build -f examples/Dockerfile.starter -t mineval-starter-smoke .
-          docker run --rm --network none --read-only --tmpfs /tmp:exec mineval-starter-smoke python3 /opt/mineval/mineval/codex_runner.py --check-runtime
+          docker run --rm --network none --read-only --tmpfs /tmp:exec mineval-starter-smoke python3 /opt/mineval/mineval/core/codex_runner.py --check-runtime
       - run: scripts/build-standalone.sh
       - run: python scripts/smoke-standalone.py
       - name: Python-free runtime smoke

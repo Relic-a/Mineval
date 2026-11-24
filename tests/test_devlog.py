@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from mineval import devlog, processes
+from mineval.core import devlog, processes
 
 
 class DevlogTests(unittest.TestCase):

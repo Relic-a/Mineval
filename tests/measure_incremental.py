@@ -17,12 +17,12 @@ from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mineval.artifacts import copy_tree, write_json
-from mineval.dependency_cache import DependencyCache
-from mineval.sandbox import DockerSandbox, Limits, SandboxSpec
-from mineval.workflows import Workflows
+from mineval.core.artifacts import copy_tree, write_json
+from mineval.addons.cache.dependency_cache import DependencyCache, cache_inputs
+from mineval.core.sandbox import DockerSandbox, Limits, SandboxSpec
+from mineval.addons.batch.workflows import Workflows
 from test_preparation import HistoryFixture, FakeRunner, step
-from mineval.verification import diagnose
+from mineval.historical.verification import diagnose
 
 
 def timed(action):
@@ -50,7 +50,7 @@ def measure(context, image):
         cache = DependencyCache(root / 'cache', tree)
         sandbox = DockerSandbox(context=context)
         sandbox.check(); runtime = sandbox.image(image)
-        with patch('mineval.dependency_cache.download', side_effect=lambda url, *a: responses[url]) as fetch:
+        with patch('mineval.addons.cache.dependency_cache.download', side_effect=lambda url, *a: responses[url]) as fetch:
             for name in ('cold', 'warm'):
                 (local, stats), seed_seconds = timed(lambda: cache.prepare(('pip',), network='bridge'))
                 _, install_seconds = timed(lambda: cache.pip_environment(sandbox, runtime, local, stats, Limits()))
@@ -58,7 +58,7 @@ def measure(context, image):
                 command = ('sh', '-c', 'python3 -m pip install --no-index --disable-pip-version-check --require-hashes -r requirements.txt && python3 -c "import demo; assert demo.ANSWER == 42"')
                 spec = SandboxSpec(runtime['Id'], command, workspace=workspace, network='none')
                 def execute():
-                    with sandbox._container(spec, image=runtime, dependency_cache_path=local, cache_managers=('pip',)) as container:
+                    with sandbox._container(spec, image=runtime, **cache_inputs(runtime, local, ('pip',))) as container:
                         container.start(); deadline = container.wait(60)
                         return container.result(timed_out=deadline, duration_seconds=0)
                 checked, execution_seconds = timed(execute)

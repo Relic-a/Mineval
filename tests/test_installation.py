@@ -4,7 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-from mineval import configuration, resources
+from mineval.core import configuration
+from mineval.addons.batch import resources
 
 
 class InstallationTests(unittest.TestCase):
@@ -31,10 +32,10 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(configuration.load()['data'], tmp)
 
     def test_resource_admission(self):
-        with patch('mineval.resources.capacity', return_value=(8, 8192)):
+        with patch('mineval.addons.batch.resources.capacity', return_value=(8, 8192)):
             self.assertEqual(resources.slots({}), 3)
             self.assertEqual(resources.slots({'resources': {'memory_mb_per_job': 8192}}), 0)
-        with patch('mineval.resources.capacity', return_value=(2, 8192)):
+        with patch('mineval.addons.batch.resources.capacity', return_value=(2, 8192)):
             self.assertEqual(resources.slots({}), 1)
 
 class SavedConfigurationCLITests(unittest.TestCase):
@@ -42,13 +43,13 @@ class SavedConfigurationCLITests(unittest.TestCase):
         import contextlib
         import io
         from mineval.cli import main
-        with patch('mineval.configuration.load', return_value={
+        with patch('mineval.core.configuration.load', return_value={
                 'data': '/saved/store', 'auth_file': '/saved/auth.json', **settings}), \
                 contextlib.redirect_stdout(io.StringIO()):
             return main(argv)
 
     def test_saved_auth_only_defaults_to_codex_adapter(self):
-        with patch('mineval.agents.run_agent', return_value={'status': 'completed'}) as run, \
+        with patch('mineval.core.agents.run_agent', return_value={'status': 'completed'}) as run, \
                 patch('pathlib.Path.read_text', return_value='Task'):
             for adapter in ('fake', 'codex'):
                 self.assertEqual(self.invoke(['agent-run', '/workspace', '--instructions', '/task',
@@ -61,7 +62,7 @@ class SavedConfigurationCLITests(unittest.TestCase):
 
     def test_saved_auth_does_not_reach_command_or_plain_evaluation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch('mineval.evaluation.evaluate', return_value={'verdict': 'pass'}) as evaluate:
+            with patch('mineval.historical.evaluation.evaluate', return_value={'verdict': 'pass'}) as evaluate:
                 with self.assertRaises(SystemExit) as error:
                     self.invoke(['evaluate', 'run', '--task', 'task', '--config', 'checks',
                                  '--command', 'python3', 'review.py'], data=tmp)
@@ -71,7 +72,7 @@ class SavedConfigurationCLITests(unittest.TestCase):
                 self.assertNotIn('auth_file', evaluate.call_args.kwargs)
 
     def test_doctor_uses_explicit_data_and_context(self):
-        with patch('mineval.configuration.diagnose', return_value={'ready': False}) as diagnose:
+        with patch('mineval.core.configuration.diagnose', return_value={'ready': False}) as diagnose:
             self.assertEqual(self.invoke(['--data', '/requested/store', '--context', 'requested', 'doctor']), 125)
             sandbox, settings = diagnose.call_args.args
             self.assertEqual(settings['data'], '/requested/store')

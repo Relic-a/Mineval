@@ -4,14 +4,14 @@ import argparse
 from dataclasses import asdict
 import json
 import os
-from . import processes as subprocess
+from mineval.core import processes as subprocess
 import sys
 
-from .sandbox import DockerSandbox, Limits, SandboxError, SandboxSpec
+from mineval.core.sandbox import DockerSandbox, Limits, SandboxError, SandboxSpec
 
 
 def _main(argv: list[str] | None = None) -> int:
-    from .configuration import load
+    from mineval.core.configuration import load
     try:
         saved = load()
     except (OSError, ValueError, TypeError):
@@ -43,7 +43,8 @@ def _main(argv: list[str] | None = None) -> int:
     caches.add_parser('status')
     prune_cache = caches.add_parser('prune')
     prune_cache.add_argument('--max-mb', type=int, default=2048)
-    observe = commands.add_parser('observe', help='serve the private historical benchmarking dashboard')
+    observe = commands.add_parser('observe', help='inspect historical benchmarks on a private local server')
+    observe.add_argument('--operations', action='store_true', help='enable job submission, retries, and settings')
     observe.add_argument('--port', type=int, default=0, help='loopback port (default: choose a free port)')
     observe.add_argument('--image', help='trusted preloaded default preparation image')
     observe.add_argument('--settings', help='trusted historical workflow settings JSON')
@@ -85,11 +86,11 @@ def _main(argv: list[str] | None = None) -> int:
     agent.add_argument("--model", default="gpt-6-luna")
     agent.add_argument("--auth-file", help="explicit Codex auth.json only; never a home directory")
     agent.add_argument("--timeout", type=float, default=300)
-    intake = commands.add_parser("import", help="register an externally selected candidate JSON")
+    intake = commands.add_parser("import", help="deprecated alias for task add")
     intake.add_argument("candidate")
     task = commands.add_parser("task", help="grow and inspect the local task pool")
     tasks = task.add_subparsers(dest="task_action", required=True)
-    tasks.add_parser("add", help="register candidate JSON (alias of import)").add_argument("candidate")
+    tasks.add_parser("add", help="register an externally selected candidate JSON").add_argument("candidate")
     tasks.add_parser("list", help="list registered tasks")
     tasks.add_parser("show", help="inspect task metadata, state and record IDs").add_argument("task_id")
     retire = tasks.add_parser('retire', help='exclude future benchmarks, preserving historical records')
@@ -215,6 +216,12 @@ def _main(argv: list[str] | None = None) -> int:
     remember.add_argument('evaluation_id')
     remember.add_argument('--bullets', help='JSON bullet array; omitted records the factual verdict and explanation')
     args = parser.parse_args(argv)
+    if args.action == "import":
+        print("mineval: import is deprecated; use task add", file=sys.stderr)
+        args.action, args.task_action = "task", "add"
+    # Keep the command-line image distinct from the saved fallback when merging
+    # historical settings for workflow and observe.
+    explicit_image = getattr(args, 'image', None)
     if args.action == 'workflow' and args.workflow_action == 'work' and args.refresh_export and not args.job_id:
         parser.error('--refresh-export requires --job-id')
     for name in ('image', 'auth_file'):
@@ -230,26 +237,26 @@ def _main(argv: list[str] | None = None) -> int:
     if args.data is None:
         from pathlib import Path
         args.data = str(Path.home() / '.local/share/mineval') if args.action == 'setup' else 'mineval-data'
-    from .devlog import event
+    from mineval.core.devlog import event
     event("command.selected", action=args.action)
     sandbox = DockerSandbox(context=args.context)
     try:
         if args.action == 'models':
-            from .codex_models import Catalog
+            from mineval.core.codex_models import Catalog
             result = Catalog(args.auth_file).get()
             print(json.dumps(result))
             return 125 if result.get('error') else 0
         if args.action == 'setup':
-            from .configuration import setup
+            from mineval.core.configuration import setup
             result = setup(args, sandbox)
             print(json.dumps(result))
             return 0 if result['ready'] else 125
         if args.action == 'vps':
-            from .remote import SSHClient
+            from mineval.addons.remote.remote import SSHClient
             if args.vps_action == 'configure':
                 SSHClient(args.host)
-                from .configuration import config_path
-                from .artifacts import write_json
+                from mineval.core.configuration import config_path
+                from mineval.core.artifacts import write_json
                 path = config_path()
                 path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 saved['vps'] = {'host': args.host}
@@ -265,25 +272,25 @@ def _main(argv: list[str] | None = None) -> int:
             return 125 if args.vps_action == 'health' and not result.get('ready') else 0
         if args.action == 'cache':
             from pathlib import Path
-            from .downloads import NpmCache
-            from .dependency_cache import DependencyCache
+            from mineval.addons.cache.dependency_cache import NpmCache
+            from mineval.addons.cache.dependency_cache import DependencyCache
             cache = NpmCache(Path(args.data) / 'download-cache/npm')
             if args.cache_action == 'prune' and args.max_mb < 0:
                 raise ValueError('Cache size must be nonnegative')
             result = cache.status() if args.cache_action == 'status' else cache.prune(args.max_mb * 1024**2)
             dependencies = DependencyCache(Path(args.data) / 'download-cache/artifacts')
             shared = dependencies.status() if args.cache_action == 'status' else dependencies.prune(args.max_mb * 1024**2)
-            from .preparation import Store
+            from mineval.preparation import Store
             starting = Store(args.data).starting_cache(max_bytes=None if args.cache_action == 'status' else args.max_mb * 1024**2)
             print(json.dumps({'npm': result, 'dependencies': shared, 'starting_states': starting}))
             return 0
         if args.action == 'arena':
             from .arena import Arena
-            from .artifacts import read_json
+            from mineval.core.artifacts import read_json
             arena = Arena(args.data)
             if args.arena_action == 'serve':
-                from .arena_server import serve
-                from .benchmark import termination_handler
+                from .server import serve_arena as serve
+                from mineval.historical.benchmark import termination_handler
                 with termination_handler():
                     serve(args.data, args.image, context=args.context, auth_file=args.auth_file,
                           port=args.port, timeout=args.timeout)
@@ -295,32 +302,33 @@ def _main(argv: list[str] | None = None) -> int:
             elif args.arena_action == 'show':
                 result = arena.summary(args.benchmark)
             else:
-                from .arena_runtime import Runner
-                from .artifacts import lock
-                from .benchmark import termination_handler
+                from .arena.runtime import Runner
+                from mineval.core.artifacts import lock
+                from mineval.historical.benchmark import termination_handler
                 with lock(arena.root / 'server.lock'), termination_handler():
                     result = arena.enqueue(args.benchmark, [dict(harness=args.adapter, model=args.model, effort=args.effort)])[0]
                     result = Runner(arena, args.image, args.context, args.auth_file, args.timeout).generate(result['id'])
             print(json.dumps(result))
             return 125 if args.arena_action == 'run' and result['status'] != 'ready' else 0
         if args.action in ('workflow', 'model-review'):
-            from .preparation import Store
-            from .artifacts import read_json
+            from mineval.preparation import Store
+            from mineval.core.artifacts import read_json
             store = Store(args.data)
             if args.action == 'workflow':
-                from .workflows import Workflows, tasks
-                from .workflows import load_settings
+                from mineval.addons.batch.workflows import tasks
+                from mineval.workflows import Workflows
+                from mineval.addons.batch.workflows import load_settings
                 settings = load_settings(store, args.settings)
                 if saved.get('vps'):
                     settings['vps'] = saved['vps']
-                if args.image:
+                if args.image and (explicit_image or not settings.get('preparation_image')):
                     settings['preparation_image'] = args.image
                 flow = Workflows(store, settings, context=args.context, auth_file=args.auth_file)
                 if args.workflow_action == 'submit':
                     definition = read_json(args.definition)
                     result = flow.enqueue(**definition)
                 elif args.workflow_action == 'list':
-                    from .remote_dispatch import pending_grade
+                    from mineval.addons.remote.remote_dispatch import pending_grade
                     result = flow.jobs()
                     for job in result:
                         grade = pending_grade(store, job)
@@ -332,12 +340,12 @@ def _main(argv: list[str] | None = None) -> int:
                     result = flow.enqueue('prepare', [{'task_id': t['task_id']} for t in tasks(store)
                         if not t['versions'] and t['state']['status'] not in ('retired','rejected','needs-review')])
                 else:
-                    from .benchmark import termination_handler
+                    from mineval.historical.benchmark import termination_handler
                     with termination_handler():
                         flow.work(job_id=args.job_id, refresh_export=args.refresh_export)
                     result = flow.jobs()
             else:
-                from .memory import Memory, record_evaluation
+                from mineval.addons.ai_review.memory import Memory, record_evaluation
                 memory = Memory(store)
                 if args.memory_action == 'history':
                     result = memory.history(args.model, archive=args.archive)
@@ -353,23 +361,24 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, indent=2))
             return 0
         if args.action == 'observe':
-            from .observation import serve
-            from .preparation import Store
-            from .workflows import Workflows
-            from .artifacts import read_json
-            from pathlib import Path
+            from .server import serve_historical as serve
+            from mineval.preparation import Store
             store = Store(args.data)
-            from .workflows import load_settings
+            if not args.operations:
+                serve(store, port=args.port)
+                return 0
+            from mineval.addons.batch.workflows import load_settings
+            from mineval.workflows import Workflows
             settings = load_settings(store, args.settings)
             if saved.get('vps'):
                 settings['vps'] = saved['vps']
-            if args.image:
+            if args.image and (explicit_image or not settings.get('preparation_image')):
                 settings['preparation_image'] = args.image
             serve(store, port=args.port, workflows=Workflows(store, settings, context=args.context, auth_file=args.auth_file))
             return 0
         if args.action == "agent-run":
             from pathlib import Path
-            from .agents import CodexAdapter, FakeAdapter, run_agent
+            from mineval.core.agents import CodexAdapter, FakeAdapter, run_agent
             result = run_agent(
                 args.workspace, Path(args.instructions).read_text(), args.output,
                 image=args.image,
@@ -379,30 +388,30 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps(result))
             return 0 if result['status'] == 'completed' else 124 if result['timed_out'] else 125
         if args.action not in ("doctor", "run"):
-            from .artifacts import read_json
-            from .intake import load_candidate
-            from .preparation import Store
-            from .service import request, session
-            from .verification import diagnose
+            from mineval.core.artifacts import read_json
+            from mineval.historical.intake import load_candidate
+            from mineval.preparation import Store
+            from mineval.historical.service import request, session
+            from mineval.historical.verification import diagnose
             if args.action == "verify" and not args.task:
                 result = request(args.mode or "verify")
             else:
                 store = Store(args.data)
                 if args.action == 'evaluate':
-                    from .evaluation import evaluate
-                    from .agents import CodexAdapter
-                    from .benchmark import termination_handler
+                    from mineval.historical.evaluation import evaluate
+                    from mineval.core.agents import CodexAdapter
+                    from mineval.historical.benchmark import termination_handler
                     with termination_handler():
                         result = evaluate(store, args.task, args.run_id, args.config,
                             evaluation_id=args.evaluation_id, sandbox=sandbox)
                 elif args.action == 'evaluation':
-                    from .evaluation import compare
+                    from mineval.historical.evaluation import compare
                     result = (store.inspect_evaluation(args.task_id, args.evaluation_id)
                               if args.evaluation_action == 'show' else compare(store, read_json(args.definition)))
                 elif args.action == 'bench':
-                    from . import benchmark
+                    from mineval.historical import benchmark
                     if args.bench_action == 'run':
-                        from .agents import CodexAdapter, FakeAdapter
+                        from mineval.core.agents import CodexAdapter, FakeAdapter
                         if bool(args.task) != bool(args.version):
                             raise ValueError('Use --task with --version, or --suite without --version')
                         adapter = (CodexAdapter(args.model or 'gpt-6-luna', effort=args.effort) if args.adapter == 'codex'
@@ -422,8 +431,6 @@ def _main(argv: list[str] | None = None) -> int:
                         result = benchmark.recover(store, args.task_id, args.run_id)
                     else:
                         result = benchmark.compare(store, read_json(args.definition))
-                elif args.action == "import":
-                    result = store.register(load_candidate(args.candidate))
                 elif args.action == "task":
                     if args.task_action == "add":
                         result = store.register(load_candidate(args.candidate))
@@ -450,7 +457,7 @@ def _main(argv: list[str] | None = None) -> int:
                     result = (read_json(store.task(args.task) / 'verify-latest.json') if args.mode == 'report'
                               else diagnose(store, args.task, sandbox=sandbox))
                 elif args.action == 'cleanup':
-                    from .agents import CodexAdapter, FakeAdapter
+                    from mineval.core.agents import CodexAdapter, FakeAdapter
                     result = asdict(session(store, args.task_id, context=args.context,
                                             adapter=CodexAdapter(args.model) if args.adapter == 'codex'
                                             else FakeAdapter(cleanup=True), auth_file=args.auth_file))
@@ -464,12 +471,12 @@ def _main(argv: list[str] | None = None) -> int:
                     if args.action == 'prepare':
                         result['cleanup'] = read_json(store.task(args.task_id) / 'cleanup-latest.json')
                 elif args.action == 'verification-check':
-                    from .review import validate
+                    from mineval.historical.review import validate
                     result = validate(store, args.task_id, args.extraction_id, args.config,
                                       future_commit=args.future_commit, sandbox=sandbox)
                 elif args.action in ('verification-extract', 'review'):
-                    from .review import session as private_session
-                    from .agents import CodexAdapter
+                    from mineval.historical.review import session as private_session
+                    from mineval.core.agents import CodexAdapter
                     validation_selection = {
                         role: validation_id for role in ('base', 'reference')
                         if (validation_id := getattr(args, role + '_validation_id', None))
@@ -506,7 +513,7 @@ def _main(argv: list[str] | None = None) -> int:
                 return 0
             return (124 if result.get('timed_out') else result.get('exit_code', 0)) or 0
         if args.action == "doctor":
-            from .configuration import diagnose
+            from mineval.core.configuration import diagnose
             result = diagnose(sandbox, saved | {'data': args.data, 'context': args.context})
             print(json.dumps(result))
             return 0 if result['ready'] else 125
@@ -518,7 +525,7 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(asdict(result)))
         return 124 if result.timed_out else result.exit_code
     except (SandboxError, ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
-        from .devlog import failure
+        from mineval.core.devlog import failure
         failure("command.error", exc)
         print(f"mineval: {exc}", file=sys.stderr)
         for note in getattr(exc, "__notes__", ()):
@@ -531,7 +538,7 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .devlog import configure, event, failure
+    from mineval.core.devlog import configure, event, failure
     import time
     started = time.monotonic()
     directory = None

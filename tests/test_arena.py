@@ -11,10 +11,11 @@ import unittest
 from urllib.parse import urlsplit
 
 from mineval.arena import Arena
-from mineval.arena_runtime import Runner, RuntimeManager, normalize_tree, runtime_config
-from mineval.arena_server import App, make_server
-from mineval.artifacts import digest, pack, unpack
-from mineval.sandbox import DockerSandbox
+from mineval.arena.runtime import Runner, RuntimeManager, normalize_tree, runtime_config
+from mineval.arena.server import App
+from mineval.server import make_arena_server as make_server
+from mineval.core.artifacts import digest, pack, unpack
+from mineval.core.sandbox import DockerSandbox
 
 
 class ArenaTests(unittest.TestCase):
@@ -173,7 +174,7 @@ class ArenaTests(unittest.TestCase):
         self.assertEqual(result['config'],dict(harness='codex',model='explicit-model',effort='high'))
 
     def test_export_requires_both_privacy_reviews_before_browser_or_capture(self):
-        from mineval.arena_sharing import export
+        from mineval.arena.sharing import export
         with self.assertRaisesRegex(ValueError, 'Review website'):
             export(self.arena, None, self.task['id'], {'reviewed_content':True})
 
@@ -291,7 +292,7 @@ HTTPServer(('0.0.0.0',3000),H).serve_forever()
     @unittest.skipUnless(os.environ.get('MINEVAL_ARENA_CAPTURE_TESTS'), 'optional real PNG/GIF capture checks')
     def test_real_png_and_animated_gif_exports(self):
         from PIL import Image
-        from mineval.arena_sharing import export
+        from mineval.arena.sharing import export
         r=self.enqueue()
         runner=Runner(self.arena,os.environ['MINEVAL_ARENA_TEST_IMAGE'],os.environ.get('MINEVAL_TEST_CONTEXT','mineval-rootless'))
         result=runner.generate(r['id']);self.assertEqual(result['status'],'ready',result)

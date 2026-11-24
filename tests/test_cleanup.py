@@ -6,9 +6,9 @@ import subprocess
 from unittest.mock import Mock, patch
 import unittest
 
-from mineval.artifacts import inventory, read_json, write_json
-from mineval.service import request, session
-from mineval.verification import diagnose
+from mineval.core.artifacts import inventory, read_json, write_json
+from mineval.historical.service import request, session
+from mineval.historical.verification import diagnose
 from test_preparation import HistoryFixture, FakeRunner, step
 
 
@@ -72,7 +72,7 @@ class CleanupTests(HistoryFixture):
             agent.inspect.return_value = {'Running': False, 'ExitCode': code}
             yield agent
         runner.container = container
-        with patch('mineval.service.DockerSandbox', return_value=runner):
+        with patch('mineval.historical.service.DockerSandbox', return_value=runner):
             session(self.store, 'cleanup', ['fake-cleaner'])
         return read_json(self.store.task('cleanup') / 'cleanup-latest.json'), diagnostics
 
@@ -112,8 +112,19 @@ class CleanupTests(HistoryFixture):
         with self.assertRaisesRegex(ValueError, 'ready-for-review'):
             self.freeze('cleanup', self.review | {'changes': producer_report()['changes']})
 
+    def test_config_only_cleanup_reports_no_workspace_changes(self):
+        from mineval.historical.cleanup import validate_report
+        report = producer_report() | {'changes': []}
+        self.assertEqual(validate_report(report, []), report)
+        report = report | {'changes': [{'path': '/mineval-control/verify.json', 'reason': 'Configure checks'}]}
+        with self.assertRaisesRegex(ValueError, 'workspace-relative paths, not control files'):
+            validate_report(report, [])
+        report['changes'][0]['path'] = '/tmp/outside'
+        with self.assertRaisesRegex(ValueError, 'Unsafe artifact path'):
+            validate_report(report, [])
+
     def test_task_altering_or_unavailable_setup_cannot_be_ready(self):
-        from mineval.cleanup import validate_report
+        from mineval.historical.cleanup import validate_report
         with self.assertRaisesRegex(ValueError, 'Task-altering'):
             validate_report(producer_report() | {'objective_preserved': False}, ['runtime.txt'])
         rejected, _ = self.run_producer(producer_report() | {
@@ -141,7 +152,7 @@ class CleanupTests(HistoryFixture):
 
     @unittest.skipUnless(os.environ.get('MINEVAL_TEST_IMAGE'), 'set MINEVAL_TEST_IMAGE for live cleanup checks')
     def test_live_dedicated_fake_cleanup_adapter(self):
-        from mineval.agents import FakeAdapter
+        from mineval.core.agents import FakeAdapter
         config_path = self.store.draft('example') / 'control/verify.json'
         config = read_json(config_path)
         config['image'] = os.environ['MINEVAL_TEST_IMAGE']

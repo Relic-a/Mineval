@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from mineval.artifacts import digest, write_json
-from mineval.evaluation import execute_checks
-from mineval.publication import published
+from mineval.core.artifacts import digest, write_json
+from mineval.historical.evaluation import execute_checks
+from mineval.historical.publication import published
 
 
 class FixedGradingReviewTests(unittest.TestCase):

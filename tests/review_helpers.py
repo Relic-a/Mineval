@@ -1,7 +1,7 @@
 """Local fake agents that write the same reports as isolated executables."""
 from contextlib import contextmanager
 from unittest.mock import Mock
-from mineval.artifacts import write_json
+from mineval.core.artifacts import write_json
 
 class ReportAgent:
     def __init__(self, filename, report):

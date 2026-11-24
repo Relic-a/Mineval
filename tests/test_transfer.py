@@ -3,14 +3,14 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from mineval import transfer
+from mineval.addons.remote import transfer
 
 
 class SSHCancellationTests(unittest.TestCase):
     def test_slow_response_keeps_request_and_response_intact(self):
         import os
         from unittest.mock import patch
-        from mineval.remote import SSHClient
+        from mineval.addons.remote.remote import SSHClient
         with tempfile.TemporaryDirectory() as temp:
             ssh = Path(temp) / 'ssh'
             ssh.write_text('#!/usr/bin/env python3\nimport json,sys,time\n'
@@ -26,7 +26,7 @@ class SSHCancellationTests(unittest.TestCase):
         import threading
         import time
         from unittest.mock import patch
-        from mineval.remote import SSHClient, RemoteError
+        from mineval.addons.remote.remote import SSHClient, RemoteError
         with tempfile.TemporaryDirectory() as temp:
             ssh = Path(temp) / 'ssh'
             ssh.write_text('#!/bin/sh\nexec sleep 30\n')
@@ -82,7 +82,7 @@ class TransferTests(unittest.TestCase):
 class RemoteWorkerTests(unittest.TestCase):
     def test_job_identity_is_durable_and_only_started_once(self):
         from unittest.mock import patch
-        from mineval import remote_worker
+        from mineval.addons.remote import remote_worker
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / 'source'
@@ -94,7 +94,7 @@ class RemoteWorkerTests(unittest.TestCase):
             directory = remote_worker.initialize(root / 'jobs', 'job1', archive, receipt)
             with self.assertRaises(FileExistsError):
                 remote_worker.initialize(root / 'jobs', 'job1', archive, receipt)
-            from mineval import remote_coordinator
+            from mineval.addons.remote import remote_coordinator
             job = json.loads((directory / 'input/job.json').read_text())
             remote_coordinator.enqueue(root / 'worker', job)
             with self.assertRaises(Exception):
@@ -102,7 +102,7 @@ class RemoteWorkerTests(unittest.TestCase):
 
 
     def test_remote_api_provisions_only_model_auth(self):
-        from mineval.remote_api import dispatch
+        from mineval.addons.remote.remote_api import dispatch
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'worker'
             result = dispatch(root, {'action': 'provision_auth', 'auth': {'OPENAI_API_KEY': 'test-secret'}})
@@ -115,8 +115,8 @@ class RemoteWorkerTests(unittest.TestCase):
 
 from test_preparation import HistoryFixture
 from test_agents import SimulatedDocker
-from mineval import benchmark
-from mineval.agents import FakeAdapter
+from mineval.historical import benchmark
+from mineval.core.agents import FakeAdapter
 from mineval.preparation import Store
 import shutil
 
@@ -124,15 +124,15 @@ import shutil
 class BenchmarkImportTests(HistoryFixture):
     def test_imports_sealed_architecture_evidence_from_existing_remote_attempt(self):
         from unittest.mock import patch
-        from mineval import architecture
-        from mineval.artifacts import inventory, write_json
+        from mineval.addons.ai_review import architecture
+        from mineval.core.artifacts import inventory, write_json
 
         task = 'example'
         version = self.freeze(task, self.review)['version']
         revision = self.store.inspect_revision(task, version)
         options = {'image': 'local:test', 'model': 'reviewer', 'effort': 'low'}
         observations = {'observations': [{'description': 'Answer function', 'evidence': ['app.py']}]}
-        with patch('mineval.architecture._infer', return_value=observations):
+        with patch('mineval.addons.ai_review.architecture._infer', return_value=observations):
             benchmark.run(self.store, task, version, run_id='peer', adapter=FakeAdapter(model='peer'),
                           sandbox=SimulatedDocker())
             architecture.record(self.store, task, 'peer', **options)
@@ -144,7 +144,7 @@ class BenchmarkImportTests(HistoryFixture):
             record = architecture.record(remote, task, 'remote-run', **options)
         ranking = {'ranking': [{'candidates': ['C1', 'C2'], 'explanation': 'Same interface',
                                 'evidence': [{'candidate': 'C1', 'path': 'app.py'}]}], 'uncertainty': ''}
-        with patch('mineval.architecture._infer', return_value=ranking):
+        with patch('mineval.addons.ai_review.architecture._infer', return_value=ranking):
             comparison = architecture.compare(remote, task, version, **options)
         job = {'task': task, 'payload': {'run_id': 'remote-run', 'evaluation_id': 'eval1',
                'revision': revision, 'configuration': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'}}}
@@ -171,7 +171,7 @@ class BenchmarkImportTests(HistoryFixture):
                       adapter=FakeAdapter(effort='medium'), sandbox=SimulatedDocker())
         job = {'task': 'example', 'payload': {'run_id': 'remote-run', 'evaluation_id': 'eval1',
                'revision': revision, 'configuration': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'}}}
-        from mineval.remote_dispatch import outbox
+        from mineval.addons.remote.remote_dispatch import outbox
         from mineval.workflows import Workflows
         staged_job = job | {'id': 'outbox1', 'kind': 'benchmark'}
         directory = outbox(Workflows(self.store, {'secret': 'PRIVATE-CREDENTIAL-MARKER'}), staged_job)
@@ -203,7 +203,7 @@ class BenchmarkImportTests(HistoryFixture):
 class CoordinatorTests(unittest.TestCase):
     def test_shared_queue_routes_jobs_to_isolated_stores(self):
         from unittest.mock import patch
-        from mineval import remote_coordinator
+        from mineval.addons.remote import remote_coordinator
         import threading
         import time
         with tempfile.TemporaryDirectory() as temp:
@@ -222,7 +222,7 @@ class CoordinatorTests(unittest.TestCase):
                     seen.append((job['id'], workflow.store.root))
                 time.sleep(0.05)
                 workflow.update(job['id'], state='completed', stage='completed')
-            with patch('mineval.workflows.Workflows._work_stage', stage), patch('mineval.resources.admits', return_value=True):
+            with patch('mineval.addons.batch.workflows.Workflows._work_stage', stage), patch('mineval.addons.batch.resources.admits', return_value=True):
                 coordinator = remote_coordinator.Coordinator(root)
                 coordinator.work()
             self.assertEqual({j['state'] for j in coordinator.jobs()}, {'completed'})
@@ -232,7 +232,7 @@ class CoordinatorTests(unittest.TestCase):
 class DeltaTransferTests(HistoryFixture):
     def delta(self):
         import os
-        from mineval.artifacts import inventory, read_json
+        from mineval.core.artifacts import inventory, read_json
         large = self.store.task('example') / 'private/large-fixture.bin'
         large.write_bytes(os.urandom(1024 * 1024))
         job = {'id': 'job1', 'kind': 'prepare', 'task': 'example', 'payload': {}}
@@ -250,9 +250,9 @@ class DeltaTransferTests(HistoryFixture):
         return destination, descriptor, subset, full, large
 
     def test_delta_roundtrip_and_unchanged_resume(self):
-        from mineval.artifacts import inventory
+        from mineval.core.artifacts import inventory
         destination, descriptor, subset, full, large = self.delta()
-        from mineval.artifacts import write_json
+        from mineval.core.artifacts import write_json
         marker = self.store.root / 'remote-imports/example.json'
         write_json(marker, {'job_id': 'job1'})
         self.assertTrue(transfer.local_inventory(self.store, 'example', 'job1'))
@@ -295,7 +295,7 @@ class DeltaTransferTests(HistoryFixture):
 
 class PreparationImportTests(HistoryFixture):
     def test_checkpoint_changes_reconcile_but_concurrent_edits_conflict(self):
-        from mineval.artifacts import write_json
+        from mineval.core.artifacts import write_json
         job = {'id': 'job1', 'kind': 'prepare', 'task': 'example', 'payload': {}}
         progress = self.store.task('example') / 'preparation-progress.json'
         write_json(progress, {'old': True})
@@ -341,15 +341,15 @@ class DispatchTests(HistoryFixture):
         directory.mkdir(parents=True)
         (directory / 'download.json').write_text('{}')
         (directory / 'download.partial').write_bytes(b'partial')
-        with patch('mineval.remote.SSHClient', side_effect=AssertionError('must reconcile first')):
+        with patch('mineval.addons.remote.remote.SSHClient', side_effect=AssertionError('must reconcile first')):
             flow.retry(job['id'])
         resumed = flow.jobs()[0]
         self.assertEqual((resumed['state'], resumed['stage']), ('queued', 'resuming remote import'))
 
     def test_download_resumes_after_disconnection_without_new_export(self):
         import base64
-        from mineval.remote import RemoteError
-        from mineval.remote_dispatch import CHUNK_SIZE, fetch_resumable
+        from mineval.addons.remote.remote import RemoteError
+        from mineval.addons.remote.remote_dispatch import CHUNK_SIZE, fetch_resumable
         content = b'a' * CHUNK_SIZE + b'end'
         class Client:
             starts = 0
@@ -379,8 +379,8 @@ class DispatchTests(HistoryFixture):
         import sys
         import threading
         from unittest.mock import patch
-        from mineval import remote_api, remote_coordinator, remote_dispatch
-        from mineval.observation import Pages
+        from mineval.addons.remote import remote_api, remote_coordinator, remote_dispatch
+        from mineval.server import historical_view as Pages
         from mineval.workflows import Workflows
         self.fixture_generated_cases = True
         self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
@@ -395,9 +395,9 @@ class DispatchTests(HistoryFixture):
                    'model_settings': {'preparation': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'},
                                       'evaluation': {'model': 'fake', 'effort': 'medium', 'adapter': 'fake'}},
                    'execution_host': 'vps', 'evaluation_config': {}}
-        from mineval.memory import Memory
+        from mineval.addons.ai_review.memory import Memory
         flow = Workflows(self.store, {'vps': {'host': 'test@example.test'},
-                                      'architecture_review': True, 'review_image': 'local:test',
+                                      'architecture_review': True, 'model_memory': True, 'review_image': 'local:test',
                                       'resources': {'admission_interval_seconds': 0.01}})
         with flow.db() as db:
             db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)', ('job1', 'benchmark', 'example', json.dumps(payload),
@@ -423,7 +423,7 @@ class DispatchTests(HistoryFixture):
                     result = remote_api.dispatch(remote, request)
                     if request['action'] == 'upload-finish' and not Client.submissions:
                         Client.submissions += 1
-                        from mineval.remote import RemoteError
+                        from mineval.addons.remote.remote import RemoteError
                         raise RemoteError('connection lost after submission')
                     # Exercise a job that reached its terminal state between polls.
                     if request['action'] == 'status' and result.get('grade_ready'):
@@ -450,7 +450,7 @@ class DispatchTests(HistoryFixture):
                         grade_downloaded.set()
                     return result
                 except FileNotFoundError:
-                    from mineval.remote import RemoteError
+                    from mineval.addons.remote.remote import RemoteError
                     raise RemoteError('missing', 'FileNotFoundError')
         def start(root):
             if threads:
@@ -478,24 +478,26 @@ class DispatchTests(HistoryFixture):
                               adapter=FakeAdapter(model='test-model', name='codex', effort='medium'),
                               sandbox=Candidate())
             elif phase == 'evaluation':
-                from mineval import evaluation
+                from mineval.historical import evaluation
                 from test_evaluation import EvaluationRunner
                 config = workflow.store.root / 'dispatch-evaluation.json'
                 config.write_text(json.dumps(self.fixture_evaluation_config))
                 evaluation.evaluate(workflow.store, task, p['run_id'], config,
                                     evaluation_id=p['evaluation_id'], sandbox=EvaluationRunner())
-            elif p['execution_host'] == 'vps':
+            else:
+                if p['execution_host'] != 'vps':
+                    p = p | {'configuration': p['configuration'] | {'adapter': 'fake'}}
                 run_benchmark(workflow, jid, task, p, phase=phase)
         def record_architecture(store, task, run_id, **options):
             self.assertEqual((store, task, run_id), (self.store, 'example', 'dispatch-run'))
             self.assertEqual(store.inspect_evaluation(task, 'dispatch-eval')['run_id'], run_id)
             self.assertTrue((store.task(task) / 'run-outputs/dispatch-run/agent/workspace.tar.gz').is_file())
-        with patch('mineval.remote_dispatch.SSHClient', Client), \
-                patch('mineval.architecture.record', side_effect=record_architecture) as record, \
-                patch('mineval.architecture.compare') as compare, \
-                patch('mineval.remote_api.start_export_reaper'), \
-                patch('mineval.remote_coordinator.ensure_running', start), \
-                patch('mineval.workflows.Workflows.benchmark', run_stage), patch('mineval.resources.admits', return_value=True):
+        with patch('mineval.addons.remote.remote_dispatch.SSHClient', Client), \
+                patch('mineval.addons.ai_review.architecture.record', side_effect=record_architecture) as record, \
+                patch('mineval.addons.ai_review.architecture.compare') as compare, \
+                patch('mineval.addons.remote.remote_api.start_export_reaper'), \
+                patch('mineval.addons.remote.remote_coordinator.ensure_running', start), \
+                patch('mineval.addons.batch.workflows.Workflows.benchmark', run_stage), patch('mineval.addons.batch.resources.admits', return_value=True):
             flow.work()
             for thread in threads:
                 thread.join()
@@ -541,8 +543,9 @@ class DispatchTests(HistoryFixture):
 class RetryTests(HistoryFixture):
     def test_remote_reevaluation_allocates_once_and_keeps_saved_run(self):
         from unittest.mock import patch
-        from mineval import evaluation, remote_api, remote_coordinator
-        from mineval.artifacts import digest, write_json
+        from mineval.historical import evaluation
+        from mineval.addons.remote import remote_api, remote_coordinator
+        from mineval.core.artifacts import digest, write_json
         from mineval.workflows import Workflows
         from test_evaluation import EvaluationRunner
         self.fixture_generated_cases = True
@@ -576,9 +579,9 @@ class RetryTests(HistoryFixture):
             def request(self, request, timeout=60):
                 requests.append(request)
                 return remote_api.dispatch(worker, request)
-        with patch('mineval.workflows.SSHClient', Client, create=True), \
-             patch('mineval.remote.SSHClient', Client), patch('mineval.remote_coordinator.start'), \
-             patch('mineval.benchmark.run', side_effect=AssertionError('benchmark must not rerun')):
+        with patch('mineval.addons.batch.workflows.SSHClient', Client, create=True), \
+             patch('mineval.addons.remote.remote.SSHClient', Client), patch('mineval.addons.remote.remote_coordinator.start'), \
+             patch('mineval.historical.benchmark.run', side_effect=AssertionError('benchmark must not rerun')):
             flow.retry('job1', reevaluate=True)
             retried = flow.jobs()[0]
             again = remote_api.dispatch(worker, requests[0])
@@ -596,7 +599,7 @@ class RetryTests(HistoryFixture):
 
     def test_remote_retry_keeps_saved_attempt_and_replaces_uncertain_evaluation(self):
         from unittest.mock import patch
-        from mineval import remote_api, remote_coordinator
+        from mineval.addons.remote import remote_api, remote_coordinator
         version = self.freeze('example', self.review)['version']
         revision = self.store.inspect_revision('example', version)
         worker = self.root / 'worker'
@@ -611,7 +614,7 @@ class RetryTests(HistoryFixture):
         remote_coordinator.enqueue(worker, job)
         coordinator = remote_coordinator.Coordinator(worker)
         coordinator.update('job1', state='interrupted')
-        with patch('mineval.remote_coordinator.start'):
+        with patch('mineval.addons.remote.remote_coordinator.start'):
             retried = remote_api.dispatch(worker, {'action': 'retry', 'job_id': 'job1', 'new_attempt': False})
         self.assertEqual(retried['payload']['run_id'], 'saved')
         self.assertNotEqual(retried['payload']['evaluation_id'], 'uncertain')
@@ -621,7 +624,7 @@ class RetryTests(HistoryFixture):
 class SubmissionRecoveryTests(unittest.TestCase):
     def test_ready_but_unqueued_submission_requires_explicit_retry(self):
         from unittest.mock import patch
-        from mineval import remote_api, remote_worker
+        from mineval.addons.remote import remote_api, remote_worker
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / 'source'
@@ -634,7 +637,7 @@ class SubmissionRecoveryTests(unittest.TestCase):
             worker = root / 'worker'
             remote_worker.initialize(worker / 'jobs', 'job1', archive, receipt)
             self.assertEqual(remote_api.dispatch(worker, {'action': 'status', 'job_id': 'job1'})['state'], 'ready')
-            with patch('mineval.remote_coordinator.start'):
+            with patch('mineval.addons.remote.remote_coordinator.start'):
                 result = remote_api.dispatch(worker, {'action': 'retry', 'job_id': 'job1'})
             self.assertEqual(result['state'], 'queued')
             with self.assertRaises(ValueError):
@@ -666,7 +669,7 @@ class PreparationRecoveryTests(HistoryFixture):
                 failed[0] = True
                 raise OSError('simulated crash')
             return original(src, dst)
-        with patch('mineval.transfer.os.replace', side_effect=interrupted):
+        with patch('mineval.addons.remote.transfer.os.replace', side_effect=interrupted):
             with self.assertRaisesRegex(OSError, 'simulated crash'):
                 transfer.import_preparation(self.store, snapshot / 'data', job, baseline)
         with self.assertRaisesRegex(ValueError, 'import needs recovery'):
@@ -678,7 +681,7 @@ class PreparationRecoveryTests(HistoryFixture):
             self.assertTrue((self.store.draft('example') / 'workspace/new-file').exists())
             self.assertEqual((self.store.draft('example') / 'workspace/replaced').read_text(), 'after')
             self.assertTrue((self.store.task('example') / 'checkpoint.json').exists())
-        from mineval.artifacts import inventory
+        from mineval.core.artifacts import inventory
         synchronized = {'task': inventory(remote.task('example')), 'draft': inventory(remote.draft('example'))}
         draft_file.write_text('def answer(): return 8\n')
         transfer.import_preparation(self.store, snapshot / 'data', job, synchronized)
@@ -687,7 +690,7 @@ class PreparationRecoveryTests(HistoryFixture):
 
 class CancellationTests(unittest.TestCase):
     def test_queued_and_running_cancellation_are_scoped_to_job(self):
-        from mineval import remote_api, remote_coordinator
+        from mineval.addons.remote import remote_api, remote_coordinator
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             for jid in ('job1', 'job2'):
@@ -707,8 +710,8 @@ class CancellationTests(unittest.TestCase):
 class RemoteHealthTests(unittest.TestCase):
     def test_health_checks_selected_image_only_after_rootless_check(self):
         from unittest.mock import patch
-        from mineval.remote_api import dispatch
-        with tempfile.TemporaryDirectory() as temp, patch('mineval.sandbox.DockerSandbox') as sandbox:
+        from mineval.addons.remote.remote_api import dispatch
+        with tempfile.TemporaryDirectory() as temp, patch('mineval.core.sandbox.DockerSandbox') as sandbox:
             sandbox.return_value.image.return_value = {'Id': 'sha256:fixture'}
             result = dispatch(temp, {'action': 'health', 'image': 'local:test'})
             self.assertEqual(result, {'ready': True, 'image_id': 'sha256:fixture'})
@@ -730,8 +733,8 @@ class PreparationAuthTests(HistoryFixture):
         for adapter_name, expected in (('fake', None), ('codex', '/model-only-auth')):
             flow = Workflows(self.store, {'preparation_image': 'fixture'}, auth_file='/model-only-auth')
             payload = {'model_settings': {'preparation': {'adapter': adapter_name, 'model': 'fixture', 'effort': 'low'}}}
-            with patch('mineval.checkpoints.PreparationCheckpoints', Progress), \
-                    patch('mineval.service.session', side_effect=Stop) as session:
+            with patch('mineval.addons.batch.checkpoints.PreparationCheckpoints', Progress), \
+                    patch('mineval.historical.service.session', side_effect=Stop) as session:
                 with self.assertRaises(Stop):
                     flow.prepare('testjob', 'example', payload)
             self.assertEqual(session.call_args.kwargs['auth_file'], expected)
@@ -740,7 +743,7 @@ class ResumableProtocolTests(unittest.TestCase):
     def test_upload_recovers_partial_and_lost_queue_response_and_rejects_changed_bundle(self):
         import base64
         from unittest.mock import patch
-        from mineval import remote_api, remote_coordinator
+        from mineval.addons.remote import remote_api, remote_coordinator
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / 'source'
@@ -753,7 +756,7 @@ class ResumableProtocolTests(unittest.TestCase):
             data, manifest = archive.read_bytes(), json.loads(receipt.read_text())
             worker = root / 'worker'
             request = {'action': 'upload-start', 'job_id': 'job1', 'size': len(data), 'receipt': manifest}
-            with patch('mineval.remote_coordinator.ensure_running'):
+            with patch('mineval.addons.remote.remote_coordinator.ensure_running'):
                 self.assertEqual(remote_api.dispatch(worker, request)['offset'], 0)
                 remote_api.dispatch(worker, {'action': 'upload-chunk', 'job_id': 'job1', 'offset': 0,
                                             'data': base64.b64encode(data[:400000]).decode()})
@@ -764,7 +767,7 @@ class ResumableProtocolTests(unittest.TestCase):
                 remote_api.dispatch(worker, {'action': 'upload-chunk', 'job_id': 'job1', 'offset': 400000,
                                             'data': base64.b64encode(data[400000:]).decode()})
                 # Crash after verified publication but before queue insertion.
-                with patch('mineval.remote_coordinator.enqueue', side_effect=OSError('crash')):
+                with patch('mineval.addons.remote.remote_coordinator.enqueue', side_effect=OSError('crash')):
                     with self.assertRaises(OSError):
                         remote_api.dispatch(worker, {'action': 'upload-finish', 'job_id': 'job1'})
                 self.assertTrue(remote_api.dispatch(worker, request)['complete'])
@@ -774,9 +777,9 @@ class ResumableProtocolTests(unittest.TestCase):
 
     def test_refresh_preserves_legacy_and_resumes_new_delta(self):
         import base64
-        from mineval.remote import RemoteError
-        from mineval.remote_dispatch import fetch_resumable
-        from mineval.artifacts import write_json
+        from mineval.addons.remote.remote import RemoteError
+        from mineval.addons.remote.remote_dispatch import fetch_resumable
+        from mineval.core.artifacts import write_json
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             state = {'state': 'failed', 'updated': 1, 'payload': {}}
@@ -810,14 +813,14 @@ class ResumableProtocolTests(unittest.TestCase):
 
     def test_refresh_switch_recovers_after_interrupted_unlink(self):
         from unittest.mock import patch
-        from mineval.remote_dispatch import fetch_resumable
-        from mineval.artifacts import write_json
+        from mineval.addons.remote.remote_dispatch import fetch_resumable
+        from mineval.core.artifacts import write_json
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             state = {'state': 'failed', 'updated': 1, 'payload': {}}
             write_json(root / 'download.json', {'token': 'old', 'size': 10, 'state': state, 'receipt': {}})
             (root / 'download.partial').write_bytes(b'old')
-            with patch('mineval.remote_dispatch._finish_export_switch', side_effect=[None, RuntimeError('crash')]):
+            with patch('mineval.addons.remote.remote_dispatch._finish_export_switch', side_effect=[None, RuntimeError('crash')]):
                 with self.assertRaises(RuntimeError):
                     fetch_resumable(None, 'job1', root, state, refresh_export=True)
             self.assertTrue((root / 'export-switch.json').exists())
@@ -834,7 +837,7 @@ class ResumableProtocolTests(unittest.TestCase):
 
     def test_stale_attempt_discards_partial_export(self):
         import base64
-        from mineval.remote_dispatch import fetch_resumable
+        from mineval.addons.remote.remote_dispatch import fetch_resumable
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             old = {'state': 'interrupted', 'updated': 1, 'payload': {'run_id': 'old', 'evaluation_id': 'one'}}
@@ -853,7 +856,7 @@ class ResumableProtocolTests(unittest.TestCase):
 
     def test_expired_exports_cleaned_without_removing_fresh_ones(self):
         import os, time
-        from mineval.remote_api import cleanup_exports, EXPORT_TTL
+        from mineval.addons.remote.remote_api import cleanup_exports, EXPORT_TTL
         with tempfile.TemporaryDirectory() as temp:
             exports = Path(temp) / 'jobs/job1/exports'
             exports.mkdir(parents=True)
@@ -865,7 +868,7 @@ class ResumableProtocolTests(unittest.TestCase):
             self.assertTrue(fresh.exists())
 
     def test_vps_reservations_follow_each_jobs_limits(self):
-        from mineval.remote_coordinator import Coordinator
+        from mineval.addons.remote.remote_coordinator import Coordinator
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / 'settings.json').write_text(json.dumps({'resources': {'reservation_percent': 50}}))

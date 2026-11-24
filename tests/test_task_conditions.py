@@ -4,15 +4,15 @@ import threading
 import unittest
 from unittest.mock import Mock
 
-from mineval import benchmark
-from mineval.artifacts import inventory
-from mineval.repository import future_tree
-from mineval.sandbox import Limits, SandboxError, SandboxSpec
-from mineval.service_dependencies import group
+from mineval.historical import benchmark
+from mineval.core.artifacts import inventory
+from mineval.historical.repository import future_tree
+from mineval.core.sandbox import Limits, SandboxError, SandboxSpec
+from mineval.core.service_dependencies import group
 from test_agents import SimulatedDocker
 from test_preparation import FakeRunner, HistoryFixture, step
-from mineval.verification import diagnose
-from mineval.artifacts import read_json, write_json
+from mineval.historical.verification import diagnose
+from mineval.core.artifacts import read_json, write_json
 
 
 class RepositoryTests(HistoryFixture):
@@ -115,7 +115,7 @@ class RepeatTests(HistoryFixture):
         self.assertTrue(different['agent_result']['image_id'])
 
     def test_queue_enqueues_each_slot_per_model(self):
-        from mineval.workflows import Workflows
+        from mineval.addons.batch.workflows import Workflows
         version = self.freeze('example', self.review)['version']
         flow = Workflows(self.store)
         models = [{'model': model, 'adapter': 'fake'} for model in ('a', 'b')]

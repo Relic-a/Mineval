@@ -8,12 +8,12 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from mineval import benchmark, evaluation, review
-from mineval.artifacts import copy_tree, inventory, read_json, write_json
-from mineval.cleanup import save_attempt
-from mineval.native_grading import script_artifact
-from mineval.sandbox import DockerSandbox, RunResult, SandboxSpec
-from mineval.verification import diagnose, load_config
+from mineval.historical import benchmark, evaluation, review
+from mineval.core.artifacts import copy_tree, inventory, read_json, write_json
+from mineval.historical.cleanup import save_attempt
+from mineval.historical.native_grading import script_artifact
+from mineval.core.sandbox import DockerSandbox, RunResult, SandboxSpec
+from mineval.historical.verification import diagnose, load_config
 from review_helpers import ReportAgent, report
 from test_agents import SimulatedDocker
 from test_preparation import HistoryFixture
@@ -157,13 +157,13 @@ test('skip is visible', {skip: true}, () => {});
             self.assertEqual(assessed['tests']['skipped'], ['test::skip is visible'])
             self.assertEqual(assessed['tests']['failed'], [] if value == 42 else ['test::public answer'])
 
-        from mineval.native_grading import execute
+        from mineval.historical.native_grading import execute
         verification = frozen / 'private/verification'
         files = read_json(verification / 'extraction-manifest.json')['artifacts']
         copy = self.root / 'candidate'
         benchmark.export(self.store, 'native', 'correct', copy)
         normalized = load_config(cfg, evaluation=True)
-        from mineval.history import restore
+        from mineval.core.history import restore
         def attach_base(workspace):
             restore(frozen / 'history.pack', base, workspace)
         missing = execute(copy, self.root / 'missing-workspace', self.root / 'missing-evidence', verification,

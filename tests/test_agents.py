@@ -9,10 +9,10 @@ import sys
 import unittest
 from unittest.mock import Mock
 
-from mineval.agents import CodexAdapter, FakeAdapter, provision_auth, run_agent
-from mineval.artifacts import inventory, read_json, unpack, write_json
-from mineval.history import create_pack, git, objects, restore, validate
-from mineval.sandbox import DockerSandbox, Limits
+from mineval.core.agents import CodexAdapter, FakeAdapter, provision_auth, run_agent
+from mineval.core.artifacts import inventory, read_json, unpack, write_json
+from mineval.core.history import create_pack, git, objects, restore, validate
+from mineval.core.sandbox import DockerSandbox, Limits
 from test_preparation import HistoryFixture
 from test_sandbox import READY, IMAGE_ID, CONTAINER_ID
 
@@ -102,7 +102,7 @@ class PhaseThreeTests(HistoryFixture):
     def test_history_retained_after_source_deleted_and_preparation_edits_preserved(self):
         shutil.rmtree(self.repo)
         (self.workspace / 'setup.txt').write_text('setup only')
-        from mineval.verification import diagnose
+        from mineval.historical.verification import diagnose
         from test_preparation import FakeRunner, step
         diagnose(self.store, 'example', sandbox=FakeRunner([step()]))
         self.review['changes'] = [{'path': 'setup.txt', 'reason': 'fixture environment'}]
@@ -174,7 +174,7 @@ class PhaseThreeTests(HistoryFixture):
             run_agent(source, 'fixture', self.root / 'bad-link', image='fixture', sandbox=SimulatedDocker(bad_output=True))
 
     def test_starting_source_inside_node_modules_is_not_silently_removed(self):
-        from mineval.agents import discard_generated_npm
+        from mineval.core.agents import discard_generated_npm
         tree = self.root / 'preserve'; (tree / 'node_modules').mkdir(parents=True)
         (tree / 'node_modules/source.js').write_text('source')
         baseline = inventory(tree)

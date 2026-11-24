@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from mineval import devlog
-from mineval.artifacts import write_json
-from mineval.sandbox import log_agent_failure
+from mineval.core import devlog
+from mineval.core.artifacts import write_json
+from mineval.core.sandbox import log_agent_failure
 import test_evaluation as fixtures
 from test_preparation import HistoryFixture
 

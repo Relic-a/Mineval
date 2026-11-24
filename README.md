@@ -60,11 +60,13 @@ and current limitations.
 ## Prepare and benchmark historical tasks locally
 
 ```sh
-mineval --context mineval-rootless --data mineval-data observe \
+mineval --context mineval-rootless --data mineval-data observe --operations \
   --image YOUR_PRELOADED_PREPARATION_IMAGE --auth-file /explicit/model-only/auth.json
 # Optional fixed loopback port:
 mineval --data mineval-data observe --port 8765
 ```
+
+Plain `observe` opens read-only inspection. Add `--operations` to submit batches, retry jobs, or change workflow settings.
 
 Open the private URL printed in the terminal. The historical dashboard reads your actual
 store and checks artifact receipts. Filter and select tasks across repositories,

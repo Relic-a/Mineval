@@ -59,9 +59,9 @@ class PreparationIntegrationTests(unittest.TestCase):
     def test_repeated_fresh_diagnostics_and_bind_write_isolation(self):
         from pathlib import Path
         import tempfile
-        from mineval.artifacts import write_json
+        from mineval.core.artifacts import write_json
         from mineval.preparation import Store
-        from mineval.verification import diagnose
+        from mineval.historical.verification import diagnose
         runner = DockerSandbox(context=os.environ.get('MINEVAL_TEST_CONTEXT'))
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

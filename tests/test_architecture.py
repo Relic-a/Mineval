@@ -1,7 +1,8 @@
 from unittest.mock import patch
-from mineval import architecture, benchmark
-from mineval.agents import FakeAdapter
-from mineval.artifacts import read_json
+from mineval.addons.ai_review import architecture
+from mineval.historical import benchmark
+from mineval.core.agents import FakeAdapter
+from mineval.core.artifacts import read_json
 from test_agents import SimulatedDocker
 from test_preparation import HistoryFixture
 
@@ -20,7 +21,7 @@ class ArchitectureTests(HistoryFixture):
             return {'ranking': [{'candidates': labels, 'explanation': 'Equivalent interfaces',
                                   'evidence': [{'candidate': label, 'path': 'app.py'} for label in labels]}],
                     'uncertainty': 'Similar structure'}
-        with patch('mineval.architecture._infer', side_effect=infer):
+        with patch('mineval.addons.ai_review.architecture._infer', side_effect=infer):
             for i in range(3):
                 run = 'run' + str(i)
                 benchmark.run(self.store, 'example', revision, run_id=run,
@@ -36,7 +37,7 @@ class ArchitectureTests(HistoryFixture):
     def test_bad_evidence_does_not_publish_record(self):
         revision = self.freeze('example', self.review)['version']
         benchmark.run(self.store, 'example', revision, run_id='run', sandbox=SimulatedDocker())
-        with patch('mineval.architecture._infer', return_value={'observations': [{'description': 'Claim', 'evidence': ['missing.py']}]}):
+        with patch('mineval.addons.ai_review.architecture._infer', return_value={'observations': [{'description': 'Claim', 'evidence': ['missing.py']}]}):
             with self.assertRaisesRegex(ValueError, 'evidence'):
                 architecture.record(self.store, 'example', 'run', image='x', model='review', effort='low')
         self.assertFalse((self.store.task('example') / 'architecture/records/run').exists())

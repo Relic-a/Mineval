@@ -10,7 +10,7 @@ WORKDIR /opt/mineval
 COPY pyproject.toml README.md ./
 COPY mineval ./mineval
 RUN python3 -m venv /opt/mineval-env && /opt/mineval-env/bin/pip install --no-cache-dir .
-RUN python3 /opt/mineval/mineval/codex_runner.py --check-runtime
+RUN python3 /opt/mineval/mineval/core/codex_runner.py --check-runtime
 ENV PATH="/opt/mineval-env/bin:${PATH}"
 LABEL io.mineval.dependency-cache="pip,npm"
 WORKDIR /workspace

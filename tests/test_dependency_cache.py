@@ -1,5 +1,7 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from importlib.util import find_spec
 import hashlib
 import io
 import json
@@ -14,9 +16,9 @@ import unittest
 from unittest.mock import Mock, patch
 import zipfile
 
-from mineval.artifacts import pack
-from mineval.dependency_cache import Artifact, DependencyCache, PublicRedirects, hash1, public_url
-from mineval.sandbox import DockerSandbox, SandboxSpec
+from mineval.core.artifacts import pack
+from mineval.addons.cache.dependency_cache import Artifact, DependencyCache, container_with_cache, PublicRedirects, hash1, public_url
+from mineval.core.sandbox import DockerSandbox, SandboxSpec
 from test_sandbox import READY, IMAGE_ID, CONTAINER_ID
 
 
@@ -29,7 +31,7 @@ class DependencyCacheTests(unittest.TestCase):
         self.tree.mkdir()
         self.cache = DependencyCache(self.root / 'store', self.tree)
         self.downloads = {}
-        self.fetch = patch('mineval.dependency_cache.download', side_effect=lambda url, *args: self.downloads[url]).start()
+        self.fetch = patch('mineval.addons.cache.dependency_cache.download', side_effect=lambda url, *args: self.downloads[url]).start()
         self.addCleanup(patch.stopall)
 
     def write(self, name, text):
@@ -82,6 +84,22 @@ class DependencyCacheTests(unittest.TestCase):
         self.assertEqual(sum(s['stored_packages'] for _, s in results), 1)
         self.assertEqual(sum(s['seeded_packages'] for _, s in results), 1)
 
+    def test_large_cache_is_available_without_a_reusable_seed(self):
+        self.npm()
+        with patch('mineval.core.artifacts.MAX_BYTES', 1):
+            local, stats = self.prepare()
+        self.assertEqual(stats['seed_unavailable'], 'artifact_limit')
+        self.assertEqual(stats['stored_packages'], 1)
+        self.assertTrue(any(p.is_file() for p in (local / 'npm').rglob('*')))
+        self.assertFalse(list((self.cache.root / 'seeds').glob('*')))
+
+    def test_failed_seed_copy_removes_private_staging(self):
+        self.npm()
+        with patch('mineval.addons.cache.dependency_cache.copy_tree', side_effect=ValueError('integrity')):
+            with self.assertRaisesRegex(ValueError, 'integrity'):
+                self.cache.prepare(('npm',), network='bridge')
+        self.assertFalse(list(self.cache.root.glob('.run-*')))
+
     def test_warm_seed_clones_overlap_and_remain_isolated(self):
         import threading
         self.npm()
@@ -115,7 +133,7 @@ class DependencyCacheTests(unittest.TestCase):
             return self.downloads[url]
         def prepare(tree):
             return DependencyCache(self.cache.root, tree).prepare(('npm',), network='bridge')
-        with patch('mineval.dependency_cache.download', side_effect=fetch):
+        with patch('mineval.addons.cache.dependency_cache.download', side_effect=fetch):
             with ThreadPoolExecutor(2) as pool:
                 results = list(pool.map(prepare, [one, self.tree]))
         for local, _ in results:
@@ -273,7 +291,7 @@ wheels = [{{ url = "{url}", hash = "sha256:{checksum}" }}]
 
     def test_installed_pip_environment_is_private_and_image_pinned(self):
         from contextlib import contextmanager
-        from mineval.sandbox import Limits
+        from mineval.core.sandbox import Limits
         _, checksum = self.python_lock()
         self.write('requirements.txt', f'demo==1.0 --hash=sha256:{checksum}\n')
         built = []
@@ -292,7 +310,7 @@ wheels = [{{ url = "{url}", hash = "sha256:{checksum}" }}]
                 self.assertIn('--only-binary=:all:', argv)
                 self.assertIn('--require-hashes', argv)
                 self.assertIn('--no-index', argv)
-                target = options['dependency_cache_path'] / 'pip/site-packages'
+                target = Path(options['extra_mounts'][1].split(',', 2)[1].removeprefix('src=')) / 'pip/site-packages'
                 target.mkdir()
                 (target / 'demo.py').write_text('ANSWER = 42')
                 return {'exit_code': 0, 'timed_out': False, 'oom_killed': False}
@@ -335,7 +353,7 @@ wheels = [{{ url = "{url}", hash = "sha256:{checksum}" }}]
 
     def test_installer_resource_failures_never_publish_or_negative_cache(self):
         from contextlib import contextmanager
-        from mineval.sandbox import Limits
+        from mineval.core.sandbox import Limits
         _, checksum = self.python_lock()
         self.write('requirements.txt', f'demo==1.0 --hash=sha256:{checksum}\n')
         for phase in ('install', 'runtime'):
@@ -370,7 +388,7 @@ wheels = [{{ url = "{url}", hash = "sha256:{checksum}" }}]
 
     def test_installer_cleanup_failure_quarantines_all_mounts(self):
         from contextlib import contextmanager
-        from mineval.sandbox import Limits, SandboxError
+        from mineval.core.sandbox import Limits, SandboxError
         _, checksum = self.python_lock()
         self.write('requirements.txt', f'demo==1.0 --hash=sha256:{checksum}\n')
         local, stats = self.prepare(('pip',))
@@ -398,7 +416,7 @@ wheels = [{{ url = "{url}", hash = "sha256:{checksum}" }}]
         candidate = self.root / 'candidate'; candidate.mkdir()
         (candidate / 'requirements.txt').write_text('demo==2.0\n')
         runner = Mock()
-        from mineval.sandbox import Limits
+        from mineval.core.sandbox import Limits
         self.cache.pip_environment(runner, {'Id': IMAGE_ID}, local, stats, Limits(), workspace=candidate)
         runner._container.assert_not_called()
         self.assertFalse((local / 'pip/site-packages').exists())
@@ -438,6 +456,7 @@ files = [{{ file = "demo-1.0-py3-none-any.whl", hash = "sha256:{checksum}" }}]
         self.assertEqual(stats['seeded_packages'], 1)
         self.assertEqual(self.fetch.call_count, 2)  # verified seed needs no index metadata
 
+    @unittest.skipUnless(find_spec('ensurepip'), 'Python ensurepip required')
     def test_native_pip_installs_hashed_wheel_into_independent_environments_offline(self):
         # Build a pure wheel fixture without executing a build backend.
         stream = io.BytesIO()
@@ -582,7 +601,8 @@ checksum = "{checksum}"
         self.assertFalse(list(cache.root.glob('.snapshot-*')))
 
     def sandbox(self, labels):
-        sandbox = DockerSandbox(); sandbox.dependency_cache = self.cache
+        sandbox = DockerSandbox()
+        sandbox.container_inputs = partial(container_with_cache, cache=self.cache)
         cli = Mock(); sandbox._cli = cli
         cli.json.side_effect = lambda *args: READY.copy() if args[0] == 'info' else [
             {'Id': IMAGE_ID, 'Config': {'Labels': labels}}]
@@ -613,6 +633,14 @@ checksum = "{checksum}"
             args = cli.call.call_args_list[0].args
             self.assertFalse(any('mineval-dependency-cache' in a for a in args))
         self.fetch.assert_not_called()
+
+    def test_cache_setup_error_runs_without_a_cache_mount(self):
+        sandbox, cli, spec = self.sandbox({'io.mineval.dependency-cache': 'npm'})
+        with patch.object(self.cache, 'prepare', side_effect=OSError('cache unavailable')):
+            with sandbox.container(spec) as container:
+                self.assertEqual(container.cache_stats, {'error_kind': 'OSError'})
+                args = cli.call.call_args_list[0].args
+                self.assertFalse(any('mineval-dependency-cache' in arg for arg in args))
 
     def test_failed_removal_quarantines_private_files(self):
         sandbox, cli, spec = self.sandbox({'io.mineval.dependency-cache': 'pip'})

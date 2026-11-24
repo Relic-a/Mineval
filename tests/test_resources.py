@@ -8,12 +8,13 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from mineval import resources
-from mineval.artifacts import write_json
+from mineval.addons.batch import resources
+from mineval.core import sandbox_metrics
+from mineval.core.artifacts import write_json
 from mineval.preparation import Store
-from mineval.remote_coordinator import Coordinator
-from mineval.workflows import Workflows
-from mineval.sandbox import Container, DockerSandbox, SandboxError
+from mineval.addons.remote.remote_coordinator import Coordinator
+from mineval.addons.batch.workflows import Workflows
+from mineval.core.sandbox import Container, DockerSandbox, SandboxError
 
 
 class ResourceTests(unittest.TestCase):
@@ -89,7 +90,7 @@ class ResourceTests(unittest.TestCase):
             usage = resources.Usage()
             measurement = resources.Measurement(Mock(), usage)
             measurement.group = group
-            with patch.object(resources, 'pressure_sources', return_value={'host': {'cpu': 0, 'memory': 2}, 'container': {'cpu': 0, 'memory': 0}}):
+            with patch.object(sandbox_metrics, 'pressure_sources', return_value={'host': {'cpu': 0, 'memory': 2}, 'container': {'cpu': 0, 'memory': 0}}):
                 measurement.sample()
             metrics = usage.snapshot()[0]
             self.assertEqual(metrics['peak_memory_mb'], 2048)
@@ -119,7 +120,7 @@ class ResourceTests(unittest.TestCase):
             measurement.group = group
             def source(host, container):
                 return {'host': {'cpu': host, 'memory': 0}, 'container': {'cpu': container, 'memory': 0}}
-            with patch.object(resources, 'pressure_sources', side_effect=[source(10, 70), source(60, 1), source(5, 2)]):
+            with patch.object(sandbox_metrics, 'pressure_sources', side_effect=[source(10, 70), source(60, 1), source(5, 2)]):
                 measurement.sample(); measurement.sample(); measurement.sample()
             diag = measurement.metrics['pressure_diagnostics']
             self.assertEqual(diag['baseline']['host']['cpu'], 10)
@@ -137,7 +138,7 @@ class ResourceTests(unittest.TestCase):
         process = Mock(stdout=io.BytesIO(b''), stderr=io.BytesIO(b''))
         process.poll.return_value = 1
         process.wait.return_value = 1
-        with patch('mineval.sandbox.subprocess.Popen', return_value=process):
+        with patch('mineval.core.container_runtime.subprocess.Popen', return_value=process):
             result = container.exec(['test'], timeout=1)
         self.assertTrue(result['oom_killed'])
         self.assertEqual(result['resources']['oom_events'], 1)
@@ -146,7 +147,7 @@ class ResourceTests(unittest.TestCase):
         container = Mock(id='b' * 64)
         container.inspect.return_value = {'Pid': 123}
         measurement = resources.Measurement(container)
-        with patch.object(resources, 'cgroups', return_value=[Path('/sys/fs/cgroup/unrelated')]):
+        with patch.object(sandbox_metrics, 'cgroups', return_value=[Path('/sys/fs/cgroup/unrelated')]):
             measurement.start()
         measurement.close()
         self.assertFalse(measurement.metrics['available'])
@@ -392,13 +393,13 @@ class CapacityTests(unittest.TestCase):
                 if str(path) == '/proc/meminfo':
                     return 'MemAvailable: 8388608 kB\n'
                 return original(path, *args, **kwargs)
-            with patch.object(resources, 'cgroups', return_value=[child, parent]), \
+            with patch.object(sandbox_metrics, 'cgroups', return_value=[child, parent]), \
                  patch.object(Path, 'read_text', read):
                 self.assertEqual(resources.capacity(), (.05, 1024))
 
     def test_missing_host_memory_fails_closed(self):
         with patch.object(Path, 'read_text', side_effect=OSError), \
-             patch.object(resources, 'cgroups', return_value=[]):
+             patch.object(sandbox_metrics, 'cgroups', return_value=[]):
             self.assertEqual(resources.capacity()[1], 0)
 
     def test_telemetry_inspection_failure_does_not_fail_workload_start(self):

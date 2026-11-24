@@ -13,19 +13,19 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode, urlsplit
 
-from mineval import benchmark, evaluation
-from mineval.agents import CodexAdapter, FakeAdapter
-from mineval.artifacts import read_json, write_json
-from mineval.memory import Memory
+from mineval.historical import benchmark, evaluation
+from mineval.core.agents import CodexAdapter, FakeAdapter
+from mineval.core.artifacts import read_json, write_json
+from mineval.addons.ai_review.memory import Memory
 from mineval.preparation import Store
-from mineval.workflows import Workflows, matches, tasks
-from mineval.observation import Pages, make_server
-from mineval.performance import summaries
+from mineval.addons.batch.workflows import Workflows, matches, tasks
+from mineval.server import historical_view as Pages, make_historical_server as make_server
+from mineval.addons.batch.performance import summaries
 from test_agents import SimulatedDocker
 import test_evaluation as fixtures
 from test_evaluation import EvaluationRunner
 from test_preparation import HistoryFixture, FakeRunner, step
-from mineval.verification import diagnose
+from mineval.historical.verification import diagnose
 from review_helpers import ReportAgent, plan, report
 
 
@@ -108,7 +108,7 @@ class MemoryTests(unittest.TestCase):
 class WorkflowTests(HistoryFixture):
     def setUp(self):
         super().setUp()
-        catalog = patch('mineval.codex_models.Catalog.get', return_value={'models': [], 'error': None})
+        catalog = patch('mineval.core.codex_models.Catalog.get', return_value={'models': [], 'error': None})
         catalog.start(); self.addCleanup(catalog.stop)
         self.fixture_generated_cases = True
         self.fixture_evaluation_config = {'image': 'local:test', 'network': 'none', 'grading_type': 'isolated-argv-v1',
@@ -126,11 +126,12 @@ class WorkflowTests(HistoryFixture):
         flow = self.flow()
         selection = [{'task_id': 'example', 'version': self.version}]
         config = [{'model': 'sample', 'effort': 'high', 'adapter': 'fake'}]
+        flow.settings['model_memory'] = True
         first = flow.enqueue('benchmark', selection, config)
         again = flow.enqueue('benchmark', selection, config)
         self.assertEqual(again[0]['id'], first[0]['id'])
-        with patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()), \
-             patch('mineval.benchmark.run_agent', side_effect=lambda *a, **kw: self._run_agent(*a, **kw)):
+        with patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()), \
+             patch('mineval.historical.benchmark.run_agent', side_effect=lambda *a, **kw: self._run_agent(*a, **kw)):
             flow.work()
         job = flow.jobs()[0]
         self.assertEqual(job['state'], 'completed', job)
@@ -151,16 +152,16 @@ class WorkflowTests(HistoryFixture):
                      [{'model': 'candidate', 'effort': 'low', 'adapter': 'codex'}])
         job = flow.jobs()[0]
         flow.settings['evaluation_model'] = 'changed-after-queue'
-        with patch('mineval.workflows.benchmark.run', return_value={'output_available': True, 'status': 'completed'}), \
-             patch('mineval.workflows.evaluation.evaluate', return_value={'evaluation_id': 'fixture'}) as evaluate, \
-             patch('mineval.memory.record_evaluation'):
+        with patch('mineval.addons.batch.workflows.benchmark.run', return_value={'output_available': True, 'status': 'completed'}), \
+             patch('mineval.addons.batch.workflows.evaluation.evaluate', return_value={'evaluation_id': 'fixture'}) as evaluate, \
+             patch('mineval.addons.ai_review.memory.record_evaluation'):
             flow.benchmark(job['id'], 'example', job['payload'])
         self.assertNotIn('adapter', evaluate.call_args.kwargs)
         self.assertNotIn('command', evaluate.call_args.kwargs)
         self.assertEqual(job['payload']['evaluation_config'], self.fixture_evaluation_config)
 
     def _run_agent(self, *args, **kwargs):
-        from mineval.agents import run_agent
+        from mineval.core.agents import run_agent
         kwargs['sandbox'] = SimulatedDocker()
         return run_agent(*args, **kwargs)
 
@@ -168,16 +169,16 @@ class WorkflowTests(HistoryFixture):
         flow = self.flow()
         flow.enqueue('benchmark', [{'task_id': 'example', 'version': self.version}],
                      [{'model': 'sample', 'effort': 'high', 'adapter': 'fake'}])
-        with patch('mineval.benchmark.run_agent', side_effect=self._run_agent), \
-             patch('mineval.workflows.evaluation.evaluate', side_effect=ValueError('fixture failure')):
+        with patch('mineval.historical.benchmark.run_agent', side_effect=self._run_agent), \
+             patch('mineval.addons.batch.workflows.evaluation.evaluate', side_effect=ValueError('fixture failure')):
             flow.work()
         job = flow.jobs()[0]
         self.assertEqual(job['state'], 'failed')
         run_id = job['payload']['run_id']
         before = self.store.inspect_run('example', run_id)
         flow.retry(job['id'])
-        with patch('mineval.workflows.benchmark.run', side_effect=AssertionError('must reuse saved run')), \
-             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+        with patch('mineval.addons.batch.workflows.benchmark.run', side_effect=AssertionError('must reuse saved run')), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()):
             flow.work()
         self.assertEqual(flow.jobs()[0]['state'], 'completed', flow.jobs())
         self.assertEqual(self.store.inspect_run('example', run_id), before)
@@ -216,7 +217,12 @@ class WorkflowTests(HistoryFixture):
         self.assertEqual(report['models'][0]['overall']['evaluated'], 2)
         self.assertEqual(report['models'][0]['categories']['uncategorized']['evaluated'], 2)
         self.assertIsNone(report['models'][0]['category_average'])
-        memory = Memory(self.store).history('fake')
+        memory = Memory(self.store)
+        self.assertEqual(memory.history('fake'), [])
+        from mineval.addons.ai_review.memory import record_evaluation
+        for evaluation_id in ('first', 'second'):
+            record_evaluation(self.store, 'example', evaluation_id)
+        memory = memory.history('fake')
         self.assertEqual(len(memory), 2)
         self.assertEqual(memory[0]['sources'][0]['evaluation_id'], 'first')
         html = Pages(self.store).render('/models', {'model': ['fake']})
@@ -229,12 +235,12 @@ class WorkflowTests(HistoryFixture):
                      [{'model': 'sample', 'effort': 'high', 'adapter': 'fake'}])
         job = flow.jobs()[0]
         p = job['payload']
-        with patch('mineval.benchmark.seal', side_effect=SystemExit('host loss')):
+        with patch('mineval.historical.benchmark.seal', side_effect=SystemExit('host loss')):
             with self.assertRaises(SystemExit):
                 benchmark.run(self.store, 'example', self.version, run_id=p['run_id'],
                     adapter=FakeAdapter(model='sample', effort='high'), sandbox=SimulatedDocker())
         self.assertEqual(self.store.inspect_run('example', p['run_id'])['status'], 'running')
-        with patch('mineval.workflows.benchmark.run', side_effect=AssertionError('never rerun an uncertain identity')):
+        with patch('mineval.addons.batch.workflows.benchmark.run', side_effect=AssertionError('never rerun an uncertain identity')):
             flow.work()
         self.assertEqual(flow.jobs()[0]['state'], 'failed')
         recovered = self.store.inspect_run('example', p['run_id'])
@@ -243,7 +249,7 @@ class WorkflowTests(HistoryFixture):
         with self.assertRaisesRegex(ValueError, 'new benchmark attempt'):
             flow.retry(job['id'])
         flow.update(job['id'], state='queued')
-        with patch('mineval.workflows.evaluation.evaluate', side_effect=AssertionError('unusable output must not be evaluated')):
+        with patch('mineval.addons.batch.workflows.evaluation.evaluate', side_effect=AssertionError('unusable output must not be evaluated')):
             flow.work()
         self.assertIn('no usable saved output', flow.jobs()[0]['detail'])
         html = Pages(self.store, workflows=flow).render('/jobs', {})
@@ -252,19 +258,19 @@ class WorkflowTests(HistoryFixture):
         replacement = flow.jobs()[0]['payload']
         self.assertNotEqual(replacement['run_id'], p['run_id'])
         self.assertNotEqual(replacement['evaluation_id'], p['evaluation_id'])
-        with patch('mineval.benchmark.run_agent', side_effect=self._run_agent), \
-             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()):
+        with patch('mineval.historical.benchmark.run_agent', side_effect=self._run_agent), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()):
             flow.work()
         self.assertEqual(flow.jobs()[0]['state'], 'completed')
         self.assertEqual(self.store.inspect_run('example', p['run_id']), recovered)
 
 
     def test_benchmarks_keep_architecture_review_without_generating_ai_notes(self):
-        from mineval import architecture
-        from mineval.memory import evaluation_source
+        from mineval.addons.ai_review import architecture
+        from mineval.addons.ai_review.memory import evaluation_source
 
         flow = self.flow()
-        flow.settings.update({'qualitative_review': True, 'review_image': 'review:local'})
+        flow.settings.update({'qualitative_review': True, 'model_memory': True, 'review_image': 'review:local'})
         selection = [{'task_id': 'example', 'version': self.version}]
         configurations = [{'model': 'sample', 'effort': 'high', 'adapter': 'codex'}]
         task_root = self.store.task('example')
@@ -279,11 +285,11 @@ class WorkflowTests(HistoryFixture):
                                  'evidence': [{'candidate': label, 'path': 'app.py'} for label in labels]}],
                     'uncertainty': 'Similar structure'}
 
-        with patch('mineval.workflows.adapter', side_effect=lambda config: FakeAdapter(
+        with patch('mineval.addons.batch.workflows.adapter', side_effect=lambda config: FakeAdapter(
                  model=config['model'], effort=config['effort'], name='codex')), \
-             patch('mineval.benchmark.run_agent', side_effect=self._run_agent), \
-             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()), \
-             patch('mineval.architecture._infer', side_effect=infer) as architecture_infer:
+             patch('mineval.historical.benchmark.run_agent', side_effect=self._run_agent), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()), \
+             patch('mineval.addons.ai_review.architecture._infer', side_effect=infer) as architecture_infer:
             flow.enqueue('benchmark', selection, configurations)
             flow.work()
             first, = flow.jobs()
@@ -343,13 +349,13 @@ class WorkflowTests(HistoryFixture):
         definition = self.root / 'selection.json'
         write_json(definition, {'kind': 'benchmark', 'selections': [{'task_id': 'example', 'version': self.version}],
             'configurations': [{'model': 'cli-model', 'effort': 'high', 'adapter': 'fake'}]})
-        settings = self.root / 'settings.json'; write_json(settings, {'evaluation_config': 'evaluation.json'})
+        settings = self.root / 'settings.json'; write_json(settings, {'evaluation_config': 'evaluation.json', 'model_memory': True})
         args = ['--data', str(self.store.root), 'workflow', '--settings', str(settings)]
         with redirect_stdout(io.StringIO()) as output:
             self.assertEqual(main(args + ['submit', str(definition)]), 0)
         self.assertEqual(json.loads(output.getvalue())[0]['state'], 'queued')
-        with patch('mineval.benchmark.run_agent', side_effect=self._run_agent), \
-             patch('mineval.workflows.DockerSandbox', return_value=EvaluationRunner()), \
+        with patch('mineval.historical.benchmark.run_agent', side_effect=self._run_agent), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=EvaluationRunner()), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(main(args + ['work']), 0)
         with redirect_stdout(io.StringIO()) as output:
@@ -368,7 +374,7 @@ class WorkflowTests(HistoryFixture):
             result = original(*args, **kwargs)
             stopped.set()
             return result
-        with patch('mineval.workflows.benchmark.run', side_effect=run):
+        with patch('mineval.addons.batch.workflows.benchmark.run', side_effect=run):
             with self.assertRaises(KeyboardInterrupt):
                 flow.work(stop_event=stopped)
         job = flow.jobs()[0]
@@ -521,7 +527,7 @@ class WorkflowTests(HistoryFixture):
         self.assertIn('1 attempt ready to queue', review)
         self.assertIn('Fixed functional grading', review)
         self.assertEqual(flow.jobs(), [])  # Review does not enqueue or spend inference.
-        with patch('mineval.benchmark.run_agent', side_effect=self._run_agent):
+        with patch('mineval.historical.benchmark.run_agent', side_effect=self._run_agent):
             benchmark.run(self.store, 'example', self.version, run_id='prior', adapter=FakeAdapter(model='catalog-model', effort='high'))
         selection['configuration'] = [json.dumps({'model':'catalog-model', 'effort':'high', 'adapter':'fake'})]
         skipped = pages.render('/benchmarks/new', selection)
@@ -549,16 +555,16 @@ class WorkflowTests(HistoryFixture):
 
 class PreparationWorkflowTests(HistoryFixture):
     def test_full_pipeline_uses_separate_sessions_and_only_freezes_approval(self):
-        from mineval import service, review
+        from mineval.historical import service, review
         self.store.register(self.candidate | {'task_id': 'rejected-task'})
         write_json(self.store.draft('rejected-task') / 'control/verify.json', read_json(self.config_path))
         diagnose(self.store, 'rejected-task', sandbox=FakeRunner([step()]))
         flow = Workflows(self.store, {'preparation_model': 'prep-selected', 'preparation_effort': 'ultra'})
         flow.enqueue('prepare', [{'task_id': 'example'}, {'task_id': 'rejected-task'}])
         flow.settings['preparation_model'] = 'changed-after-queue'
-        from mineval.cleanup import save_attempt
-        from mineval.artifacts import copy_tree, inventory
-        from mineval.sandbox import RunResult
+        from mineval.historical.cleanup import save_attempt
+        from mineval.core.artifacts import copy_tree, inventory
+        from mineval.core.sandbox import RunResult
         def cleanup(store, tid, **kwargs):
             self.assertEqual(kwargs['adapter'].model, 'prep-selected')
             self.assertEqual(kwargs['adapter'].effort, 'ultra')
@@ -605,10 +611,10 @@ class PreparationWorkflowTests(HistoryFixture):
                 kwargs['sandbox'] = ReportAgent('review.json', report(self.review) |
                     ({'verdict': 'reject', 'reasons': ['Fixture evidence does not establish the task']} if tid == 'rejected-task' else {}))
             return original_session(store, tid, **kwargs)
-        with patch('mineval.workflows.service.session', side_effect=cleanup), \
-             patch('mineval.workflows.review.session', side_effect=private), \
-             patch('mineval.workflows.review.validate', side_effect=validate_fixture), \
-             patch('mineval.workflows.DockerSandbox', return_value=FakeRunner([step()])):
+        with patch('mineval.addons.batch.workflows.service.session', side_effect=cleanup), \
+             patch('mineval.addons.batch.workflows.review.session', side_effect=private), \
+             patch('mineval.addons.batch.workflows.review.validate', side_effect=validate_fixture), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=FakeRunner([step()])):
             example_job = next(j['id'] for j in flow.jobs() if j['task'] == 'example')
             flow.work(job_id=example_job)
             self.assertEqual(reference_attempts, ['error'])
@@ -640,11 +646,11 @@ class PreparationWorkflowTests(HistoryFixture):
             self.assertEqual(kwargs['stage'], 'review')
             kwargs['sandbox'] = ReportAgent('review.json', report(self.review))
             return original_session(store, tid, **kwargs)
-        with patch('mineval.workflows.service.session', side_effect=AssertionError('cleanup repeated')), \
-             patch('mineval.workflows.verification.diagnose', side_effect=AssertionError('diagnostics repeated')), \
-             patch('mineval.workflows.review.validate', side_effect=AssertionError('validation repeated')), \
-             patch('mineval.workflows.review.session', side_effect=approved), \
-             patch('mineval.workflows.DockerSandbox', return_value=FakeRunner([step()])):
+        with patch('mineval.addons.batch.workflows.service.session', side_effect=AssertionError('cleanup repeated')), \
+             patch('mineval.addons.batch.workflows.verification.diagnose', side_effect=AssertionError('diagnostics repeated')), \
+             patch('mineval.addons.batch.workflows.review.validate', side_effect=AssertionError('validation repeated')), \
+             patch('mineval.addons.batch.workflows.review.session', side_effect=approved), \
+             patch('mineval.addons.batch.workflows.DockerSandbox', return_value=FakeRunner([step()])):
             flow.work()
         self.assertEqual({j['state'] for j in flow.jobs()}, {'completed'})
 
@@ -686,9 +692,9 @@ class CLIConcurrencyTests(unittest.TestCase):
 
 def setUpModule():
     global resource_patch, pressure_patch
-    resource_patch = patch('mineval.resources.capacity', return_value=(64, 131072))
+    resource_patch = patch('mineval.addons.batch.resources.capacity', return_value=(64, 131072))
     resource_patch.start()
-    pressure_patch = patch('mineval.resources.pressure', return_value={})
+    pressure_patch = patch('mineval.addons.batch.resources.pressure', return_value={})
     pressure_patch.start()
 
 
